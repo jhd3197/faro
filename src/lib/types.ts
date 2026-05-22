@@ -97,6 +97,27 @@ export interface SyncPlan {
   totalBytes: number;
 }
 
+// ---- Edit-in-place ----
+
+export interface EditStartedEvent {
+  editId: string;
+  sessionId: string;
+  remotePath: string;
+  localTempPath: string;
+}
+
+export interface EditSavedEvent {
+  editId: string;
+  remotePath: string;
+  bytes: number;
+}
+
+export interface EditErrorEvent {
+  editId: string;
+  remotePath: string;
+  message: string;
+}
+
 export type S3Provider = "aws" | "r2" | "b2";
 
 export interface S3ProviderPreset {

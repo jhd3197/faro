@@ -4,6 +4,9 @@ import type {
   ConnectionProfile,
   DirEntry,
   Capabilities,
+  EditErrorEvent,
+  EditSavedEvent,
+  EditStartedEvent,
   HostDecision,
   HostPromptEvent,
   ImporterPaths,
@@ -155,7 +158,24 @@ export const ipc = {
 
   syncExecute: (sessionId: SessionId, plan: SyncPlan) =>
     invoke<string[]>("sync_execute", { sessionId, plan }),
+
+  startEdit: (sessionId: SessionId, remotePath: string) =>
+    invoke<EditStartedEvent>("start_edit", { sessionId, remotePath }),
+
+  stopEdit: (editId: string) => invoke<void>("stop_edit", { editId }),
 };
+
+export async function onEditSaved(
+  cb: (event: EditSavedEvent) => void
+): Promise<UnlistenFn> {
+  return listen<EditSavedEvent>("editor://saved", (e) => cb(e.payload));
+}
+
+export async function onEditError(
+  cb: (event: EditErrorEvent) => void
+): Promise<UnlistenFn> {
+  return listen<EditErrorEvent>("editor://error", (e) => cb(e.payload));
+}
 
 export async function onHostPrompt(
   cb: (event: HostPromptEvent) => void

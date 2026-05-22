@@ -6,6 +6,7 @@ use tauri::Manager;
 // secrets directly — credentials live in profiles::ConnectionProfile, which
 // the CLI deliberately redacts in `profiles show`.
 mod commands;
+mod editor;
 pub mod importers;
 mod known_hosts;
 pub mod profiles;
@@ -20,6 +21,7 @@ pub struct AppState {
     pub ptys: Arc<terminal::PtyManager>,
     pub profiles: Arc<profiles::ProfileStore>,
     pub transfers: Arc<transfer::TransferManager>,
+    pub editors: Arc<editor::EditManager>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -43,6 +45,7 @@ pub fn run() {
                 ptys: Arc::new(terminal::PtyManager::new()),
                 profiles: profile_store,
                 transfers: Arc::new(transfer::TransferManager::new()),
+                editors: Arc::new(editor::EditManager::new()),
             };
             app.manage(state);
             Ok(())
@@ -61,6 +64,8 @@ pub fn run() {
             commands::save_imported_profiles,
             commands::sync_plan,
             commands::sync_execute,
+            commands::start_edit,
+            commands::stop_edit,
             commands::list_directory,
             commands::capabilities,
             commands::open_terminal,

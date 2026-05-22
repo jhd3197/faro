@@ -17,7 +17,10 @@ import {
   Moon,
   Wifi,
   WifiOff,
+  Edit3,
+  X,
 } from "lucide-react";
+import { useEditor } from "./stores/editorStore";
 import { cn } from "./lib/cn";
 
 export default function App() {
@@ -37,6 +40,7 @@ export default function App() {
     ).length
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [editsMenuOpen, setEditsMenuOpen] = useState(false);
 
   return (
     <div className="flex h-screen w-screen flex-col">
@@ -62,6 +66,9 @@ export default function App() {
             transferPanelOpen={transferPanelOpen}
             onToggleTransfers={togglePanel}
             activeTransfers={activeTransfers}
+            editsMenuOpen={editsMenuOpen}
+            onToggleEditsMenu={() => setEditsMenuOpen((v) => !v)}
+            onCloseEditsMenu={() => setEditsMenuOpen(false)}
           />
         </div>
       </div>
@@ -80,7 +87,7 @@ function TitleBar({ onOpenSettings }: { onOpenSettings: () => void }) {
         servers · storage · sessions
       </span>
       <span className="rounded-full bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-accent">
-        v1.1
+        v1.2
       </span>
       <div className="flex-1" />
       <button
@@ -138,6 +145,9 @@ function StatusBar({
   transferPanelOpen,
   onToggleTransfers,
   activeTransfers,
+  editsMenuOpen,
+  onToggleEditsMenu,
+  onCloseEditsMenu,
 }: {
   terminalOpen: boolean;
   onToggleTerminal: () => void;
@@ -145,12 +155,18 @@ function StatusBar({
   transferPanelOpen: boolean;
   onToggleTransfers: () => void;
   activeTransfers: number;
+  editsMenuOpen: boolean;
+  onToggleEditsMenu: () => void;
+  onCloseEditsMenu: () => void;
 }) {
   const activeSessionId = useConnections((s) => s.activeSessionId);
   const activeProfileId = useConnections((s) => s.activeProfileId);
   const profiles = useConnections((s) => s.profiles);
   const profile = profiles.find((p) => p.id === activeProfileId);
   const connected = !!activeSessionId && !!profile;
+  const edits = useEditor((s) => s.edits);
+  const stopEditing = useEditor((s) => s.stopEditing);
+  const editList = Object.values(edits);
 
   return (
     <div className="flex h-7 shrink-0 items-center gap-2 border-t border-border bg-bg-panel px-2 text-[11px]">
@@ -181,6 +197,65 @@ function StatusBar({
         </div>
       )}
       <div className="flex-1" />
+      {editList.length > 0 && (
+        <div className="relative">
+          <PillButton
+            active={editsMenuOpen}
+            onClick={onToggleEditsMenu}
+            icon={<Edit3 size={11} />}
+            badge={editList.length}
+          >
+            Editing
+          </PillButton>
+          {editsMenuOpen && (
+            <div
+              className="anim-modal absolute bottom-7 right-0 z-30 w-80 overflow-hidden rounded-md border border-border bg-bg-panel shadow-elev-3"
+              onMouseLeave={onCloseEditsMenu}
+            >
+              <div className="border-b border-border bg-bg-subtle px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+                Live edits — saves upload automatically
+              </div>
+              {editList.map((e) => {
+                const since = e.lastSavedAt
+                  ? `${Math.max(1, Math.round((Date.now() - e.lastSavedAt) / 1000))}s ago`
+                  : "no saves yet";
+                return (
+                  <div
+                    key={e.editId}
+                    className="flex items-start gap-2 border-b border-border-subtle px-3 py-2 last:border-0"
+                  >
+                    <Edit3
+                      size={11}
+                      className="mt-0.5 shrink-0 text-accent"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-mono text-[11px]">
+                        {e.remotePath}
+                      </div>
+                      {e.lastError ? (
+                        <div className="text-[10px] text-danger">
+                          {e.lastError}
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-text-dim">
+                          saved {since}
+                        </div>
+                      )}
+                    </div>
+                    <button
+                      onClick={() => stopEditing(e.editId)}
+                      className="rounded p-0.5 text-text-muted hover:bg-bg-hover hover:text-danger"
+                      title="Stop editing (closes the watcher)"
+                    >
+                      <X size={11} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
       <PillButton
         active={terminalOpen}
         onClick={onToggleTerminal}

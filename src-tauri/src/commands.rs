@@ -514,3 +514,32 @@ fn parent_of(p: &str) -> String {
         None => ".".to_string(),
     }
 }
+
+// ---------- Edit-in-place ----------
+
+#[tauri::command]
+pub async fn start_edit(
+    session_id: String,
+    remote_path: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::editor::EditStartedEvent, String> {
+    let session = state
+        .sessions
+        .get(&session_id)
+        .await
+        .ok_or_else(|| format!("session {session_id} not found"))?;
+    state
+        .editors
+        .start(session, session_id, remote_path, app)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn stop_edit(
+    edit_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.editors.stop(&edit_id).await.map_err(err)
+}

@@ -12,11 +12,13 @@ import {
   Copy,
   ShieldCheck,
   ServerOff,
+  ExternalLink,
 } from "lucide-react";
 import { ipc } from "@/lib/ipc";
 import type { Capabilities, DirEntry, SessionId } from "@/lib/types";
 import { LOCAL_SESSION } from "@/lib/types";
 import { useSettings } from "@/stores/settingsStore";
+import { useEditor } from "@/stores/editorStore";
 import { cn } from "@/lib/cn";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { PromptModal } from "./PromptModal";
@@ -343,6 +345,18 @@ export function FilePane({
         label: "Change permissions (chmod)…",
         icon: <ShieldCheck size={12} />,
         onClick: () => setModal({ type: "chmod", entry: single }),
+      });
+    }
+    if (single?.kind === "file" && sessionId && sessionId !== LOCAL_SESSION) {
+      items.push({
+        label: "Edit in default app…",
+        icon: <ExternalLink size={12} />,
+        onClick: () => {
+          useEditor
+            .getState()
+            .startEditing(sessionId, single.path)
+            .catch((e) => setError(String(e)));
+        },
       });
     }
     setMenu({ x: e.clientX, y: e.clientY, items });
