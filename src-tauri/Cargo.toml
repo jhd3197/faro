@@ -1,6 +1,6 @@
 [package]
 name = "faro"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 description = "Faro — a modern FTP, SFTP, SSH, and S3 client for developers."
 authors = ["Juan Denis"]
@@ -36,6 +36,9 @@ suppaftp = { version = "6", features = ["native-tls"] }
 object_store = { version = "0.11", features = ["aws", "azure"] }
 bytes = "1"
 
+# Importers — quick-xml for FileZilla's sitemanager.xml.
+quick-xml = "0.36"
+
 # Misc
 anyhow = "1"
 thiserror = "1"
@@ -45,6 +48,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5"
 sha2 = "0.10"
 base64 = "0.22"
+
+# Windows-only: registry access for the PuTTY sessions importer.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
 
 [features]
 default = ["custom-protocol"]

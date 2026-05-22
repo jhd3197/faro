@@ -2,6 +2,7 @@ use std::sync::Arc;
 use tauri::Manager;
 
 mod commands;
+mod importers;
 mod known_hosts;
 mod profiles;
 mod remotefs;
@@ -48,6 +49,11 @@ pub fn run() {
             commands::connect,
             commands::disconnect,
             commands::respond_to_host_prompt,
+            commands::importer_default_paths,
+            commands::import_openssh,
+            commands::import_filezilla,
+            commands::import_putty,
+            commands::save_imported_profiles,
             commands::list_directory,
             commands::capabilities,
             commands::open_terminal,

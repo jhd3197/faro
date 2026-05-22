@@ -6,6 +6,8 @@ import type {
   Capabilities,
   HostDecision,
   HostPromptEvent,
+  ImporterPaths,
+  ProfilePreview,
   SessionId,
   TerminalDataEvent,
   TerminalExitEvent,
@@ -119,6 +121,19 @@ export const ipc = {
 
   respondToHostPrompt: (requestId: string, decision: HostDecision) =>
     invoke<void>("respond_to_host_prompt", { requestId, decision }),
+
+  importerDefaultPaths: () => invoke<ImporterPaths>("importer_default_paths"),
+
+  importOpenssh: (path?: string) =>
+    invoke<ProfilePreview[]>("import_openssh", { path }),
+
+  importFilezilla: (path?: string) =>
+    invoke<ProfilePreview[]>("import_filezilla", { path }),
+
+  importPutty: () => invoke<ProfilePreview[]>("import_putty"),
+
+  saveImportedProfiles: (previews: ProfilePreview[]) =>
+    invoke<number>("save_imported_profiles", { previews }),
 };
 
 export async function onHostPrompt(

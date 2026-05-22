@@ -8,10 +8,12 @@ import {
   Pencil,
   Cloud,
   Server,
+  Download,
 } from "lucide-react";
 import { useConnections } from "@/stores/connectionsStore";
 import { useLayout } from "@/stores/layoutStore";
 import { ProfileEditor } from "./ProfileEditor";
+import { ImportDialog } from "./ImportDialog";
 import type { ConnectionProfile } from "@/lib/types";
 import { cn } from "@/lib/cn";
 
@@ -32,6 +34,7 @@ export function ConnectionManager() {
   const [editing, setEditing] = useState<ConnectionProfile | "new" | null>(
     null
   );
+  const [importing, setImporting] = useState(false);
 
   useEffect(() => {
     loadProfiles();
@@ -55,6 +58,13 @@ export function ConnectionManager() {
           Connections
         </span>
         <div className="flex-1" />
+        <button
+          className="rounded-md p-1 text-text-muted hover:bg-bg-hover hover:text-text"
+          onClick={() => setImporting(true)}
+          title="Import from PuTTY, OpenSSH config, FileZilla…"
+        >
+          <Download size={13} />
+        </button>
         <button
           className="rounded-md p-1 text-text-muted hover:bg-bg-hover hover:text-text"
           onClick={() => setEditing("new")}
@@ -122,6 +132,8 @@ export function ConnectionManager() {
           onClose={() => setEditing(null)}
         />
       )}
+
+      {importing && <ImportDialog onClose={() => setImporting(false)} />}
     </div>
   );
 }

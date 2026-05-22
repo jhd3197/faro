@@ -11,29 +11,31 @@ terminals, and work with S3-compatible storage — all in one window.
 
 ## Status
 
-**v0.6 dev.** New in v0.6: Azure Blob Storage backend sharing the same
-`ObjectFs` implementation with S3/R2/B2 (one `Arc<dyn ObjectStore>`, two
-builders). Internal refactor: `S3Session` and `S3Fs` became `ObjectSession`
-and `ObjectFs` since the runtime surface is identical across cloud object
-stores.
+**v0.7 dev.** New in v0.7: connection importers for OpenSSH config
+(`~/.ssh/config`), FileZilla (`sitemanager.xml`), and PuTTY (Windows
+registry / `~/.putty/sessions/`). One tabbed import dialog auto-detects
+default paths, lists every connection it found, lets the user pick which
+to bring in, and saves them to the profile store. Identity files surface as
+private-key auth pointing at the original path.
 
-From v0.5: S3 / R2 / B2 backend via object_store 0.11. Provider preset
-buttons; capability-aware UI hides mkdir/chmod for backends that don't
-support them; multipart upload for objects > 16 MB.
+From v0.6: Azure Blob via `ObjectFs` (shared with S3/R2/B2 — different
+builder, same `Arc<dyn ObjectStore>`).
 
-From v0.4: FTP and FTPS backends sharing the dual-pane browser and transfer
-engine, Pageant pipe support (PuTTY 0.78+), per-protocol port defaults.
+From v0.5: S3 / R2 / B2 via object_store 0.11. Provider preset buttons,
+capability-aware UI, multipart upload above 16 MB.
 
-From v0.3: known-hosts verification with an interactive fingerprint prompt,
-ssh-agent auth (unix `$SSH_AUTH_SOCK` and OpenSSH-for-Windows named pipe,
-plus Pageant), multi-tab terminals.
+From v0.4: FTP and FTPS backends, Pageant pipe support, per-protocol port
+defaults.
+
+From v0.3: known-hosts verification with interactive fingerprint prompt,
+ssh-agent auth (unix `$SSH_AUTH_SOCK`, OpenSSH-for-Windows named pipe,
+Pageant pipe), multi-tab terminals.
 
 From v0.2: connection profiles, SFTP browser, integrated SSH terminal,
 drag-and-drop transfers, recursive directory transfers, multi-select,
 right-click file ops, settings.
 
-Roadmap: profile importers (PuTTY `.ppk`, OpenSSH `~/.ssh/config`, WinSCP,
-FileZilla), then v1.0 polish.
+Roadmap: v1.0 polish — sync mode, code signing, auto-updater, landing.
 
 ## Architecture
 
@@ -133,6 +135,6 @@ src-tauri/src/
 - **v0.3** — known-hosts verification, ssh-agent (unix + OpenSSH-for-Windows pipe), multi-tab terminals
 - **v0.4** — FTP / FTPS backends, Pageant pipe support
 - **v0.5** — S3 / R2 / B2 (one backend, three endpoint configs)
-- **v0.6** — Azure Blob, ObjectSession refactor (this)
-- **v0.7** — Profile importers (PuTTY, OpenSSH config, WinSCP, FileZilla)
+- **v0.6** — Azure Blob, ObjectSession refactor
+- **v0.7** — Profile importers (OpenSSH config, FileZilla, PuTTY) (this)
 - **v1.0** — Polish, sync mode, code signing, auto-updater, landing page

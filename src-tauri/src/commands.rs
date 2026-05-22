@@ -352,3 +352,63 @@ pub async fn chmod_path(
     let fs = fs_for(&session_id, &state).await?;
     fs.chmod(&path, mode).await.map_err(err)
 }
+
+// ---------- Importers (OpenSSH config, FileZilla, PuTTY) ----------
+
+use crate::importers::{self, ProfilePreview};
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImporterPaths {
+    pub openssh: Option<String>,
+    pub filezilla: Option<String>,
+    pub putty: Option<String>,
+}
+
+#[tauri::command]
+pub fn importer_default_paths() -> ImporterPaths {
+    ImporterPaths {
+        openssh: importers::openssh::default_path().map(|p| p.display().to_string()),
+        filezilla: importers::filezilla::default_path().map(|p| p.display().to_string()),
+        putty: importers::putty::default_path().map(|p| p.display().to_string()),
+    }
+}
+
+#[tauri::command]
+pub fn import_openssh(path: Option<String>) -> Result<Vec<ProfilePreview>, String> {
+    let path = path
+        .map(std::path::PathBuf::from)
+        .or_else(importers::openssh::default_path)
+        .ok_or_else(|| "could not determine ~/.ssh/config location".to_string())?;
+    importers::openssh::parse_file(&path).map_err(err)
+}
+
+#[tauri::command]
+pub fn import_filezilla(path: Option<String>) -> Result<Vec<ProfilePreview>, String> {
+    let path = path
+        .map(std::path::PathBuf::from)
+        .or_else(importers::filezilla::default_path)
+        .ok_or_else(|| "could not determine FileZilla sitemanager.xml location".to_string())?;
+    importers::filezilla::parse_file(&path).map_err(err)
+}
+
+#[tauri::command]
+pub fn import_putty() -> Result<Vec<ProfilePreview>, String> {
+    importers::putty::parse_default().map_err(err)
+}
+
+#[tauri::command]
+pub async fn save_imported_profiles(
+    previews: Vec<ProfilePreview>,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    let n = previews.len();
+    for preview in previews {
+        state
+            .profiles
+            .upsert(preview.into_profile())
+            .await
+            .map_err(err)?;
+    }
+    Ok(n)
+}

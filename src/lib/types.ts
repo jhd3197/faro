@@ -45,6 +45,27 @@ export function isObjectProtocol(p: Protocol): boolean {
   return p === "s3" || p === "azure";
 }
 
+// ---- Importers ----
+
+export interface ProfilePreview {
+  previewId: string;
+  name: string;
+  protocol: Protocol;
+  host: string;
+  port: number;
+  username: string;
+  identityFile?: string;
+  note?: string;
+}
+
+export type ImporterKind = "openssh" | "filezilla" | "putty";
+
+export interface ImporterPaths {
+  openssh: string | null;
+  filezilla: string | null;
+  putty: string | null;
+}
+
 export type S3Provider = "aws" | "r2" | "b2";
 
 export interface S3ProviderPreset {
