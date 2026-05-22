@@ -58,7 +58,14 @@ impl ProfileStore {
             .path()
             .app_data_dir()
             .context("resolving app_data_dir")?;
-        std::fs::create_dir_all(&dir).ok();
+        Self::from_dir(&dir)
+    }
+
+    /// Load (or initialise) the profile store from a known directory. Used by
+    /// the CLI binary, which doesn't have a Tauri AppHandle. Resolves to the
+    /// same on-disk path the GUI uses — see `default_data_dir`.
+    pub fn from_dir(dir: &std::path::Path) -> Result<Self> {
+        std::fs::create_dir_all(dir).ok();
         let path = dir.join("profiles.json");
         let profiles: Vec<ConnectionProfile> = if path.exists() {
             let bytes = std::fs::read(&path)
@@ -68,7 +75,7 @@ impl ProfileStore {
             Vec::new()
         };
         Ok(Self {
-            path,
+            path: path.clone(),
             inner: Arc::new(Mutex::new(profiles)),
         })
     }

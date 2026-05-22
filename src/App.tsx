@@ -80,7 +80,7 @@ function TitleBar({ onOpenSettings }: { onOpenSettings: () => void }) {
         servers · storage · sessions
       </span>
       <span className="rounded-full bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-accent">
-        v1.0
+        v1.1
       </span>
       <div className="flex-1" />
       <button

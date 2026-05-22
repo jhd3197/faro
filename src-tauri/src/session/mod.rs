@@ -84,11 +84,69 @@ impl HostPromptRegistry {
     }
 }
 
+/// Decides what to do with a server key on connect. Implementations: the
+/// GUI's `TauriHostKeyVerifier` (emits a Tauri event + awaits the user's
+/// click via oneshot), and the CLI's `CliHostKeyVerifier` (prompts on
+/// stdin/stdout). A no-op `AutoTrustVerifier` exists for scripted scenarios
+/// where the operator has explicitly opted out of prompting.
+#[async_trait]
+pub trait HostKeyVerifier: Send + Sync {
+    async fn decide(
+        &self,
+        host: &str,
+        port: u16,
+        key_type: &str,
+        fingerprint: &str,
+        stored_fingerprint: Option<&str>,
+        kind: HostPromptKind,
+    ) -> Result<HostDecision, russh::Error>;
+}
+
+/// GUI verifier. Emits `host://prompt` and waits for the
+/// `respond_to_host_prompt` command to fire a oneshot.
+pub struct TauriHostKeyVerifier {
+    app: AppHandle,
+    prompts: Arc<HostPromptRegistry>,
+}
+
+impl TauriHostKeyVerifier {
+    pub fn new(app: AppHandle, prompts: Arc<HostPromptRegistry>) -> Self {
+        Self { app, prompts }
+    }
+}
+
+#[async_trait]
+impl HostKeyVerifier for TauriHostKeyVerifier {
+    async fn decide(
+        &self,
+        host: &str,
+        port: u16,
+        key_type: &str,
+        fingerprint: &str,
+        stored_fingerprint: Option<&str>,
+        kind: HostPromptKind,
+    ) -> Result<HostDecision, russh::Error> {
+        let (request_id, rx) = self.prompts.register().await;
+        let event = HostPromptEvent {
+            request_id,
+            host: host.to_string(),
+            port,
+            key_type: key_type.to_string(),
+            fingerprint: fingerprint.to_string(),
+            stored_fingerprint: stored_fingerprint.map(|s| s.to_string()),
+            kind,
+        };
+        if self.app.emit("host://prompt", event).is_err() {
+            return Err(russh::Error::HUP);
+        }
+        rx.await.map_err(|_| russh::Error::HUP)
+    }
+}
+
 pub struct ClientHandler {
     host: String,
     port: u16,
-    app: AppHandle,
-    prompts: Arc<HostPromptRegistry>,
+    verifier: Arc<dyn HostKeyVerifier>,
 }
 
 #[async_trait]
@@ -103,60 +161,30 @@ impl client::Handler for ClientHandler {
         let fingerprint = known_hosts::fingerprint(server_public_key);
         let key_type = server_public_key.name().to_string();
 
-        match status {
-            known_hosts::HostKeyStatus::Match => Ok(true),
-            known_hosts::HostKeyStatus::Unknown => {
-                self.prompt(
-                    HostPromptKind::Unknown,
-                    fingerprint,
-                    None,
-                    key_type,
-                    server_public_key,
-                )
-                .await
-            }
+        let (kind, stored) = match status {
+            known_hosts::HostKeyStatus::Match => return Ok(true),
+            known_hosts::HostKeyStatus::Unknown => (HostPromptKind::Unknown, None),
             known_hosts::HostKeyStatus::Mismatch { stored_fingerprint } => {
-                self.prompt(
-                    HostPromptKind::Mismatch,
-                    fingerprint,
-                    Some(stored_fingerprint),
-                    key_type,
-                    server_public_key,
-                )
-                .await
+                (HostPromptKind::Mismatch, Some(stored_fingerprint))
             }
-        }
-    }
-}
-
-impl ClientHandler {
-    async fn prompt(
-        &self,
-        kind: HostPromptKind,
-        fingerprint: String,
-        stored_fingerprint: Option<String>,
-        key_type: String,
-        key: &key::PublicKey,
-    ) -> Result<bool, russh::Error> {
-        let (request_id, rx) = self.prompts.register().await;
-        let event = HostPromptEvent {
-            request_id,
-            host: self.host.clone(),
-            port: self.port,
-            key_type,
-            fingerprint,
-            stored_fingerprint,
-            kind,
         };
-        if self.app.emit("host://prompt", event.clone()).is_err() {
-            return Err(russh::Error::HUP);
-        }
 
-        let decision = rx.await.map_err(|_| russh::Error::HUP)?;
+        let decision = self
+            .verifier
+            .decide(
+                &self.host,
+                self.port,
+                &key_type,
+                &fingerprint,
+                stored.as_deref(),
+                kind,
+            )
+            .await?;
+
         match decision {
             HostDecision::Accept => Ok(true),
             HostDecision::Trust => {
-                if let Err(e) = known_hosts::append(&self.host, self.port, key) {
+                if let Err(e) = known_hosts::append(&self.host, self.port, server_public_key) {
                     tracing::warn!(?e, "failed to persist host key");
                 }
                 Ok(true)
@@ -178,6 +206,19 @@ pub struct SshSession {
 }
 
 impl SshSession {
+    /// Wrap an already-opened russh client handle and a profile into a
+    /// freshly-uuid'd session. Used by `SessionManager` and the CLI binary
+    /// (where there's no manager — the CLI builds one session per command
+    /// and drops it on exit).
+    pub fn new(profile: ConnectionProfile, handle: client::Handle<ClientHandler>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            profile,
+            handle: Mutex::new(handle),
+            sftp: OnceCell::new(),
+        }
+    }
+
     /// Lazily open the SFTP subsystem on first use; the channel sticks around
     /// for the life of the session.
     pub async fn ensure_sftp(&self) -> Result<&Mutex<SftpSession>> {
@@ -192,6 +233,31 @@ impl SshSession {
                 Ok::<Mutex<SftpSession>, anyhow::Error>(Mutex::new(sftp))
             })
             .await
+    }
+}
+
+/// Open a Session for any supported protocol given a profile and a verifier.
+/// Used by the CLI and (transitively) the GUI's `SessionManager`. Doesn't
+/// register the session anywhere — the caller owns its lifetime.
+pub async fn open_session(
+    profile: &ConnectionProfile,
+    verifier: Arc<dyn HostKeyVerifier>,
+) -> Result<Session> {
+    match profile.protocol.as_str() {
+        "sftp" | "ssh" | "" => {
+            let handle = ssh_connect(profile, verifier).await?;
+            let ssh = Arc::new(SshSession::new(profile.clone(), handle));
+            Ok(Session::Ssh(ssh))
+        }
+        "ftp" | "ftps" => {
+            let ftp = ftp_connect(profile).await?;
+            Ok(Session::Ftp(Arc::new(ftp)))
+        }
+        "s3" | "azure" => {
+            let obj = object_connect(profile).await?;
+            Ok(Session::Object(Arc::new(obj)))
+        }
+        other => Err(anyhow!("unsupported protocol: {other}")),
     }
 }
 
@@ -285,8 +351,7 @@ async fn authenticate_with_agent(
 
 pub async fn ssh_connect(
     profile: &ConnectionProfile,
-    app: AppHandle,
-    prompts: Arc<HostPromptRegistry>,
+    verifier: Arc<dyn HostKeyVerifier>,
 ) -> Result<client::Handle<ClientHandler>> {
     let config = Arc::new(client::Config {
         inactivity_timeout: Some(std::time::Duration::from_secs(60 * 30)),
@@ -296,8 +361,7 @@ pub async fn ssh_connect(
     let handler = ClientHandler {
         host: profile.host.clone(),
         port: profile.port,
-        app,
-        prompts,
+        verifier,
     };
     let mut session = client::connect(config, addr, handler)
         .await
@@ -374,9 +438,25 @@ impl SessionManager {
         profile: ConnectionProfile,
         app: AppHandle,
     ) -> Result<String> {
+        let verifier: Arc<dyn HostKeyVerifier> =
+            Arc::new(TauriHostKeyVerifier::new(app.clone(), self.prompts.clone()));
+        self.connect_with_verifier(profile, app, verifier).await
+    }
+
+    /// Used by the CLI binary, which plugs in its own stdin-based verifier
+    /// instead of the Tauri event one. The `app` parameter is still required
+    /// because the FTP/S3 connect paths don't use it, but the SSH path
+    /// embeds the AppHandle elsewhere via `_ = app`.
+    pub async fn connect_with_verifier(
+        &self,
+        profile: ConnectionProfile,
+        app: AppHandle,
+        verifier: Arc<dyn HostKeyVerifier>,
+    ) -> Result<String> {
+        let _ = app;
         let session = match profile.protocol.as_str() {
             "sftp" | "ssh" | "" => {
-                let handle = ssh_connect(&profile, app, self.prompts.clone()).await?;
+                let handle = ssh_connect(&profile, verifier).await?;
                 let id = Uuid::new_v4().to_string();
                 let ssh = Arc::new(SshSession {
                     id: id.clone(),

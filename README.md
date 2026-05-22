@@ -11,7 +11,13 @@ terminals, and work with S3-compatible storage — all in one window.
 
 ## Status
 
-**v1.0.** One-way directory sync (Local→Remote / Remote→Local; Additive or
+**v1.1.** Adds a `faro-cli` binary that scripts every backend the GUI
+speaks. Reuses the same on-disk profile store, the same `RemoteFs` trait,
+the same `sync::plan` logic. Subcommands: `ls / cp / mv / rm / mkdir / sync
+/ profiles`. Path syntax: `profile:/path` for remote, bare paths (incl.
+Windows drive letters) for local.
+
+From v1.0: One-way directory sync (Local→Remote / Remote→Local; Additive or
 Mirror). The planner walks both trees via the `RemoteFs` trait so it works
 across every backend; the executor reuses the existing transfer queue for
 progress. A "Sync" button rides the splitter between the two file panes
@@ -67,6 +73,26 @@ npm run tauri dev
 ```
 
 First build is slow (Rust crates). Subsequent ~30s.
+
+## CLI
+
+The same crate ships a `faro-cli` binary that uses your saved GUI profiles:
+
+```bash
+cd src-tauri
+cargo build --bin faro-cli --release
+# binary lands at src-tauri/target/release/faro-cli
+
+faro-cli profiles list
+faro-cli ls prod:/var/log
+faro-cli cp ./report.pdf prod:/var/www/uploads
+faro-cli sync ./site prod:/var/www/site --mirror --dry-run
+```
+
+Saved profiles are read from the same location the GUI uses, so anything
+you set up in the app is immediately scriptable. The CLI prompts on stdin
+for unknown host keys and never writes secrets to disk that the GUI hadn't
+already saved.
 
 ### Prerequisites
 

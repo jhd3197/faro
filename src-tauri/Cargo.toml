@@ -1,6 +1,6 @@
 [package]
 name = "faro"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "Faro — a modern FTP, SFTP, SSH, and S3 client for developers."
 authors = ["Juan Denis"]
@@ -9,6 +9,13 @@ license = "MIT"
 [lib]
 name = "faro_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
+
+# The CLI ships as a second binary in this crate. It reuses faro_lib's
+# RemoteFs / Session / TransferManager layers but never touches Tauri runtime
+# — so `cargo build --bin faro-cli` produces a stand-alone executable.
+[[bin]]
+name = "faro-cli"
+path = "src/bin/faro_cli.rs"
 
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }
@@ -48,6 +55,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5"
 sha2 = "0.10"
 base64 = "0.22"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.17"
 
 # Windows-only: registry access for the PuTTY sessions importer.
 [target.'cfg(windows)'.dependencies]

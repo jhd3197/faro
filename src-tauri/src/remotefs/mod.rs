@@ -6,7 +6,7 @@ pub mod local;
 pub mod object;
 pub mod sftp;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FileKind {
     File,

@@ -1,13 +1,17 @@
 use std::sync::Arc;
 use tauri::Manager;
 
+// The CLI binary (src/bin/faro_cli.rs) imports from these via the `faro_lib`
+// crate, so they need to be `pub` rather than `mod`. None of them expose
+// secrets directly — credentials live in profiles::ConnectionProfile, which
+// the CLI deliberately redacts in `profiles show`.
 mod commands;
-mod importers;
+pub mod importers;
 mod known_hosts;
-mod profiles;
-mod remotefs;
-mod session;
-mod sync;
+pub mod profiles;
+pub mod remotefs;
+pub mod session;
+pub mod sync;
 mod terminal;
 mod transfer;
 
