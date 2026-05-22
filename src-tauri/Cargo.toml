@@ -1,6 +1,6 @@
 [package]
 name = "faro"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Faro — a modern FTP, SFTP, SSH, and S3 client for developers."
 authors = ["Juan Denis"]
@@ -33,7 +33,7 @@ suppaftp = { version = "6", features = ["native-tls"] }
 
 # S3 / R2 / B2 — Apache Arrow's polymorphic object_store crate. v0.6 will reuse
 # this with the `azure` feature for Azure Blob.
-object_store = { version = "0.11", features = ["aws"] }
+object_store = { version = "0.11", features = ["aws", "azure"] }
 bytes = "1"
 
 # Misc

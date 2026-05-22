@@ -39,6 +39,10 @@ pub struct ConnectionProfile {
     pub region: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    // Azure Blob specific. `account` is the Azure storage account name,
+    // and `bucket` doubles as the container. For S3, both stay absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 // Plain JSON file in the app data dir. v0.2 moves secrets into the OS

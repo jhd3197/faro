@@ -161,11 +161,13 @@ function ProfileRow({
         title={
           p.protocol === "s3"
             ? `s3://${p.bucket ?? "?"}${p.endpoint ? ` @ ${p.endpoint}` : ""}`
-            : `${p.username}@${p.host}:${p.port}`
+            : p.protocol === "azure"
+              ? `azure://${p.account ?? "?"}/${p.bucket ?? "?"}`
+              : `${p.username}@${p.host}:${p.port}`
         }
       >
         <div className="flex items-center gap-1 truncate text-[13px] font-medium">
-          {p.protocol === "s3" ? (
+          {p.protocol === "s3" || p.protocol === "azure" ? (
             <Cloud size={11} className="text-text-dim" />
           ) : (
             <Server size={11} className="text-text-dim" />
@@ -175,7 +177,9 @@ function ProfileRow({
         <div className="truncate font-mono text-[11px] text-text-dim">
           {p.protocol === "s3"
             ? `s3://${p.bucket ?? "?"}`
-            : `${p.username}@${p.host}`}
+            : p.protocol === "azure"
+              ? `azure://${p.account ?? "?"}/${p.bucket ?? "?"}`
+              : `${p.username}@${p.host}`}
         </div>
       </button>
       <div className="flex shrink-0 items-center gap-0.5">

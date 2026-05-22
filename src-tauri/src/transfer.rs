@@ -1,4 +1,4 @@
-use crate::session::{FtpSession, S3Session, Session, SshSession};
+use crate::session::{FtpSession, ObjectSession, Session, SshSession};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -227,10 +227,10 @@ impl TransferManager {
                     )
                     .await
                 }
-                Session::S3(s3) => {
-                    mgr.run_s3_download(
+                Session::Object(obj) => {
+                    mgr.run_object_download(
                         &id_for_task,
-                        s3.clone(),
+                        obj.clone(),
                         &remote_path,
                         &final_path,
                         &app,
@@ -359,10 +359,10 @@ impl TransferManager {
                     )
                     .await
                 }
-                Session::S3(s3) => {
-                    mgr.run_s3_upload(
+                Session::Object(obj) => {
+                    mgr.run_object_upload(
                         &id_for_task,
-                        s3.clone(),
+                        obj.clone(),
                         &local,
                         &final_remote,
                         &app,
@@ -633,10 +633,10 @@ impl TransferManager {
         Ok(())
     }
 
-    async fn run_s3_download(
+    async fn run_object_download(
         &self,
         id: &str,
-        session: Arc<S3Session>,
+        session: Arc<ObjectSession>,
         remote_path: &str,
         local_path: &Path,
         app: &AppHandle,
@@ -678,10 +678,10 @@ impl TransferManager {
         Ok(())
     }
 
-    async fn run_s3_upload(
+    async fn run_object_upload(
         &self,
         id: &str,
-        session: Arc<S3Session>,
+        session: Arc<ObjectSession>,
         local_path: &Path,
         remote_path: &str,
         app: &AppHandle,
@@ -775,7 +775,9 @@ fn fs_for_session(session: &Arc<Session>) -> Box<dyn crate::remotefs::RemoteFs> 
     match &**session {
         Session::Ssh(ssh) => Box::new(crate::remotefs::sftp::SftpFs::new(ssh.clone())),
         Session::Ftp(ftp) => Box::new(crate::remotefs::ftp::FtpFs::new(ftp.clone())),
-        Session::S3(s3) => Box::new(crate::remotefs::s3::S3Fs::new(s3.clone())),
+        Session::Object(obj) => {
+            Box::new(crate::remotefs::object::ObjectFs::new(obj.clone()))
+        }
     }
 }
 
@@ -797,14 +799,14 @@ async fn remote_size(session: &Arc<Session>, path: &str) -> Result<u64> {
             let sz = ftp.with_stream(move |s| s.size(&path)).await?;
             Ok(sz as u64)
         }
-        Session::S3(s3) => {
+        Session::Object(obj) => {
             let key = path.trim_start_matches('/').to_string();
             let p = object_store::path::Path::from(key.as_str());
-            let meta = s3
+            let meta = obj
                 .store
                 .head(&p)
                 .await
-                .with_context(|| format!("s3 head {key}"))?;
+                .with_context(|| format!("object head {key}"))?;
             Ok(meta.size as u64)
         }
     }
@@ -857,10 +859,10 @@ async fn remote_resolve(
                 }
             })
         }
-        Session::S3(s3) => {
+        Session::Object(obj) => {
             let key = initial_remote.trim_start_matches('/').to_string();
             let probe = object_store::path::Path::from(key.as_str());
-            let exists = s3.store.head(&probe).await.is_ok();
+            let exists = obj.store.head(&probe).await.is_ok();
             Ok(match policy {
                 OverwritePolicy::Overwrite => (initial_remote.to_string(), false),
                 OverwritePolicy::Skip => (initial_remote.to_string(), exists),
@@ -872,7 +874,7 @@ async fn remote_resolve(
                         candidate = format!("{stem}_{i}{ext}");
                         let key = candidate.trim_start_matches('/');
                         let p = object_store::path::Path::from(key);
-                        if s3.store.head(&p).await.is_err() {
+                        if obj.store.head(&p).await.is_err() {
                             break;
                         }
                     }

@@ -6,7 +6,7 @@ export type AuthMethod =
   | { kind: "key"; path: string; passphrase?: string }
   | { kind: "agent" };
 
-export type Protocol = "sftp" | "ftp" | "ftps" | "s3";
+export type Protocol = "sftp" | "ftp" | "ftps" | "s3" | "azure";
 
 export interface ConnectionProfile {
   id: string;
@@ -18,10 +18,11 @@ export interface ConnectionProfile {
   auth: AuthMethod;
   defaultRemotePath?: string;
   color?: string;
-  // Object-store-specific fields (used when protocol === "s3").
-  bucket?: string;
+  // Object-store fields (used when protocol === "s3" or "azure").
+  bucket?: string; // bucket (S3) or container (Azure)
   region?: string;
   endpoint?: string;
+  account?: string; // Azure storage account name
 }
 
 export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {
@@ -29,6 +30,7 @@ export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {
   ftp: 21,
   ftps: 21,
   s3: 443,
+  azure: 443,
 };
 
 export const PROTOCOL_LABEL: Record<Protocol, string> = {
@@ -36,7 +38,12 @@ export const PROTOCOL_LABEL: Record<Protocol, string> = {
   ftp: "FTP",
   ftps: "FTPS",
   s3: "S3",
+  azure: "Azure",
 };
+
+export function isObjectProtocol(p: Protocol): boolean {
+  return p === "s3" || p === "azure";
+}
 
 export type S3Provider = "aws" | "r2" | "b2";
 

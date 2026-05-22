@@ -5,6 +5,7 @@ import {
   PROTOCOL_DEFAULT_PORT,
   PROTOCOL_LABEL,
   S3_PROVIDER_PRESETS,
+  isObjectProtocol,
   type AuthMethod,
   type ConnectionProfile,
   type Protocol,
@@ -69,14 +70,16 @@ export function ProfileEditor({ profile, onClose }: Props) {
   const [s3Provider, setS3Provider] = useState<S3Provider>(
     profile?.protocol === "s3" ? guessProvider(profile.endpoint) : "aws"
   );
+  // Azure-only state.
+  const [azureAccount, setAzureAccount] = useState(profile?.account ?? "");
 
   const onProtocolChange = (p: Protocol) => {
     setProtocol(p);
     if (!portTouched) {
       setPort(PROTOCOL_DEFAULT_PORT[p]);
     }
-    if (p === "s3") {
-      // S3 only does access-key/secret auth — coerce to password.
+    if (isObjectProtocol(p)) {
+      // Object stores only do key auth — coerce to password.
       setAuthKind("password");
     }
     if ((p === "ftp" || p === "ftps") && authKind !== "password") {
@@ -95,6 +98,8 @@ export function ProfileEditor({ profile, onClose }: Props) {
 
   const isFtp = protocol === "ftp" || protocol === "ftps";
   const isS3 = protocol === "s3";
+  const isAzure = protocol === "azure";
+  const isObject = isObjectProtocol(protocol);
 
   const save = async () => {
     let auth: AuthMethod;
@@ -108,17 +113,24 @@ export function ProfileEditor({ profile, onClose }: Props) {
 
     const next: ConnectionProfile = {
       id: profile?.id ?? genId(),
-      name: name || (isS3 ? `${bucket}@${s3Provider}` : `${username}@${host}`),
+      name:
+        name ||
+        (isS3
+          ? `${bucket}@${s3Provider}`
+          : isAzure
+            ? `${azureAccount}/${bucket}`
+            : `${username}@${host}`),
       protocol,
-      host: isS3 ? endpoint || "s3.amazonaws.com" : host,
+      host: isObject ? endpoint || (isAzure ? "blob.core.windows.net" : "s3.amazonaws.com") : host,
       port,
-      username,
+      username: isAzure ? azureAccount : username,
       auth,
       defaultRemotePath: defaultRemotePath || undefined,
       color: profile?.color,
-      bucket: isS3 ? bucket : undefined,
+      bucket: isObject ? bucket : undefined,
       region: isS3 ? region : undefined,
-      endpoint: isS3 ? endpoint || undefined : undefined,
+      endpoint: isObject ? endpoint || undefined : undefined,
+      account: isAzure ? azureAccount : undefined,
     };
     await saveProfile(next);
     onClose();
@@ -126,7 +138,9 @@ export function ProfileEditor({ profile, onClose }: Props) {
 
   const canSave = isS3
     ? !!bucket && !!username && !!password
-    : !!host && !!username;
+    : isAzure
+      ? !!azureAccount && !!bucket && !!password
+      : !!host && !!username;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
@@ -145,8 +159,8 @@ export function ProfileEditor({ profile, onClose }: Props) {
         </Field>
 
         <Field label="Protocol">
-          <div className="grid grid-cols-4 gap-1 rounded-md border border-border bg-bg-subtle p-1">
-            {(["sftp", "ftp", "ftps", "s3"] as Protocol[]).map((p) => (
+          <div className="grid grid-cols-5 gap-1 rounded-md border border-border bg-bg-subtle p-1">
+            {(["sftp", "ftp", "ftps", "s3", "azure"] as Protocol[]).map((p) => (
               <ProtocolButton
                 key={p}
                 active={protocol === p}
@@ -172,6 +186,17 @@ export function ProfileEditor({ profile, onClose }: Props) {
             setAccessKey={setUsername}
             secretKey={password}
             setSecretKey={setPassword}
+          />
+        ) : isAzure ? (
+          <AzureSection
+            account={azureAccount}
+            setAccount={setAzureAccount}
+            container={bucket}
+            setContainer={setBucket}
+            accessKey={password}
+            setAccessKey={setPassword}
+            endpoint={endpoint}
+            setEndpoint={setEndpoint}
           />
         ) : (
           <>
@@ -272,11 +297,11 @@ export function ProfileEditor({ profile, onClose }: Props) {
           </>
         )}
 
-        <Field label={isS3 ? "Default key prefix" : "Default remote path"}>
+        <Field label={isObject ? "Default key prefix" : "Default remote path"}>
           <input
             value={defaultRemotePath}
             onChange={(e) => setDefaultRemotePath(e.target.value)}
-            placeholder={isS3 ? "" : isFtp ? "/" : "."}
+            placeholder={isObject ? "" : isFtp ? "/" : "."}
             className={inputCls}
           />
         </Field>
@@ -309,6 +334,73 @@ export function ProfileEditor({ profile, onClose }: Props) {
         </div>
       </div>
     </div>
+  );
+}
+
+function AzureSection({
+  account,
+  setAccount,
+  container,
+  setContainer,
+  accessKey,
+  setAccessKey,
+  endpoint,
+  setEndpoint,
+}: {
+  account: string;
+  setAccount: (v: string) => void;
+  container: string;
+  setContainer: (v: string) => void;
+  accessKey: string;
+  setAccessKey: (v: string) => void;
+  endpoint: string;
+  setEndpoint: (v: string) => void;
+}) {
+  return (
+    <>
+      <Hint>
+        Azure Blob Storage. Use the storage account name and an account key
+        (Portal → Storage account → Access keys). Custom endpoints target
+        Azurite (local emulator) or sovereign clouds.
+      </Hint>
+
+      <div className="flex gap-2">
+        <Field label="Storage account" className="flex-1">
+          <input
+            value={account}
+            onChange={(e) => setAccount(e.target.value)}
+            placeholder="mystorageacct"
+            className={inputCls}
+          />
+        </Field>
+        <Field label="Container" className="flex-1">
+          <input
+            value={container}
+            onChange={(e) => setContainer(e.target.value)}
+            placeholder="my-container"
+            className={inputCls}
+          />
+        </Field>
+      </div>
+
+      <Field label="Access key">
+        <input
+          type="password"
+          value={accessKey}
+          onChange={(e) => setAccessKey(e.target.value)}
+          className={inputCls}
+        />
+      </Field>
+
+      <Field label="Endpoint (optional)">
+        <input
+          value={endpoint}
+          onChange={(e) => setEndpoint(e.target.value)}
+          placeholder="(leave blank for public Azure)"
+          className={inputCls}
+        />
+      </Field>
+    </>
   );
 }
 
@@ -428,6 +520,8 @@ function protocolHint(p: Protocol): string {
       return "TLS · :21";
     case "s3":
       return "Object · :443";
+    case "azure":
+      return "Blob · :443";
   }
 }
 
@@ -445,7 +539,7 @@ function ProtocolButton({
   let Icon = TerminalIcon;
   if (label === "FTPS") Icon = ShieldCheck;
   else if (label === "FTP") Icon = ShieldOff;
-  else if (label === "S3") Icon = Cloud;
+  else if (label === "S3" || label === "Azure") Icon = Cloud;
   return (
     <button
       type="button"

@@ -304,7 +304,9 @@ fn fs_for_session(session: &Arc<Session>) -> Box<dyn RemoteFs> {
     match &**session {
         Session::Ssh(ssh) => Box::new(crate::remotefs::sftp::SftpFs::new(ssh.clone())),
         Session::Ftp(ftp) => Box::new(crate::remotefs::ftp::FtpFs::new(ftp.clone())),
-        Session::S3(s3) => Box::new(crate::remotefs::s3::S3Fs::new(s3.clone())),
+        Session::Object(obj) => {
+            Box::new(crate::remotefs::object::ObjectFs::new(obj.clone()))
+        }
     }
 }
 
