@@ -1,0 +1,58 @@
+name: ci
+
+# Fast feedback for every push + PR: cargo check (lib + both bins) and the
+# Vite typecheck + production bundle. No bundling, no platform matrix — that's
+# what release.yml is for.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Linux — install Tauri system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: TypeScript + Vite build
+        run: npm run build
+
+      - name: cargo check (lib + bins)
+        working-directory: src-tauri
+        run: cargo check --lib --bins
+
+      - name: cargo clippy (warnings allowed for now)
+        working-directory: src-tauri
+        run: cargo clippy --lib --bins -- -D warnings -A clippy::all
+        continue-on-error: true

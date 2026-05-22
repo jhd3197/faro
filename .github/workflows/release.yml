@@ -1,0 +1,177 @@
+name: release
+
+# Builds the Tauri GUI on macOS, Windows and Ubuntu plus the `faro-cli`
+# binary on all three, then attaches every artifact to a draft GitHub
+# release. Triggered when a tag matching `v*` is pushed (e.g. `v1.2.0`) or
+# manually via the Actions tab.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to attach the release to (e.g. v1.2.0). Created if missing.'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  # ---- GUI app ---------------------------------------------------------
+  gui:
+    name: gui (${{ matrix.platform.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: macos-latest
+            args: '--target universal-apple-darwin'
+          - runner: ubuntu-22.04
+            args: ''
+          - runner: windows-latest
+            args: ''
+    runs-on: ${{ matrix.platform.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: macOS — add universal targets
+        if: matrix.platform.runner == 'macos-latest'
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Linux — install Tauri system deps
+        if: matrix.platform.runner == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            build-essential \
+            curl \
+            wget \
+            file
+
+      - name: Install npm deps
+        run: npm ci
+
+      - name: Resolve tag name
+        id: tag
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build + bundle GUI, attach to draft release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ steps.tag.outputs.tag }}
+          releaseName: 'Faro ${{ steps.tag.outputs.tag }}'
+          releaseBody: |
+            See the [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/README.md#roadmap) for what's in this release.
+
+            **Installers**
+            - macOS: `.dmg` (universal — Intel + Apple Silicon)
+            - Windows: `.msi` and `.exe` installer
+            - Linux: `.AppImage` and `.deb`
+
+            **CLI** — see the separate `faro-cli-*` artifacts below for the standalone command-line binary.
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.platform.args }}
+          projectPath: src-tauri
+
+  # ---- CLI binary ------------------------------------------------------
+  cli:
+    name: cli (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            asset: faro-cli-macos-arm64
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            asset: faro-cli-macos-x86_64
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: faro-cli-linux-x86_64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: faro-cli-windows-x86_64.exe
+    runs-on: ${{ matrix.runner }}
+    needs: gui
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Linux — install system deps
+        if: matrix.runner == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Build faro-cli
+        working-directory: src-tauri
+        run: cargo build --release --bin faro-cli --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "${{ matrix.runner }}" = "windows-latest" ]; then
+            cp src-tauri/target/${{ matrix.target }}/release/faro-cli.exe dist/${{ matrix.asset }}
+          else
+            cp src-tauri/target/${{ matrix.target }}/release/faro-cli dist/${{ matrix.asset }}
+          fi
+
+      - name: Resolve tag name
+        id: tag
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release upload "${{ steps.tag.outputs.tag }}" "dist/${{ matrix.asset }}" \
+            --repo "${{ github.repository }}" --clobber

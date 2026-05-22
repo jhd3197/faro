@@ -5,6 +5,9 @@ edition = "2021"
 description = "Faro — a modern FTP, SFTP, SSH, and S3 client for developers."
 authors = ["Juan Denis"]
 license = "MIT"
+# Tauri runs `cargo run` without --bin during `tauri dev`; without this it
+# can't pick between `faro` (GUI) and `faro-cli`.
+default-run = "faro"
 
 [lib]
 name = "faro_lib"
