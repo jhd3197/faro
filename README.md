@@ -1,69 +1,48 @@
+<div align="center">
+
+<img src="src-tauri/icons/128x128@2x.png" width="128" alt="Faro" />
+
 # Faro
 
-> A modern desktop client for FTP, SFTP, SSH, and S3-compatible storage.
+**A modern desktop client for SFTP, FTP, SSH, and S3-compatible storage.**
 
-**Faro** is a developer-first workspace that brings together the things you
-usually split between FileZilla, PuTTY, terminal tabs, and S3 browser tools.
-Save connections, browse remote files, transfer assets, manage SSH keys, open
-terminals, and work with S3-compatible storage — all in one window.
+[![Version](https://img.shields.io/badge/version-1.1.0-8b7ff6?style=flat-square)](https://github.com/jhd3197/faro/releases)
+[![License](https://img.shields.io/badge/license-MIT-8b7ff6?style=flat-square)](LICENSE)
+[![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-8b7ff6?style=flat-square)](https://tauri.app)
 
-> Faro keeps every server, bucket, and session within reach.
+*Servers · storage · sessions, all in one workspace.*
 
-## Status
+</div>
 
-**v1.1.** Adds a `faro-cli` binary that scripts every backend the GUI
-speaks. Reuses the same on-disk profile store, the same `RemoteFs` trait,
-the same `sync::plan` logic. Subcommands: `ls / cp / mv / rm / mkdir / sync
-/ profiles`. Path syntax: `profile:/path` for remote, bare paths (incl.
-Windows drive letters) for local.
+---
 
-From v1.0: One-way directory sync (Local→Remote / Remote→Local; Additive or
-Mirror). The planner walks both trees via the `RemoteFs` trait so it works
-across every backend; the executor reuses the existing transfer queue for
-progress. A "Sync" button rides the splitter between the two file panes
-when a connection is active.
+## What it is
 
-What's in the bag:
+Faro is what you'd get if you let FileZilla, PuTTY, and a half-dozen cloud-storage browsers share one window and one connection list. Save a server once, open its files in the dual-pane browser and a terminal tab against the same SSH session, drag-and-drop transfers between sides, sync directories one-way — and run all of the same operations from a CLI when you don't feel like clicking.
 
-- Protocols: SFTP, FTP, FTPS, AWS S3, Cloudflare R2, Backblaze B2,
-  Azure Blob.
-- SSH polish: known-hosts verification with interactive fingerprint
-  prompt, ssh-agent (unix `$SSH_AUTH_SOCK`, OpenSSH-for-Windows named pipe,
-  Pageant pipe), multi-tab terminals.
-- Transfers: drag-and-drop, multi-select, recursive directories,
-  overwrite/skip/rename policies, multipart S3 above 16 MB, one-way sync
-  with optional mirror deletes.
-- Profile importers: OpenSSH `~/.ssh/config`, FileZilla `sitemanager.xml`,
-  PuTTY (Windows registry / `~/.putty/sessions/`).
-- File ops: rename, delete (recursive on dirs), mkdir, chmod (SFTP / unix
-  local; SITE CHMOD on FTP; not applicable on object stores).
-- UI: capability-aware (mkdir / chmod / terminal hide on backends that
-  don't support them), dark / light themes, terminal customisation,
-  sort / hidden-file prefs.
+## Backends
 
-External polish that requires infra (code signing, auto-updater, landing
-page) is intentionally outside this repo and deferred to release time.
+| Protocol | Browse | Transfer | Sync | Shell |
+|---|:-:|:-:|:-:|:-:|
+| **SFTP** (SSH) | ✓ | ✓ | ✓ | ✓ |
+| **FTP** | ✓ | ✓ | ✓ | — |
+| **FTPS** (explicit) | ✓ | ✓ | ✓ | — |
+| **Amazon S3** | ✓ | ✓ | ✓ | — |
+| **Cloudflare R2** | ✓ | ✓ | ✓ | — |
+| **Backblaze B2** | ✓ | ✓ | ✓ | — |
+| **Azure Blob** | ✓ | ✓ | ✓ | — |
 
-## Architecture
+## Highlights
 
-```
-┌──────────────────────────────────────────────────┐
-│  React + TypeScript + Tauri webview              │
-│  (dual-pane browser, xterm.js terminal, profiles)│
-└──────────────────┬───────────────────────────────┘
-                   │ Tauri commands + events
-┌──────────────────┴───────────────────────────────┐
-│  Rust core                                        │
-│   RemoteFs trait → LocalFs, SftpFs (S3/FTP next) │
-│   Session manager  (shared SSH session pool)     │
-│   Terminal        (russh PTY channel → events)   │
-│   Transfer manager (concurrent file + dir trees) │
-│   Profiles        (JSON in app data dir)         │
-└──────────────────────────────────────────────────┘
-```
-
-The wedge: **terminal and SFTP browser share one SSH session per profile.**
-One auth, two surfaces, no PuTTY/FileZilla double-login dance.
+- **One SSH session, two surfaces** — the SFTP browser and the terminal pane share a single connection per profile. No PuTTY/FileZilla double-login dance.
+- **Known-hosts verification** with an interactive fingerprint prompt. Mismatched keys get a danger-toned UI so MITM attempts are obvious.
+- **ssh-agent everywhere** — `$SSH_AUTH_SOCK` on unix, OpenSSH-for-Windows pipe, and Pageant (PuTTY 0.78+) on Windows. `ssh-add` once, connect everywhere.
+- **Multi-tab terminals** sharing a single SSH session per profile. Tabs survive switches without re-establishing the channel.
+- **Drag-and-drop transfers** between panes, recursive directory transfers, multi-select, overwrite/skip/rename policies, multipart upload for objects > 16 MB.
+- **One-way directory sync** — Local↔Remote, Additive (copy only) or Mirror (also delete extras). The planner walks any backend through the same trait, then hands the work to the existing transfer queue for progress.
+- **Profile importers** — bring connections in from `~/.ssh/config`, FileZilla's `sitemanager.xml`, and PuTTY's Windows registry / `~/.putty/sessions/`. The import dialog auto-detects each source's default location.
+- **Capability-aware UI** — chmod and mkdir hide on backends that don't support them; terminal is SFTP-only; protocol chips show what you're connected to at a glance.
+- **`faro-cli`** scripts every backend the GUI speaks, using the same saved profiles. `faro-cli sync ./site prod:/var/www --mirror --dry-run` does what you'd hope.
 
 ## Develop
 
@@ -72,43 +51,81 @@ npm install
 npm run tauri dev
 ```
 
-First build is slow (Rust crates). Subsequent ~30s.
+First build is slow — it's compiling the Rust crate tree. Subsequent builds are ~30 s.
+
+**Prerequisites**: Node 20+, Rust 1.88+ (`rustc --version` — Tauri 2's transitive deps require it).
 
 ## CLI
 
-The same crate ships a `faro-cli` binary that uses your saved GUI profiles:
+The same Cargo package ships a second binary, `faro-cli`, that reuses your saved GUI profiles.
 
 ```bash
 cd src-tauri
 cargo build --bin faro-cli --release
-# binary lands at src-tauri/target/release/faro-cli
+# → src-tauri/target/release/faro-cli
 
 faro-cli profiles list
 faro-cli ls prod:/var/log
 faro-cli cp ./report.pdf prod:/var/www/uploads
 faro-cli sync ./site prod:/var/www/site --mirror --dry-run
+faro-cli rm prod:/tmp/build --recursive
 ```
 
-Saved profiles are read from the same location the GUI uses, so anything
-you set up in the app is immediately scriptable. The CLI prompts on stdin
-for unknown host keys and never writes secrets to disk that the GUI hadn't
-already saved.
+Path syntax: bare paths are local (including Windows `C:\…`), `name:/path` references a saved profile. The CLI prompts on stdin for unknown host keys and never writes secrets to disk that the GUI hadn't already saved.
 
-### Prerequisites
+## Architecture
 
-- Node 20+
-- Rust 1.88+ (Tauri 2.11's transitive deps need this). Check with `rustc --version`.
+```
+┌─────────────────────────────────────────────────────────────┐
+│  React + TypeScript + Tauri webview                         │
+│  Dual-pane browser · xterm.js terminal · sync dialog        │
+└──────────────────────────┬──────────────────────────────────┘
+                           │  Tauri commands + events
+┌──────────────────────────┴──────────────────────────────────┐
+│  Rust core (faro_lib)                                       │
+│   RemoteFs trait → LocalFs · SftpFs · FtpFs · ObjectFs      │
+│   Session enum  → Ssh(SshSession) · Ftp · Object            │
+│   SessionManager pools one SSH session per profile          │
+│   TransferManager → concurrent file + directory transfers   │
+│   sync::plan walks both sides via the RemoteFs trait        │
+│   importers/ → OpenSSH · FileZilla · PuTTY                  │
+│   known_hosts + HostKeyVerifier (Tauri or stdin)            │
+└──────────────────────────┬──────────────────────────────────┘
+                           │  same Rust core
+┌──────────────────────────┴──────────────────────────────────┐
+│  faro-cli  (clap)                                           │
+│   ls · cp · mv · rm · mkdir · sync · profiles               │
+└─────────────────────────────────────────────────────────────┘
+```
 
-### Windows PATH gotcha
+The wedge: **everything goes through one `RemoteFs` trait.** Adding a new protocol means writing one trait impl and one builder; the dual-pane browser, the sync planner, the CLI, and the transfer engine pick it up automatically.
 
-If you previously installed Rust via Chocolatey (`choco install rust`), there's
-a `rustc.exe` at `C:\ProgramData\chocolatey\bin` that *shadows* the
-rustup-managed toolchain in `~/.cargo/bin`. `rustup update stable` updates the
-rustup copy but doesn't touch the chocolatey one — so `rustc --version` keeps
-reporting the old version and Tauri builds fail with messages like
-`rustc 1.85.0 is not supported by darling@0.23.0 (requires 1.88)`.
+## Layout
 
-Fix it once, project-wide:
+```
+src/                       React frontend
+  components/              ConnectionManager, FilePane, Terminal,
+                           SyncDialog, ImportDialog, HostKeyModal, …
+  stores/                  Zustand stores
+  lib/ipc.ts               Typed wrappers around Tauri commands
+  lib/types.ts             Shared types (mirror Rust serde structs)
+
+src-tauri/src/
+  commands.rs              Tauri command surface
+  remotefs/                RemoteFs trait + Local / Sftp / Ftp / Object
+  session/                 SshSession, FtpSession, ObjectSession,
+                           HostKeyVerifier trait, SessionManager
+  terminal.rs              PTY over russh, emits events
+  transfer.rs              Per-backend streaming transfers + progress
+  sync.rs                  Two-tree diff planner, RemoteFs-driven
+  importers/               OpenSSH config, FileZilla XML, PuTTY registry
+  known_hosts.rs           ~/.ssh/known_hosts read/write
+  bin/faro_cli.rs          CLI binary (clap + indicatif)
+```
+
+## Windows PATH gotcha
+
+If you installed Rust via Chocolatey (`choco install rust`), there's a `rustc.exe` at `C:\ProgramData\chocolatey\bin` that **shadows** the rustup-managed toolchain. `rustup update stable` updates the rustup copy but doesn't touch the chocolatey one, so `rustc --version` keeps reporting the old version and Tauri builds fail with messages like `rustc 1.85.0 is not supported by darling@0.23.0`.
 
 ```powershell
 # Option A — uninstall the chocolatey copy (recommended)
@@ -118,51 +135,22 @@ choco uninstall rust
 $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 ```
 
-Or in bash:
-
-```bash
-export PATH="$HOME/.cargo/bin:$PATH"
-```
-
 ## Icons
 
-The scaffold ships with placeholder icons. To replace, drop a 512×512 PNG at
-`src-tauri/icons/source.png` and run:
-
 ```bash
+# Replace src-tauri/icons/source.png with a 1024×1024 PNG, then:
 npm run tauri icon src-tauri/icons/source.png
 ```
 
-## Layout
+`scripts/process-icon.py` handles cropping a black-bordered source PNG to its rounded-square art and writing `source.png` at the right size.
 
-```
-src/                       React frontend
-  components/              UI components (panes, modals, settings, etc.)
-  stores/                  Zustand stores (connections, transfers, layout, settings)
-  lib/ipc.ts               Typed wrappers around Tauri commands
-  lib/types.ts             Shared types (mirror Rust serde structs)
+## Roadmap
 
-src-tauri/src/
-  commands.rs              Tauri command surface (IPC entry points)
-  remotefs/
-    mod.rs                 RemoteFs trait + DirEntry / Capabilities
-    sftp.rs                SFTP impl (russh + russh-sftp)
-    local.rs               Local filesystem impl
-  session/
-    mod.rs                 SSH session pool (one per profile)
-  terminal.rs              PTY over russh, emits events to frontend
-  transfer.rs              Transfer engine + recursive directory walker
-  profiles/
-    mod.rs                 Profile CRUD, persisted to JSON
-```
+- **v1.0** — one-way sync mode
+- **v1.1** — `faro-cli` binary *(this)*
+- **next** — edit-in-place external editor, transfer speed limits, queue editing (priority/retry/pause), filename filters (`.gitignore`-style), WebDAV backend
+- **release polish** — code signing (Apple Developer / Windows EV cert), Tauri auto-updater, landing page
 
-## Roadmap (concrete)
+## License
 
-- **v0.2** — SFTP, integrated terminal, drag-and-drop, recursive transfers, file ops, settings
-- **v0.3** — known-hosts verification, ssh-agent (unix + OpenSSH-for-Windows pipe), multi-tab terminals
-- **v0.4** — FTP / FTPS backends, Pageant pipe support
-- **v0.5** — S3 / R2 / B2 (one backend, three endpoint configs)
-- **v0.6** — Azure Blob, ObjectSession refactor
-- **v0.7** — Profile importers (OpenSSH config, FileZilla, PuTTY)
-- **v1.0** — One-way sync mode (this). Code signing / auto-updater / landing
-  page require external infra and are tracked outside this repo.
+MIT — see [LICENSE](LICENSE).

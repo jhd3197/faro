@@ -102,21 +102,30 @@ function TitleBar({ onOpenSettings }: { onOpenSettings: () => void }) {
 }
 
 function Logo() {
+  // Stylised lighthouse silhouette + beam — matches the app icon. The beam
+  // uses the accent colour so the logo picks up theme changes naturally.
   return (
     <div className="flex h-5 w-5 items-center justify-center rounded-md text-white shadow-elev-1 btn-accent">
       <svg
         viewBox="0 0 16 16"
-        width="12"
-        height="12"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
+        width="13"
+        height="13"
+        fill="currentColor"
       >
-        <path d="M2 4h7" />
-        <path d="M2 12h7" />
-        <path d="M11 4l3 4-3 4" />
+        {/* Beam */}
+        <path
+          d="M9 5.5 L15 4 L15 8 L9 6.5 Z"
+          fill="rgb(252 211 77)"
+          opacity="0.85"
+        />
+        {/* Lantern roof */}
+        <path d="M5 4.2 L7 2.5 L9 4.2 Z" />
+        {/* Lantern body */}
+        <rect x="5.4" y="4.2" width="3.2" height="2" rx="0.2" />
+        {/* Tower */}
+        <path d="M5 6.2 L9 6.2 L9.4 13.5 L4.6 13.5 Z" />
+        {/* Tower stripe */}
+        <rect x="4.6" y="9" width="4.8" height="0.7" fill="rgb(20 22 36)" />
       </svg>
     </div>
   );
