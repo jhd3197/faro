@@ -1,0 +1,267 @@
+@import "@xterm/xterm/css/xterm.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root,
+[data-theme="dark"] {
+  --bg: 10 11 15;
+  --bg-panel: 17 19 26;
+  --bg-subtle: 24 27 36;
+  --bg-hover: 32 36 49;
+  --border: 38 43 58;
+  --border-subtle: 27 31 42;
+  --text: 234 236 242;
+  --text-muted: 153 161 178;
+  --text-dim: 110 119 138;
+  --accent: 139 127 246;
+  --accent-hover: 121 105 240;
+  --accent-glow: 139 127 246;
+  --danger: 248 113 113;
+  --shadow: 0 0 0;
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --bg: 250 250 252;
+  --bg-panel: 255 255 255;
+  --bg-subtle: 244 246 250;
+  --bg-hover: 233 237 244;
+  --border: 213 219 229;
+  --border-subtle: 227 232 240;
+  --text: 23 28 36;
+  --text-muted: 80 90 105;
+  --text-dim: 135 144 158;
+  --accent: 99 88 220;
+  --accent-hover: 79 70 200;
+  --accent-glow: 139 127 246;
+  --danger: 220 38 38;
+  --shadow: 30 41 59;
+  color-scheme: light;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: rgb(var(--bg));
+  color: rgb(var(--text));
+  font-family:
+    "Inter",
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI Variable",
+    "Segoe UI",
+    Roboto,
+    system-ui,
+    sans-serif;
+  font-size: 13px;
+  font-feature-settings:
+    "cv02",
+    "cv03",
+    "cv04",
+    "cv11";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow: hidden;
+}
+
+/* Smooth theme transition for the most visible surfaces. Scoped to a few
+   properties so we don't slow down every hover/click everywhere. */
+body,
+body * {
+  transition:
+    background-color 180ms ease,
+    border-color 180ms ease,
+    color 180ms ease;
+}
+/* Exclude xterm — it has its own renderer and any transition causes flicker. */
+.xterm,
+.xterm * {
+  transition: none !important;
+}
+/* But don't transition transforms or opacity globally — keep micro-animations
+   snappy. */
+button,
+[role="button"] {
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    border-color 120ms ease,
+    transform 80ms ease,
+    box-shadow 120ms ease;
+}
+button:active,
+[role="button"]:active {
+  transform: scale(0.97);
+}
+
+/* Subtle film grain on the whole window. Sits above all panels via fixed +
+   blend so the grain shows on every surface. The user almost can't see it —
+   it just makes flat panels feel slightly less plastic. */
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1000;
+  opacity: 0.035;
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml;utf8,<svg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  background-size: 256px 256px;
+}
+[data-theme="light"] body::after {
+  opacity: 0.06;
+}
+
+/* The whole app is chrome by default — no accidental text selection when
+   clicking-and-dragging on buttons, headers, rows, etc. Selection is
+   re-enabled below for places where the user actually needs to copy text. */
+body {
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea,
+.selectable,
+.selectable *,
+.xterm,
+.xterm * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  color: inherit;
+}
+
+input,
+select,
+textarea {
+  background: rgb(var(--bg-subtle));
+}
+
+/* Scrollbars — themed via CSS vars. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--border));
+  border: 2px solid transparent;
+  background-clip: content-box;
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--text-dim));
+  background-clip: content-box;
+}
+
+/* Focus ring — scoped to interactive elements only, and explicitly excluding
+   xterm's helper textarea (which is 1×1 at the cursor and would otherwise
+   show a tiny blue outline). */
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible:not(.xterm-helper-textarea),
+[role="button"]:focus-visible,
+[tabindex]:focus-visible:not(.xterm-helper-textarea) {
+  outline: 2px solid rgb(var(--accent) / 0.55);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Belt and suspenders. xterm's own CSS hides this element via left:-9999em,
+   but we make doubly sure no outline/background lights it up. We do NOT set
+   `pointer-events: none` — xterm needs the textarea to capture keystrokes. */
+.xterm-helper-textarea,
+.xterm-helper-textarea:focus,
+.xterm-helper-textarea:focus-visible {
+  outline: none !important;
+  border: none !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* Selection */
+::selection {
+  background: rgb(var(--accent) / 0.35);
+}
+
+/* Subtle accent gradient utility for primary action buttons. */
+.btn-accent {
+  background:
+    linear-gradient(
+      180deg,
+      rgb(var(--accent) / 1) 0%,
+      rgb(var(--accent-hover) / 1) 100%
+    );
+  box-shadow:
+    inset 0 1px 0 0 rgb(255 255 255 / 0.12),
+    0 1px 0 0 rgb(var(--shadow) / 0.2);
+}
+.btn-accent:hover {
+  background:
+    linear-gradient(
+      180deg,
+      rgb(var(--accent-hover) / 1) 0%,
+      rgb(var(--accent-hover) / 1) 100%
+    );
+}
+
+/* A subtle glow used for the active connection chip / accent dot. */
+.glow-accent {
+  box-shadow: 0 0 0 2px rgb(var(--bg-panel)), 0 0 12px rgb(var(--accent-glow) / 0.4);
+}
+
+/* Modal/popover entrance animation. */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.anim-modal {
+  animation: fadeInUp 140ms ease-out;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.anim-fade {
+  animation: fadeIn 160ms ease-out;
+}
+
+@keyframes slideInFromBottom {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.anim-slide-up {
+  animation: slideInFromBottom 200ms ease-out;
+}
