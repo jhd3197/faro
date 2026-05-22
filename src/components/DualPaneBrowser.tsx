@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
 import { FilePane } from "./FilePane";
+import { SyncDialog } from "./SyncDialog";
 import { useConnections } from "@/stores/connectionsStore";
 import { useTransfers } from "@/stores/transfersStore";
 import { LOCAL_SESSION } from "@/lib/types";
 import type { DirEntry } from "@/lib/types";
+import { ArrowRightLeft } from "lucide-react";
 
 export function DualPaneBrowser() {
   const activeSessionId = useConnections((s) => s.activeSessionId);
@@ -21,6 +23,7 @@ export function DualPaneBrowser() {
   const [remotePath, setRemotePath] = useState(
     profile?.defaultRemotePath || "."
   );
+  const [syncOpen, setSyncOpen] = useState(false);
 
   useEffect(() => {
     setRemotePath(profile?.defaultRemotePath || ".");
@@ -49,7 +52,7 @@ export function DualPaneBrowser() {
   };
 
   return (
-    <div className="flex h-full flex-1">
+    <div className="relative flex h-full flex-1">
       <FilePane
         paneId="local"
         title="Local"
@@ -60,7 +63,18 @@ export function DualPaneBrowser() {
         onDrop={downloadAll}
         transferLabel="Upload"
       />
-      <div className="w-px bg-border" />
+      <div className="relative w-px bg-border">
+        {activeSessionId && (
+          <button
+            onClick={() => setSyncOpen(true)}
+            title="Sync this folder with the remote pane"
+            className="btn-accent absolute left-1/2 top-3 z-20 flex h-6 -translate-x-1/2 items-center gap-1 rounded-full px-2 text-[10px] font-medium uppercase tracking-wider text-white shadow-elev-2"
+          >
+            <ArrowRightLeft size={10} />
+            Sync
+          </button>
+        )}
+      </div>
       <FilePane
         paneId="remote"
         title={profile ? `Remote — ${profile.name}` : "Remote"}
@@ -71,6 +85,14 @@ export function DualPaneBrowser() {
         onDrop={uploadAll}
         transferLabel="Download"
       />
+
+      {syncOpen && activeSessionId && (
+        <SyncDialog
+          localPath={localPath}
+          remotePath={remotePath}
+          onClose={() => setSyncOpen(false)}
+        />
+      )}
     </div>
   );
 }

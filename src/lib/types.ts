@@ -66,6 +66,37 @@ export interface ImporterPaths {
   putty: string | null;
 }
 
+// ---- Sync ----
+
+export type SyncDirection = "localToRemote" | "remoteToLocal";
+export type SyncStrategy = "additive" | "mirror";
+export type SyncReason = "missing" | "newer" | "sizeChanged";
+
+export interface SyncFile {
+  relative: string;
+  sourcePath: string;
+  destinationPath: string;
+  size: number;
+  reason: SyncReason;
+}
+
+export interface SyncDelete {
+  relative: string;
+  path: string;
+  kind: FileKind;
+  size: number;
+}
+
+export interface SyncPlan {
+  direction: SyncDirection;
+  strategy: SyncStrategy;
+  localRoot: string;
+  remoteRoot: string;
+  copies: SyncFile[];
+  deletes: SyncDelete[];
+  totalBytes: number;
+}
+
 export type S3Provider = "aws" | "r2" | "b2";
 
 export interface S3ProviderPreset {

@@ -7,6 +7,7 @@ mod known_hosts;
 mod profiles;
 mod remotefs;
 mod session;
+mod sync;
 mod terminal;
 mod transfer;
 
@@ -54,6 +55,8 @@ pub fn run() {
             commands::import_filezilla,
             commands::import_putty,
             commands::save_imported_profiles,
+            commands::sync_plan,
+            commands::sync_execute,
             commands::list_directory,
             commands::capabilities,
             commands::open_terminal,

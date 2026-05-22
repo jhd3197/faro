@@ -9,6 +9,9 @@ import type {
   ImporterPaths,
   ProfilePreview,
   SessionId,
+  SyncDirection,
+  SyncPlan,
+  SyncStrategy,
   TerminalDataEvent,
   TerminalExitEvent,
   Transfer,
@@ -134,6 +137,24 @@ export const ipc = {
 
   saveImportedProfiles: (previews: ProfilePreview[]) =>
     invoke<number>("save_imported_profiles", { previews }),
+
+  syncPlan: (
+    sessionId: SessionId,
+    localPath: string,
+    remotePath: string,
+    direction: SyncDirection,
+    strategy: SyncStrategy
+  ) =>
+    invoke<SyncPlan>("sync_plan", {
+      sessionId,
+      localPath,
+      remotePath,
+      direction,
+      strategy,
+    }),
+
+  syncExecute: (sessionId: SessionId, plan: SyncPlan) =>
+    invoke<string[]>("sync_execute", { sessionId, plan }),
 };
 
 export async function onHostPrompt(

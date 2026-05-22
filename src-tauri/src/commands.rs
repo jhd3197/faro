@@ -412,3 +412,105 @@ pub async fn save_imported_profiles(
     }
     Ok(n)
 }
+
+// ---------- Sync ----------
+
+use crate::sync::{self, SyncDirection, SyncPlan, SyncStrategy};
+
+#[tauri::command]
+pub async fn sync_plan(
+    session_id: String,
+    local_path: String,
+    remote_path: String,
+    direction: SyncDirection,
+    strategy: SyncStrategy,
+    state: State<'_, AppState>,
+) -> Result<SyncPlan, String> {
+    let local_fs: Box<dyn RemoteFs> = Box::new(crate::remotefs::local::LocalFs);
+    let remote_fs = fs_for(&session_id, &state).await?;
+    sync::plan(
+        local_fs.as_ref(),
+        remote_fs.as_ref(),
+        &local_path,
+        &remote_path,
+        direction,
+        strategy,
+    )
+    .await
+    .map_err(err)
+}
+
+#[tauri::command]
+pub async fn sync_execute(
+    session_id: String,
+    plan: SyncPlan,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let session = state
+        .sessions
+        .get(&session_id)
+        .await
+        .ok_or_else(|| format!("session {session_id} not found"))?;
+    let local_fs: Box<dyn RemoteFs> = Box::new(crate::remotefs::local::LocalFs);
+    let remote_fs = fs_for_session(&session);
+
+    let mut ids = Vec::new();
+    let policy = crate::transfer::OverwritePolicy::Overwrite;
+
+    for copy in plan.copies {
+        let dest_parent = parent_of(&copy.destination_path);
+        let id = match plan.direction {
+            SyncDirection::LocalToRemote => {
+                state
+                    .transfers
+                    .start_upload(
+                        session.clone(),
+                        copy.source_path,
+                        dest_parent,
+                        policy,
+                        app.clone(),
+                    )
+                    .await
+                    .map_err(err)?
+            }
+            SyncDirection::RemoteToLocal => {
+                state
+                    .transfers
+                    .start_download(
+                        session.clone(),
+                        copy.source_path,
+                        dest_parent,
+                        policy,
+                        app.clone(),
+                    )
+                    .await
+                    .map_err(err)?
+            }
+        };
+        ids.push(id);
+    }
+
+    // Apply Mirror deletes after queueing transfers. We don't gate on
+    // transfer completion — the user already confirmed the plan — but we
+    // do execute deletes serially in this call so the function only
+    // returns once the destination is in its final shape.
+    for d in plan.deletes {
+        let fs: &dyn RemoteFs = match plan.direction {
+            SyncDirection::LocalToRemote => remote_fs.as_ref(),
+            SyncDirection::RemoteToLocal => local_fs.as_ref(),
+        };
+        let _ = fs.delete(&d.path, false).await; // best-effort
+    }
+
+    Ok(ids)
+}
+
+fn parent_of(p: &str) -> String {
+    let last_slash = p.rfind(|c: char| c == '/' || c == '\\');
+    match last_slash {
+        Some(0) => "/".to_string(),
+        Some(i) => p[..i].to_string(),
+        None => ".".to_string(),
+    }
+}

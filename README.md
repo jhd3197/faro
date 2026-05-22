@@ -11,31 +11,32 @@ terminals, and work with S3-compatible storage — all in one window.
 
 ## Status
 
-**v0.7 dev.** New in v0.7: connection importers for OpenSSH config
-(`~/.ssh/config`), FileZilla (`sitemanager.xml`), and PuTTY (Windows
-registry / `~/.putty/sessions/`). One tabbed import dialog auto-detects
-default paths, lists every connection it found, lets the user pick which
-to bring in, and saves them to the profile store. Identity files surface as
-private-key auth pointing at the original path.
+**v1.0.** One-way directory sync (Local→Remote / Remote→Local; Additive or
+Mirror). The planner walks both trees via the `RemoteFs` trait so it works
+across every backend; the executor reuses the existing transfer queue for
+progress. A "Sync" button rides the splitter between the two file panes
+when a connection is active.
 
-From v0.6: Azure Blob via `ObjectFs` (shared with S3/R2/B2 — different
-builder, same `Arc<dyn ObjectStore>`).
+What's in the bag:
 
-From v0.5: S3 / R2 / B2 via object_store 0.11. Provider preset buttons,
-capability-aware UI, multipart upload above 16 MB.
+- Protocols: SFTP, FTP, FTPS, AWS S3, Cloudflare R2, Backblaze B2,
+  Azure Blob.
+- SSH polish: known-hosts verification with interactive fingerprint
+  prompt, ssh-agent (unix `$SSH_AUTH_SOCK`, OpenSSH-for-Windows named pipe,
+  Pageant pipe), multi-tab terminals.
+- Transfers: drag-and-drop, multi-select, recursive directories,
+  overwrite/skip/rename policies, multipart S3 above 16 MB, one-way sync
+  with optional mirror deletes.
+- Profile importers: OpenSSH `~/.ssh/config`, FileZilla `sitemanager.xml`,
+  PuTTY (Windows registry / `~/.putty/sessions/`).
+- File ops: rename, delete (recursive on dirs), mkdir, chmod (SFTP / unix
+  local; SITE CHMOD on FTP; not applicable on object stores).
+- UI: capability-aware (mkdir / chmod / terminal hide on backends that
+  don't support them), dark / light themes, terminal customisation,
+  sort / hidden-file prefs.
 
-From v0.4: FTP and FTPS backends, Pageant pipe support, per-protocol port
-defaults.
-
-From v0.3: known-hosts verification with interactive fingerprint prompt,
-ssh-agent auth (unix `$SSH_AUTH_SOCK`, OpenSSH-for-Windows named pipe,
-Pageant pipe), multi-tab terminals.
-
-From v0.2: connection profiles, SFTP browser, integrated SSH terminal,
-drag-and-drop transfers, recursive directory transfers, multi-select,
-right-click file ops, settings.
-
-Roadmap: v1.0 polish — sync mode, code signing, auto-updater, landing.
+External polish that requires infra (code signing, auto-updater, landing
+page) is intentionally outside this repo and deferred to release time.
 
 ## Architecture
 
@@ -136,5 +137,6 @@ src-tauri/src/
 - **v0.4** — FTP / FTPS backends, Pageant pipe support
 - **v0.5** — S3 / R2 / B2 (one backend, three endpoint configs)
 - **v0.6** — Azure Blob, ObjectSession refactor
-- **v0.7** — Profile importers (OpenSSH config, FileZilla, PuTTY) (this)
-- **v1.0** — Polish, sync mode, code signing, auto-updater, landing page
+- **v0.7** — Profile importers (OpenSSH config, FileZilla, PuTTY)
+- **v1.0** — One-way sync mode (this). Code signing / auto-updater / landing
+  page require external infra and are tracked outside this repo.
