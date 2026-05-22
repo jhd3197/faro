@@ -5,16 +5,16 @@ import { TerminalDock } from "./components/Terminal";
 import { TransferQueue } from "./components/TransferQueue";
 import { Settings } from "./components/Settings";
 import { HostKeyModal } from "./components/HostKeyModal";
+import { TitleBar } from "./components/TitleBar";
+import { ProfileEditor } from "./components/ProfileEditor";
+import { ImportDialog } from "./components/ImportDialog";
+import { AboutDialog } from "./components/AboutDialog";
 import { useConnections } from "./stores/connectionsStore";
 import { useTransfers } from "./stores/transfersStore";
 import { useLayout } from "./stores/layoutStore";
-import { useSettings } from "./stores/settingsStore";
 import {
   TerminalSquare,
   ArrowDownUp,
-  Settings as SettingsIcon,
-  Sun,
-  Moon,
   Wifi,
   WifiOff,
   Edit3,
@@ -41,11 +41,27 @@ export default function App() {
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [editsMenuOpen, setEditsMenuOpen] = useState(false);
+  const [newConnectionOpen, setNewConnectionOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
 
   return (
     <div className="flex h-screen w-screen flex-col">
-      <TitleBar onOpenSettings={() => setSettingsOpen(true)} />
+      <TitleBar
+        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenNewConnection={() => setNewConnectionOpen(true)}
+        onOpenImport={() => setImportOpen(true)}
+        onOpenAbout={() => setAboutOpen(true)}
+      />
       {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
+      {newConnectionOpen && (
+        <ProfileEditor
+          profile={null}
+          onClose={() => setNewConnectionOpen(false)}
+        />
+      )}
+      {importOpen && <ImportDialog onClose={() => setImportOpen(false)} />}
+      {aboutOpen && <AboutDialog onClose={() => setAboutOpen(false)} />}
       <HostKeyModal />
       <div className="flex flex-1 overflow-hidden">
         <ConnectionManager />
@@ -72,68 +88,6 @@ export default function App() {
           />
         </div>
       </div>
-    </div>
-  );
-}
-
-function TitleBar({ onOpenSettings }: { onOpenSettings: () => void }) {
-  const appTheme = useSettings((s) => s.appTheme);
-  const setAppTheme = useSettings((s) => s.setAppTheme);
-  return (
-    <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-bg-panel px-3">
-      <Logo />
-      <span className="text-[13px] font-semibold tracking-tight">Faro</span>
-      <span className="hidden text-[11px] text-text-dim sm:inline">
-        servers · storage · sessions
-      </span>
-      <span className="rounded-full bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-accent">
-        v1.2
-      </span>
-      <div className="flex-1" />
-      <button
-        onClick={() => setAppTheme(appTheme === "dark" ? "light" : "dark")}
-        className="rounded-md p-1.5 text-text-muted hover:bg-bg-hover hover:text-text"
-        title={`Switch to ${appTheme === "dark" ? "light" : "dark"} theme`}
-      >
-        {appTheme === "dark" ? <Sun size={14} /> : <Moon size={14} />}
-      </button>
-      <button
-        onClick={onOpenSettings}
-        className="rounded-md p-1.5 text-text-muted hover:bg-bg-hover hover:text-text"
-        title="Settings"
-      >
-        <SettingsIcon size={14} />
-      </button>
-    </div>
-  );
-}
-
-function Logo() {
-  // Stylised lighthouse silhouette + beam — matches the app icon. The beam
-  // uses the accent colour so the logo picks up theme changes naturally.
-  return (
-    <div className="flex h-5 w-5 items-center justify-center rounded-md text-white shadow-elev-1 btn-accent">
-      <svg
-        viewBox="0 0 16 16"
-        width="13"
-        height="13"
-        fill="currentColor"
-      >
-        {/* Beam */}
-        <path
-          d="M9 5.5 L15 4 L15 8 L9 6.5 Z"
-          fill="rgb(252 211 77)"
-          opacity="0.85"
-        />
-        {/* Lantern roof */}
-        <path d="M5 4.2 L7 2.5 L9 4.2 Z" />
-        {/* Lantern body */}
-        <rect x="5.4" y="4.2" width="3.2" height="2" rx="0.2" />
-        {/* Tower */}
-        <path d="M5 6.2 L9 6.2 L9.4 13.5 L4.6 13.5 Z" />
-        {/* Tower stripe */}
-        <rect x="4.6" y="9" width="4.8" height="0.7" fill="rgb(20 22 36)" />
-      </svg>
     </div>
   );
 }

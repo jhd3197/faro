@@ -6,7 +6,7 @@
 
 **A modern desktop client for SFTP, FTP, SSH, and S3-compatible storage.**
 
-[![Version](https://img.shields.io/badge/version-1.2.0-8b7ff6?style=flat-square)](https://github.com/jhd3197/faro/releases)
+[![Version](https://img.shields.io/badge/version-1.3.0-8b7ff6?style=flat-square)](https://github.com/jhd3197/faro/releases)
 [![License](https://img.shields.io/badge/license-MIT-8b7ff6?style=flat-square)](LICENSE)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-8b7ff6?style=flat-square)](https://tauri.app)
 
@@ -149,7 +149,8 @@ npm run tauri icon src-tauri/icons/source.png
 
 - **v1.0** — one-way sync mode
 - **v1.1** — `faro-cli` binary
-- **v1.2** — edit-in-place external editor *(this)*
+- **v1.2** — edit-in-place external editor
+- **v1.3** — custom title bar with File/Edit/View/Help menus + integrated window controls; GitHub Actions release pipeline + CI *(this)*
 - **next** — transfer speed limits, queue editing (priority/retry/pause), filename filters (`.gitignore`-style), WebDAV backend, search/filter
 - **release polish** — code signing (Apple Developer / Windows EV cert), Tauri auto-updater, landing page
 

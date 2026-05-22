@@ -1,0 +1,414 @@
+import { useEffect, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+
+/// Tauri opens any `window.open(url)` call to an http(s) URL in the user's
+/// system browser by default — no plugin required. We funnel external links
+/// through this helper so the policy stays in one place.
+function openExternal(url: string) {
+  window.open(url, "_blank", "noopener,noreferrer");
+}
+import {
+  Sun,
+  Moon,
+  Settings as SettingsIcon,
+  Minus,
+  Square,
+  Copy as CopySquares,
+  X,
+  Plus,
+  Download,
+  TerminalSquare,
+  ArrowDownUp,
+  Github,
+  Info,
+  ExternalLink,
+  RefreshCw,
+} from "lucide-react";
+import { useSettings } from "@/stores/settingsStore";
+import { useLayout } from "@/stores/layoutStore";
+import { useTransfers } from "@/stores/transfersStore";
+import { cn } from "@/lib/cn";
+
+const APP_VERSION = "v1.3";
+const REPO_URL = "https://github.com/jhd3197/faro";
+
+interface Props {
+  onOpenSettings: () => void;
+  onOpenNewConnection: () => void;
+  onOpenImport: () => void;
+  onOpenAbout: () => void;
+}
+
+/// Single custom title bar — replaces the OS chrome + the old app header.
+/// Draggable region via `data-tauri-drag-region` (Tauri picks it up); the
+/// menu buttons and window controls explicitly opt out via `data-no-drag`
+/// (handled by them being interactive elements — Tauri skips drag handling
+/// when the event target is a button or has the explicit attribute).
+export function TitleBar({
+  onOpenSettings,
+  onOpenNewConnection,
+  onOpenImport,
+  onOpenAbout,
+}: Props) {
+  const appTheme = useSettings((s) => s.appTheme);
+  const setAppTheme = useSettings((s) => s.setAppTheme);
+  const toggleTerminal = useLayout((s) => s.toggleTerminal);
+  const togglePanel = useTransfers((s) => s.togglePanel);
+  const [maximized, setMaximized] = useState(false);
+
+  // Track window state so the maximize icon flips to "restore" when needed.
+  useEffect(() => {
+    const win = getCurrentWindow();
+    win.isMaximized().then(setMaximized).catch(() => {});
+    const unlisten = win.onResized(() => {
+      win.isMaximized().then(setMaximized).catch(() => {});
+    });
+    return () => {
+      unlisten.then((u) => u()).catch(() => {});
+    };
+  }, []);
+
+  const win = getCurrentWindow();
+  const minimize = () => win.minimize();
+  const toggleMaximize = () => win.toggleMaximize();
+  const close = () => win.close();
+  const switchTheme = () =>
+    setAppTheme(appTheme === "dark" ? "light" : "dark");
+
+  const menus: MenuSpec[] = [
+    {
+      label: "File",
+      items: [
+        {
+          label: "New connection",
+          icon: <Plus size={11} />,
+          shortcut: "Ctrl+N",
+          onClick: onOpenNewConnection,
+        },
+        {
+          label: "Import connections…",
+          icon: <Download size={11} />,
+          onClick: onOpenImport,
+        },
+        { kind: "sep" },
+        {
+          label: "Quit",
+          shortcut: "Alt+F4",
+          onClick: close,
+        },
+      ],
+    },
+    {
+      label: "Edit",
+      items: [
+        {
+          label: "Preferences…",
+          icon: <SettingsIcon size={11} />,
+          shortcut: "Ctrl+,",
+          onClick: onOpenSettings,
+        },
+        { kind: "sep" },
+        {
+          label: "Reload window",
+          icon: <RefreshCw size={11} />,
+          shortcut: "Ctrl+R",
+          onClick: () => window.location.reload(),
+        },
+      ],
+    },
+    {
+      label: "View",
+      items: [
+        {
+          label: "Toggle terminal",
+          icon: <TerminalSquare size={11} />,
+          shortcut: "Ctrl+`",
+          onClick: toggleTerminal,
+        },
+        {
+          label: "Toggle transfer queue",
+          icon: <ArrowDownUp size={11} />,
+          shortcut: "Ctrl+T",
+          onClick: togglePanel,
+        },
+        { kind: "sep" },
+        {
+          label: appTheme === "dark" ? "Switch to light theme" : "Switch to dark theme",
+          icon: appTheme === "dark" ? <Sun size={11} /> : <Moon size={11} />,
+          shortcut: "Ctrl+Shift+T",
+          onClick: switchTheme,
+        },
+      ],
+    },
+    {
+      label: "Help",
+      items: [
+        {
+          label: "About Faro",
+          icon: <Info size={11} />,
+          onClick: onOpenAbout,
+        },
+        { kind: "sep" },
+        {
+          label: "GitHub repository",
+          icon: <Github size={11} />,
+          onClick: () => openExternal(REPO_URL),
+          rightIcon: <ExternalLink size={9} />,
+        },
+        {
+          label: "Report an issue",
+          onClick: () => openExternal(`${REPO_URL}/issues/new`),
+          rightIcon: <ExternalLink size={9} />,
+        },
+      ],
+    },
+  ];
+
+  // Hook a few keyboard shortcuts. Anything more elaborate gets its own
+  // hook later; this covers the ones the menu items label.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const ctrl = e.ctrlKey || e.metaKey;
+      if (!ctrl) return;
+      if (e.key.toLowerCase() === "n" && !e.shiftKey) {
+        e.preventDefault();
+        onOpenNewConnection();
+      } else if (e.key === ",") {
+        e.preventDefault();
+        onOpenSettings();
+      } else if (e.key === "`") {
+        e.preventDefault();
+        toggleTerminal();
+      } else if (e.key.toLowerCase() === "t" && e.shiftKey) {
+        e.preventDefault();
+        switchTheme();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appTheme]);
+
+  return (
+    <div
+      data-tauri-drag-region
+      className="flex h-9 shrink-0 select-none items-center gap-1 border-b border-border bg-bg-panel px-2"
+    >
+      <Logo />
+      <span
+        className="text-[13px] font-semibold tracking-tight"
+        data-tauri-drag-region
+      >
+        Faro
+      </span>
+      <span className="rounded-full bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-accent">
+        {APP_VERSION}
+      </span>
+
+      <MenuBar menus={menus} />
+
+      <div className="flex-1" data-tauri-drag-region />
+
+      <IconButton onClick={switchTheme} title={`Switch to ${appTheme === "dark" ? "light" : "dark"} theme`}>
+        {appTheme === "dark" ? <Sun size={13} /> : <Moon size={13} />}
+      </IconButton>
+      <IconButton onClick={onOpenSettings} title="Settings">
+        <SettingsIcon size={13} />
+      </IconButton>
+
+      <div className="ml-1 flex h-9 items-stretch">
+        <WindowButton onClick={minimize} title="Minimize">
+          <Minus size={12} />
+        </WindowButton>
+        <WindowButton onClick={toggleMaximize} title={maximized ? "Restore" : "Maximize"}>
+          {maximized ? <CopySquares size={11} /> : <Square size={11} />}
+        </WindowButton>
+        <WindowButton onClick={close} title="Close" danger>
+          <X size={13} />
+        </WindowButton>
+      </div>
+    </div>
+  );
+}
+
+// ---- Menu primitives ---------------------------------------------------
+
+type MenuItem =
+  | {
+      kind?: "item";
+      label: string;
+      icon?: React.ReactNode;
+      rightIcon?: React.ReactNode;
+      shortcut?: string;
+      onClick: () => void;
+    }
+  | { kind: "sep" };
+
+interface MenuSpec {
+  label: string;
+  items: MenuItem[];
+}
+
+function MenuBar({ menus }: { menus: MenuSpec[] }) {
+  // `open` is the index of the currently-open menu (-1 = none). Hover-switch
+  // works once any menu is open, matching Windows/Office behaviour.
+  const [open, setOpen] = useState<number>(-1);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (open < 0) return;
+    const onDown = (e: MouseEvent) => {
+      if (!containerRef.current?.contains(e.target as Node)) setOpen(-1);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(-1);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={containerRef} className="ml-2 flex items-center">
+      {menus.map((m, i) => (
+        <div key={m.label} className="relative">
+          <button
+            onClick={() => setOpen(open === i ? -1 : i)}
+            onMouseEnter={() => {
+              if (open >= 0) setOpen(i);
+            }}
+            className={cn(
+              "rounded px-2 py-0.5 text-[12px] transition-colors",
+              open === i
+                ? "bg-bg-hover text-text"
+                : "text-text-muted hover:bg-bg-hover hover:text-text"
+            )}
+          >
+            {m.label}
+          </button>
+          {open === i && (
+            <MenuDropdown items={m.items} onClose={() => setOpen(-1)} />
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MenuDropdown({
+  items,
+  onClose,
+}: {
+  items: MenuItem[];
+  onClose: () => void;
+}) {
+  return (
+    <div className="anim-modal absolute left-0 top-7 z-50 min-w-[14rem] overflow-hidden rounded-md border border-border bg-bg-panel shadow-elev-3">
+      {items.map((item, i) => {
+        if ("kind" in item && item.kind === "sep") {
+          return (
+            <div key={`sep-${i}`} className="my-0.5 h-px bg-border-subtle" />
+          );
+        }
+        const it = item as Extract<MenuItem, { label: string }>;
+        return (
+          <button
+            key={it.label + i}
+            onClick={() => {
+              onClose();
+              // Defer the action one tick so the dropdown unmounts before the
+              // handler runs anything (e.g. an alert / dialog).
+              setTimeout(it.onClick, 0);
+            }}
+            className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[12px] text-text-muted transition-colors hover:bg-bg-hover hover:text-text"
+          >
+            <span className="flex h-3 w-3 items-center justify-center">
+              {it.icon}
+            </span>
+            <span className="flex-1">{it.label}</span>
+            {it.rightIcon && (
+              <span className="text-text-dim">{it.rightIcon}</span>
+            )}
+            {it.shortcut && (
+              <span className="ml-2 font-mono text-[10px] text-text-dim">
+                {it.shortcut}
+              </span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---- Window control buttons --------------------------------------------
+
+function WindowButton({
+  onClick,
+  title,
+  danger,
+  children,
+}: {
+  onClick: () => void;
+  title: string;
+  danger?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className={cn(
+        "flex h-9 w-11 items-center justify-center text-text-muted transition-colors",
+        danger
+          ? "hover:bg-danger hover:text-white"
+          : "hover:bg-bg-hover hover:text-text"
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function IconButton({
+  onClick,
+  title,
+  children,
+}: {
+  onClick: () => void;
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      className="rounded-md p-1.5 text-text-muted hover:bg-bg-hover hover:text-text"
+    >
+      {children}
+    </button>
+  );
+}
+
+// ---- Logo --------------------------------------------------------------
+
+function Logo() {
+  return (
+    <div className="ml-1 mr-1 flex h-5 w-5 items-center justify-center rounded-md text-white shadow-elev-1 btn-accent">
+      <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor">
+        <path
+          d="M9 5.5 L15 4 L15 8 L9 6.5 Z"
+          fill="rgb(252 211 77)"
+          opacity="0.85"
+        />
+        <path d="M5 4.2 L7 2.5 L9 4.2 Z" />
+        <rect x="5.4" y="4.2" width="3.2" height="2" rx="0.2" />
+        <path d="M5 6.2 L9 6.2 L9.4 13.5 L4.6 13.5 Z" />
+        <rect x="4.6" y="9" width="4.8" height="0.7" fill="rgb(20 22 36)" />
+      </svg>
+    </div>
+  );
+}
