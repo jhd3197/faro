@@ -4,6 +4,8 @@ import type {
   ConnectionProfile,
   DirEntry,
   Capabilities,
+  HostDecision,
+  HostPromptEvent,
   SessionId,
   TerminalDataEvent,
   TerminalExitEvent,
@@ -114,7 +116,16 @@ export const ipc = {
 
   chmodPath: (sessionId: SessionId, path: string, mode: number) =>
     invoke<void>("chmod_path", { sessionId, path, mode }),
+
+  respondToHostPrompt: (requestId: string, decision: HostDecision) =>
+    invoke<void>("respond_to_host_prompt", { requestId, decision }),
 };
+
+export async function onHostPrompt(
+  cb: (event: HostPromptEvent) => void
+): Promise<UnlistenFn> {
+  return listen<HostPromptEvent>("host://prompt", (e) => cb(e.payload));
+}
 
 export async function onTerminalData(
   cb: (event: TerminalDataEvent) => void

@@ -2,6 +2,7 @@ use std::sync::Arc;
 use tauri::Manager;
 
 mod commands;
+mod known_hosts;
 mod profiles;
 mod remotefs;
 mod session;
@@ -46,6 +47,7 @@ pub fn run() {
             commands::delete_profile,
             commands::connect,
             commands::disconnect,
+            commands::respond_to_host_prompt,
             commands::list_directory,
             commands::capabilities,
             commands::open_terminal,

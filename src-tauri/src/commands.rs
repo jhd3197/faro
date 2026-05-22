@@ -1,5 +1,6 @@
 use crate::profiles::ConnectionProfile;
 use crate::remotefs::{Capabilities, DirEntry, RemoteFs};
+use crate::session::HostDecision;
 use crate::transfer::{OverwritePolicy, Transfer};
 use crate::AppState;
 use tauri::{AppHandle, State};
@@ -42,6 +43,7 @@ pub async fn delete_profile(
 #[tauri::command]
 pub async fn connect(
     profile_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     let profile = state
@@ -50,7 +52,7 @@ pub async fn connect(
         .await
         .map_err(err)?
         .ok_or_else(|| format!("profile {profile_id} not found"))?;
-    state.sessions.connect(profile).await.map_err(err)
+    state.sessions.connect(profile, app).await.map_err(err)
 }
 
 #[tauri::command]
@@ -59,6 +61,20 @@ pub async fn disconnect(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     state.sessions.disconnect(&session_id).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn respond_to_host_prompt(
+    request_id: String,
+    decision: HostDecision,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .sessions
+        .prompts
+        .resolve(&request_id, decision)
+        .await
+        .map_err(err)
 }
 
 // ---------- File system ----------

@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { ConnectionManager } from "./components/ConnectionManager";
 import { DualPaneBrowser } from "./components/DualPaneBrowser";
-import { Terminal } from "./components/Terminal";
+import { TerminalDock } from "./components/Terminal";
 import { TransferQueue } from "./components/TransferQueue";
 import { Settings } from "./components/Settings";
+import { HostKeyModal } from "./components/HostKeyModal";
 import { useConnections } from "./stores/connectionsStore";
 import { useTransfers } from "./stores/transfersStore";
 import { useLayout } from "./stores/layoutStore";
@@ -36,6 +37,7 @@ export default function App() {
     <div className="flex h-screen w-screen flex-col">
       <TitleBar onOpenSettings={() => setSettingsOpen(true)} />
       {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
+      <HostKeyModal />
       <div className="flex flex-1 overflow-hidden">
         <ConnectionManager />
         <div className="flex flex-1 flex-col">
@@ -44,7 +46,7 @@ export default function App() {
           </div>
           {activeSessionId && terminalOpen && (
             <div className="h-72 border-t border-border">
-              <Terminal sessionId={activeSessionId} />
+              <TerminalDock sessionId={activeSessionId} />
             </div>
           )}
           <TransferQueue />
@@ -72,7 +74,7 @@ function TitleBar({ onOpenSettings }: { onOpenSettings: () => void }) {
         servers · storage · sessions
       </span>
       <span className="rounded-full bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-accent">
-        v0.2
+        v0.3
       </span>
       <div className="flex-1" />
       <button

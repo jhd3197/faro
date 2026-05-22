@@ -11,15 +11,17 @@ terminals, and work with S3-compatible storage — all in one window.
 
 ## Status
 
-**v0.2 dev.** Working: connection profiles, SFTP browser, integrated SSH
-terminal sharing one session, drag-and-drop transfers, recursive directory
-transfers, multi-select, right-click file ops (rename, delete, mkdir, chmod,
-copy path), expanded settings (dark/light themes, terminal customisation,
-sort/hidden-file preferences, default port).
+**v0.3 dev.** New in v0.3: known-hosts verification with an interactive
+fingerprint prompt, ssh-agent auth (unix `$SSH_AUTH_SOCK` and
+OpenSSH-for-Windows named pipe), multi-tab terminals sharing one SSH session.
 
-Roadmap: FTP, S3 / R2 / B2 / Azure Blob backends, ssh-agent / Pageant,
-known-hosts verification, multiple terminal tabs, profile importers (PuTTY
-`.ppk`, OpenSSH `~/.ssh/config`, WinSCP).
+Working from v0.2: connection profiles, SFTP browser, integrated SSH terminal,
+drag-and-drop transfers, recursive directory transfers, multi-select,
+right-click file ops (rename, delete, mkdir, chmod, copy path), settings
+(dark/light themes, terminal customisation, sort/hidden, default port).
+
+Roadmap: FTP, S3 / R2 / B2 / Azure Blob backends, Pageant proper, profile
+importers (PuTTY `.ppk`, OpenSSH `~/.ssh/config`, WinSCP).
 
 ## Architecture
 
@@ -115,9 +117,10 @@ src-tauri/src/
 
 ## Roadmap (concrete)
 
-- **v0.2** — SFTP, integrated terminal, drag-and-drop, recursive transfers, file ops, settings (this)
-- **v0.3** — FTP, ssh-agent / Pageant, known-hosts verification, multi-terminal tabs
-- **v0.4** — S3 / R2 / B2 (one backend, three endpoint configs)
-- **v0.5** — Azure Blob, conflict resolution, sync mode
-- **v0.6** — Profile importers (PuTTY, OpenSSH config, WinSCP, FileZilla)
+- **v0.2** — SFTP, integrated terminal, drag-and-drop, recursive transfers, file ops, settings
+- **v0.3** — known-hosts verification, ssh-agent (unix + OpenSSH-for-Windows pipe), multi-tab terminals (this)
+- **v0.4** — FTP backend, Pageant proper
+- **v0.5** — S3 / R2 / B2 (one backend, three endpoint configs)
+- **v0.6** — Azure Blob, conflict resolution, sync mode
+- **v0.7** — Profile importers (PuTTY, OpenSSH config, WinSCP, FileZilla)
 - **v1.0** — Polish, code signing, auto-updater, landing page

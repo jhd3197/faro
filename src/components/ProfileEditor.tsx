@@ -119,11 +119,23 @@ export function ProfileEditor({ profile, onClose }: Props) {
           >
             <option value="password">Password</option>
             <option value="key">Private key file</option>
-            <option value="agent" disabled>
-              SSH agent (v0.2)
-            </option>
+            <option value="agent">SSH agent</option>
           </select>
         </Field>
+
+        {authKind === "agent" && (
+          <div className="mb-3 rounded-md border border-border bg-bg-subtle px-2.5 py-2 text-[11.5px] leading-relaxed text-text-muted">
+            Uses the running SSH agent for authentication.
+            {" "}
+            <span className="font-mono text-text-dim">
+              {/* eslint-disable-next-line no-undef */}
+              {navigator.platform.startsWith("Win")
+                ? "OpenSSH Authentication Agent service (\\.\\pipe\\openssh-ssh-agent)"
+                : "$SSH_AUTH_SOCK"}
+            </span>
+            . Run <span className="font-mono">ssh-add</span> first to load your keys.
+          </div>
+        )}
 
         {authKind === "password" && (
           <Field label="Password">

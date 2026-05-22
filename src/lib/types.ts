@@ -4,7 +4,7 @@
 export type AuthMethod =
   | { kind: "password"; password: string }
   | { kind: "key"; path: string; passphrase?: string }
-  | { kind: "agent" }; // v0.2
+  | { kind: "agent" };
 
 export interface ConnectionProfile {
   id: string;
@@ -48,6 +48,22 @@ export interface TerminalDataEvent {
 export interface TerminalExitEvent {
   terminalId: string;
   code: number | null;
+}
+
+// Server-side asks the user whether to trust a host fingerprint we've never
+// seen, or whose stored key has changed (potential MITM). The user replies via
+// `respondToHostPrompt`. Mirrors src-tauri/src/session/mod.rs.
+export type HostPromptKind = "unknown" | "mismatch";
+export type HostDecision = "accept" | "trust" | "reject";
+
+export interface HostPromptEvent {
+  requestId: string;
+  host: string;
+  port: number;
+  keyType: string;
+  fingerprint: string;
+  storedFingerprint?: string | null;
+  kind: HostPromptKind;
 }
 
 export type TransferKind = "download" | "upload";

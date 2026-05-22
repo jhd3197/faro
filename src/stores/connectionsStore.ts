@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { ipc } from "@/lib/ipc";
 import type { ConnectionProfile, SessionId } from "@/lib/types";
+import { useTerminals } from "./terminalsStore";
 
 interface ConnectionsState {
   profiles: ConnectionProfile[];
@@ -57,6 +58,7 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
     const sid = get().activeSessionId;
     if (!sid) return;
     await ipc.disconnect(sid);
+    useTerminals.getState().dropSessionTabs(sid);
     set({ activeSessionId: null, activeProfileId: null });
   },
 }));
