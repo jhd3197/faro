@@ -14,7 +14,7 @@ import {
   ServerOff,
 } from "lucide-react";
 import { ipc } from "@/lib/ipc";
-import type { DirEntry, SessionId } from "@/lib/types";
+import type { Capabilities, DirEntry, SessionId } from "@/lib/types";
 import { LOCAL_SESSION } from "@/lib/types";
 import { useSettings } from "@/stores/settingsStore";
 import { cn } from "@/lib/cn";
@@ -66,6 +66,7 @@ export function FilePane({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [anchor, setAnchor] = useState<string | null>(null);
   const [isDropTarget, setIsDropTarget] = useState(false);
+  const [caps, setCaps] = useState<Capabilities | null>(null);
   const [menu, setMenu] = useState<{
     x: number;
     y: number;
@@ -104,6 +105,27 @@ export function FilePane({
   useEffect(() => {
     load(path);
   }, [sessionId, path, load]);
+
+  // Pull capabilities once per session so chmod / mkdir / etc. can be hidden
+  // for backends that don't support them (notably S3).
+  useEffect(() => {
+    if (!sessionId) {
+      setCaps(null);
+      return;
+    }
+    let cancelled = false;
+    ipc.capabilities(sessionId).then(
+      (c) => {
+        if (!cancelled) setCaps(c);
+      },
+      () => {
+        if (!cancelled) setCaps(null);
+      }
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
 
   // Apply filter + sort from settings.
   const visible = entries
@@ -312,7 +334,11 @@ export function FilePane({
       onClick: () => copyNames(selectedItems),
       separatorAfter: single?.kind === "file",
     });
-    if (single?.kind === "file" && sessionId !== LOCAL_SESSION) {
+    if (
+      single?.kind === "file" &&
+      sessionId !== LOCAL_SESSION &&
+      caps?.canChmod !== false
+    ) {
       items.push({
         label: "Change permissions (chmod)…",
         icon: <ShieldCheck size={12} />,
@@ -325,19 +351,20 @@ export function FilePane({
   const openPaneMenu = (e: React.MouseEvent) => {
     if (!sessionId) return;
     e.preventDefault();
-    const items: MenuItem[] = [
-      {
+    const items: MenuItem[] = [];
+    if (caps?.hasDirectories !== false) {
+      items.push({
         label: "New folder…",
         icon: <FolderPlus size={12} />,
         onClick: () => setModal({ type: "mkdir" }),
         separatorAfter: true,
-      },
-      {
-        label: "Refresh",
-        icon: <RefreshCw size={12} />,
-        onClick: () => load(path),
-      },
-    ];
+      });
+    }
+    items.push({
+      label: "Refresh",
+      icon: <RefreshCw size={12} />,
+      onClick: () => load(path),
+    });
     setMenu({ x: e.clientX, y: e.clientY, items });
   };
 
@@ -437,14 +464,16 @@ export function FilePane({
             {transferLabel} {selectionCount}
           </button>
         )}
-        <button
-          onClick={() => setModal({ type: "mkdir" })}
-          disabled={!sessionId}
-          className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"
-          title="New folder"
-        >
-          <FolderPlus size={13} />
-        </button>
+        {caps?.hasDirectories !== false && (
+          <button
+            onClick={() => setModal({ type: "mkdir" })}
+            disabled={!sessionId}
+            className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"
+            title="New folder"
+          >
+            <FolderPlus size={13} />
+          </button>
+        )}
         <button
           onClick={goUp}
           disabled={!sessionId}

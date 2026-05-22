@@ -6,6 +6,8 @@ import {
   PlugZap,
   TerminalSquare,
   Pencil,
+  Cloud,
+  Server,
 } from "lucide-react";
 import { useConnections } from "@/stores/connectionsStore";
 import { useLayout } from "@/stores/layoutStore";
@@ -156,11 +158,24 @@ function ProfileRow({
       <button
         className="min-w-0 flex-1 text-left"
         onClick={onConnect}
-        title={`${p.username}@${p.host}:${p.port}`}
+        title={
+          p.protocol === "s3"
+            ? `s3://${p.bucket ?? "?"}${p.endpoint ? ` @ ${p.endpoint}` : ""}`
+            : `${p.username}@${p.host}:${p.port}`
+        }
       >
-        <div className="truncate text-[13px] font-medium">{p.name}</div>
+        <div className="flex items-center gap-1 truncate text-[13px] font-medium">
+          {p.protocol === "s3" ? (
+            <Cloud size={11} className="text-text-dim" />
+          ) : (
+            <Server size={11} className="text-text-dim" />
+          )}
+          <span className="truncate">{p.name}</span>
+        </div>
         <div className="truncate font-mono text-[11px] text-text-dim">
-          {p.username}@{p.host}
+          {p.protocol === "s3"
+            ? `s3://${p.bucket ?? "?"}`
+            : `${p.username}@${p.host}`}
         </div>
       </button>
       <div className="flex shrink-0 items-center gap-0.5">

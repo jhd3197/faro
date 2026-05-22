@@ -1,4 +1,4 @@
-use crate::session::{FtpSession, Session, SshSession};
+use crate::session::{FtpSession, S3Session, Session, SshSession};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -227,6 +227,16 @@ impl TransferManager {
                     )
                     .await
                 }
+                Session::S3(s3) => {
+                    mgr.run_s3_download(
+                        &id_for_task,
+                        s3.clone(),
+                        &remote_path,
+                        &final_path,
+                        &app,
+                    )
+                    .await
+                }
             };
             finalize(&mgr, &id_for_task, &app, res).await;
         });
@@ -343,6 +353,16 @@ impl TransferManager {
                     mgr.run_ftp_upload(
                         &id_for_task,
                         ftp.clone(),
+                        &local,
+                        &final_remote,
+                        &app,
+                    )
+                    .await
+                }
+                Session::S3(s3) => {
+                    mgr.run_s3_upload(
+                        &id_for_task,
+                        s3.clone(),
                         &local,
                         &final_remote,
                         &app,
@@ -612,6 +632,142 @@ impl TransferManager {
         self.update(id, |t| t.transferred = written).await;
         Ok(())
     }
+
+    async fn run_s3_download(
+        &self,
+        id: &str,
+        session: Arc<S3Session>,
+        remote_path: &str,
+        local_path: &Path,
+        app: &AppHandle,
+    ) -> Result<()> {
+        use futures::StreamExt;
+        use tokio::io::AsyncWriteExt;
+
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+
+        let key = remote_path.trim_start_matches('/');
+        let p = object_store::path::Path::from(key);
+        let get = session
+            .store
+            .get(&p)
+            .await
+            .with_context(|| format!("s3 get {key}"))?;
+
+        let mut file = tokio::fs::File::create(local_path)
+            .await
+            .with_context(|| format!("create {}", local_path.display()))?;
+        let mut stream = get.into_stream();
+        let mut transferred: u64 = 0;
+        let mut last_emit = Instant::now();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.with_context(|| format!("s3 chunk for {key}"))?;
+            file.write_all(&chunk).await?;
+            transferred += chunk.len() as u64;
+            if last_emit.elapsed() > Duration::from_millis(100) {
+                self.update(id, |t| t.transferred = transferred).await;
+                if let Some(t) = self.get(id).await {
+                    let _ = app.emit("transfer://progress", &t);
+                }
+                last_emit = Instant::now();
+            }
+        }
+        file.flush().await?;
+        self.update(id, |t| t.transferred = transferred).await;
+        Ok(())
+    }
+
+    async fn run_s3_upload(
+        &self,
+        id: &str,
+        session: Arc<S3Session>,
+        local_path: &Path,
+        remote_path: &str,
+        app: &AppHandle,
+    ) -> Result<()> {
+        use tokio::io::AsyncReadExt;
+
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+
+        let key = remote_path.trim_start_matches('/');
+        let p = object_store::path::Path::from(key);
+
+        // For files under ~16 MB we put in one shot; larger files go through
+        // a multipart upload so we get streaming + parallelism without buffering
+        // the whole body in memory.
+        let meta = tokio::fs::metadata(local_path)
+            .await
+            .with_context(|| format!("stat {}", local_path.display()))?;
+        let size = meta.len();
+        let mut file = tokio::fs::File::open(local_path)
+            .await
+            .with_context(|| format!("open {}", local_path.display()))?;
+
+        if size <= 16 * 1024 * 1024 {
+            let mut buf = Vec::with_capacity(size as usize);
+            file.read_to_end(&mut buf).await?;
+            session
+                .store
+                .put(&p, bytes::Bytes::from(buf).into())
+                .await
+                .with_context(|| format!("s3 put {key}"))?;
+            self.update(id, |t| t.transferred = size).await;
+            if let Some(t) = self.get(id).await {
+                let _ = app.emit("transfer://progress", &t);
+            }
+            return Ok(());
+        }
+
+        // Multipart path. object_store wants a `MultipartUpload` for which we
+        // push parts and call complete() at the end.
+        let mut upload = session
+            .store
+            .put_multipart(&p)
+            .await
+            .with_context(|| format!("s3 begin multipart {key}"))?;
+
+        const PART: usize = 8 * 1024 * 1024;
+        let mut transferred: u64 = 0;
+        let mut last_emit = Instant::now();
+        let mut buf = vec![0u8; PART];
+        loop {
+            let mut filled = 0;
+            while filled < buf.len() {
+                let n = file.read(&mut buf[filled..]).await?;
+                if n == 0 {
+                    break;
+                }
+                filled += n;
+            }
+            if filled == 0 {
+                break;
+            }
+            let chunk = bytes::Bytes::copy_from_slice(&buf[..filled]);
+            upload
+                .put_part(chunk.into())
+                .await
+                .with_context(|| format!("s3 put_part {key}"))?;
+            transferred += filled as u64;
+            if last_emit.elapsed() > Duration::from_millis(100) {
+                self.update(id, |t| t.transferred = transferred).await;
+                if let Some(t) = self.get(id).await {
+                    let _ = app.emit("transfer://progress", &t);
+                }
+                last_emit = Instant::now();
+            }
+            if filled < buf.len() {
+                break;
+            }
+        }
+        upload
+            .complete()
+            .await
+            .with_context(|| format!("s3 complete multipart {key}"))?;
+        self.update(id, |t| t.transferred = transferred).await;
+        Ok(())
+    }
 }
 
 /// Build a RemoteFs handle for the right backend.
@@ -619,6 +775,7 @@ fn fs_for_session(session: &Arc<Session>) -> Box<dyn crate::remotefs::RemoteFs> 
     match &**session {
         Session::Ssh(ssh) => Box::new(crate::remotefs::sftp::SftpFs::new(ssh.clone())),
         Session::Ftp(ftp) => Box::new(crate::remotefs::ftp::FtpFs::new(ftp.clone())),
+        Session::S3(s3) => Box::new(crate::remotefs::s3::S3Fs::new(s3.clone())),
     }
 }
 
@@ -639,6 +796,16 @@ async fn remote_size(session: &Arc<Session>, path: &str) -> Result<u64> {
             let path = path.to_string();
             let sz = ftp.with_stream(move |s| s.size(&path)).await?;
             Ok(sz as u64)
+        }
+        Session::S3(s3) => {
+            let key = path.trim_start_matches('/').to_string();
+            let p = object_store::path::Path::from(key.as_str());
+            let meta = s3
+                .store
+                .head(&p)
+                .await
+                .with_context(|| format!("s3 head {key}"))?;
+            Ok(meta.size as u64)
         }
     }
 }
@@ -673,7 +840,6 @@ async fn remote_resolve(
                 OverwritePolicy::Skip => (initial_remote.to_string(), exists),
                 OverwritePolicy::Rename if !exists => (initial_remote.to_string(), false),
                 OverwritePolicy::Rename => {
-                    // FTP has no fast stat; probe candidates linearly.
                     let mut candidate = initial_remote.to_string();
                     let session = ftp.clone();
                     for i in 1..=999 {
@@ -684,6 +850,29 @@ async fn remote_resolve(
                             .with_stream(move |s| Ok(s.size(&probe).is_ok()))
                             .await?;
                         if !found {
+                            break;
+                        }
+                    }
+                    (candidate, false)
+                }
+            })
+        }
+        Session::S3(s3) => {
+            let key = initial_remote.trim_start_matches('/').to_string();
+            let probe = object_store::path::Path::from(key.as_str());
+            let exists = s3.store.head(&probe).await.is_ok();
+            Ok(match policy {
+                OverwritePolicy::Overwrite => (initial_remote.to_string(), false),
+                OverwritePolicy::Skip => (initial_remote.to_string(), exists),
+                OverwritePolicy::Rename if !exists => (initial_remote.to_string(), false),
+                OverwritePolicy::Rename => {
+                    let mut candidate = initial_remote.to_string();
+                    for i in 1..=999 {
+                        let (stem, ext) = split_ext(initial_remote);
+                        candidate = format!("{stem}_{i}{ext}");
+                        let key = candidate.trim_start_matches('/');
+                        let p = object_store::path::Path::from(key);
+                        if s3.store.head(&p).await.is_err() {
                             break;
                         }
                     }

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod ftp;
 pub mod local;
+pub mod s3;
 pub mod sftp;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,5 +1,7 @@
 pub mod ftp;
+pub mod s3;
 pub use ftp::{ftp_connect, FtpSession};
+pub use s3::{s3_connect, S3Session};
 
 use crate::known_hosts;
 use crate::profiles::{AuthMethod, ConnectionProfile};
@@ -333,6 +335,7 @@ pub async fn ssh_connect(
 pub enum Session {
     Ssh(Arc<SshSession>),
     Ftp(Arc<FtpSession>),
+    S3(Arc<S3Session>),
 }
 
 impl Session {
@@ -340,6 +343,7 @@ impl Session {
         match self {
             Self::Ssh(s) => &s.profile,
             Self::Ftp(s) => &s.profile,
+            Self::S3(s) => &s.profile,
         }
     }
 
@@ -347,6 +351,7 @@ impl Session {
         match self {
             Self::Ssh(_) => "sftp",
             Self::Ftp(_) => "ftp",
+            Self::S3(_) => "s3",
         }
     }
 }
@@ -385,6 +390,12 @@ impl SessionManager {
                 let ftp = ftp_connect(&profile).await?;
                 let id = ftp.id.clone();
                 (id, Session::Ftp(Arc::new(ftp)))
+            }
+            "s3" => {
+                let _ = app; // S3 has no per-connect UI prompts.
+                let s3 = s3_connect(&profile).await?;
+                let id = s3.id.clone();
+                (id, Session::S3(Arc::new(s3)))
             }
             other => return Err(anyhow!("unsupported protocol: {other}")),
         };
@@ -429,6 +440,9 @@ impl SessionManager {
                             Ok(())
                         })
                         .await;
+                }
+                Session::S3(_) => {
+                    // Object stores are stateless HTTP — nothing to close.
                 }
             }
         }

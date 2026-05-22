@@ -6,7 +6,7 @@ export type AuthMethod =
   | { kind: "key"; path: string; passphrase?: string }
   | { kind: "agent" };
 
-export type Protocol = "sftp" | "ftp" | "ftps";
+export type Protocol = "sftp" | "ftp" | "ftps" | "s3";
 
 export interface ConnectionProfile {
   id: string;
@@ -18,18 +18,54 @@ export interface ConnectionProfile {
   auth: AuthMethod;
   defaultRemotePath?: string;
   color?: string;
+  // Object-store-specific fields (used when protocol === "s3").
+  bucket?: string;
+  region?: string;
+  endpoint?: string;
 }
 
 export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {
   sftp: 22,
   ftp: 21,
   ftps: 21,
+  s3: 443,
 };
 
 export const PROTOCOL_LABEL: Record<Protocol, string> = {
   sftp: "SFTP",
   ftp: "FTP",
   ftps: "FTPS",
+  s3: "S3",
+};
+
+export type S3Provider = "aws" | "r2" | "b2";
+
+export interface S3ProviderPreset {
+  label: string;
+  description: string;
+  endpointHint: string; // displayed as placeholder
+  defaultRegion: string;
+}
+
+export const S3_PROVIDER_PRESETS: Record<S3Provider, S3ProviderPreset> = {
+  aws: {
+    label: "AWS S3",
+    description: "Native Amazon S3; endpoint derived from region.",
+    endpointHint: "(leave blank — derived from region)",
+    defaultRegion: "us-east-1",
+  },
+  r2: {
+    label: "Cloudflare R2",
+    description: "S3-compatible. Region is always 'auto'.",
+    endpointHint: "https://<account>.r2.cloudflarestorage.com",
+    defaultRegion: "auto",
+  },
+  b2: {
+    label: "Backblaze B2",
+    description: "S3-compatible. Endpoint is per-bucket region.",
+    endpointHint: "https://s3.us-west-002.backblazeb2.com",
+    defaultRegion: "us-west-002",
+  },
 };
 
 export type FileKind = "file" | "directory" | "symlink" | "other";

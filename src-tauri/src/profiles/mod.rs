@@ -22,7 +22,7 @@ pub enum AuthMethod {
 pub struct ConnectionProfile {
     pub id: String,
     pub name: String,
-    pub protocol: String, // "sftp" for v0.1
+    pub protocol: String, // "sftp" | "ftp" | "ftps" | "s3"
     pub host: String,
     pub port: u16,
     pub username: String,
@@ -31,6 +31,14 @@ pub struct ConnectionProfile {
     pub default_remote_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    // Object-store-specific fields. Unused for sftp/ftp protocols. We keep
+    // them optional so existing profile JSON files keep loading.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
 }
 
 // Plain JSON file in the app data dir. v0.2 moves secrets into the OS
