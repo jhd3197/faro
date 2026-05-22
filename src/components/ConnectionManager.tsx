@@ -164,13 +164,15 @@ function ProfileRow({
         </div>
       </button>
       <div className="flex shrink-0 items-center gap-0.5">
-        <IconButton
-          onClick={onOpenShell}
-          title="Open shell"
-          activeColor="accent"
-        >
-          <TerminalSquare size={13} />
-        </IconButton>
+        {p.protocol === "sftp" && (
+          <IconButton
+            onClick={onOpenShell}
+            title="Open shell"
+            activeColor="accent"
+          >
+            <TerminalSquare size={13} />
+          </IconButton>
+        )}
         <IconButton
           onClick={onEdit}
           title="Edit"

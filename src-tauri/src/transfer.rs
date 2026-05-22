@@ -1,4 +1,4 @@
-use crate::session::SshSession;
+use crate::session::{FtpSession, Session, SshSession};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -161,21 +161,13 @@ impl TransferManager {
 
     pub async fn start_download(
         self: &Arc<Self>,
-        session: Arc<SshSession>,
+        session: Arc<Session>,
         remote_path: String,
         local_dir: String,
         policy: OverwritePolicy,
         app: AppHandle,
     ) -> Result<String> {
-        let size = {
-            let sftp_cell = session.ensure_sftp().await?;
-            let sftp = sftp_cell.lock().await;
-            sftp.metadata(&remote_path)
-                .await
-                .with_context(|| format!("stat {remote_path}"))?
-                .size
-                .unwrap_or(0)
-        };
+        let size = remote_size(&session, &remote_path).await.unwrap_or(0);
 
         let initial = PathBuf::from(&local_dir).join(basename(&remote_path));
         let (final_path, skip) = match policy {
@@ -214,16 +206,35 @@ impl TransferManager {
         let mgr = Arc::clone(self);
         let id_for_task = id.clone();
         let task = tokio::spawn(async move {
-            let res = mgr
-                .run_download(&id_for_task, session, &remote_path, &final_path, &app)
-                .await;
+            let res = match &*session {
+                Session::Ssh(ssh) => {
+                    mgr.run_ssh_download(
+                        &id_for_task,
+                        ssh.clone(),
+                        &remote_path,
+                        &final_path,
+                        &app,
+                    )
+                    .await
+                }
+                Session::Ftp(ftp) => {
+                    mgr.run_ftp_download(
+                        &id_for_task,
+                        ftp.clone(),
+                        &remote_path,
+                        &final_path,
+                        &app,
+                    )
+                    .await
+                }
+            };
             finalize(&mgr, &id_for_task, &app, res).await;
         });
         self.tasks.lock().await.insert(id.clone(), task);
         Ok(id)
     }
 
-    async fn run_download(
+    async fn run_ssh_download(
         &self,
         id: &str,
         session: Arc<SshSession>,
@@ -270,7 +281,7 @@ impl TransferManager {
 
     pub async fn start_upload(
         self: &Arc<Self>,
-        session: Arc<SshSession>,
+        session: Arc<Session>,
         local_path: String,
         remote_dir: String,
         policy: OverwritePolicy,
@@ -288,21 +299,7 @@ impl TransferManager {
             format!("{remote_dir}/{}", basename(&local_path))
         };
 
-        let (final_remote, skip) = {
-            let sftp_cell = session.ensure_sftp().await?;
-            let sftp = sftp_cell.lock().await;
-            match policy {
-                OverwritePolicy::Overwrite => (initial_remote, false),
-                OverwritePolicy::Skip => {
-                    let exists = sftp.metadata(&initial_remote).await.is_ok();
-                    (initial_remote, exists)
-                }
-                OverwritePolicy::Rename => {
-                    let renamed = resolve_remote_rename(&sftp, &initial_remote).await;
-                    (renamed, false)
-                }
-            }
-        };
+        let (final_remote, skip) = remote_resolve(&session, &initial_remote, policy).await?;
 
         let id = Uuid::new_v4().to_string();
         let transfer = Transfer {
@@ -331,16 +328,35 @@ impl TransferManager {
         let mgr = Arc::clone(self);
         let id_for_task = id.clone();
         let task = tokio::spawn(async move {
-            let res = mgr
-                .run_upload(&id_for_task, session, &local, &final_remote, &app)
-                .await;
+            let res = match &*session {
+                Session::Ssh(ssh) => {
+                    mgr.run_ssh_upload(
+                        &id_for_task,
+                        ssh.clone(),
+                        &local,
+                        &final_remote,
+                        &app,
+                    )
+                    .await
+                }
+                Session::Ftp(ftp) => {
+                    mgr.run_ftp_upload(
+                        &id_for_task,
+                        ftp.clone(),
+                        &local,
+                        &final_remote,
+                        &app,
+                    )
+                    .await
+                }
+            };
             finalize(&mgr, &id_for_task, &app, res).await;
         });
         self.tasks.lock().await.insert(id.clone(), task);
         Ok(id)
     }
 
-    async fn run_upload(
+    async fn run_ssh_upload(
         &self,
         id: &str,
         session: Arc<SshSession>,
@@ -387,11 +403,11 @@ impl TransferManager {
 }
 
 impl TransferManager {
-    /// Walk a remote directory tree and queue a transfer per file.
-    /// Creates the corresponding local directory structure first.
+    /// Walk a remote directory tree and queue a transfer per file. Uses the
+    /// RemoteFs trait so it works for both SFTP and FTP.
     pub async fn start_directory_download(
         self: &Arc<Self>,
-        session: Arc<SshSession>,
+        session: Arc<Session>,
         remote_root: String,
         local_dir: String,
         policy: OverwritePolicy,
@@ -403,41 +419,35 @@ impl TransferManager {
             .await
             .with_context(|| format!("mkdir -p {}", local_root.display()))?;
 
-        // Walk remote tree.
-        let mut dirs_to_visit: Vec<String> = vec![remote_root.clone()];
-        let mut files: Vec<(String, PathBuf, u64)> = Vec::new();
+        let fs = fs_for_session(&session);
 
-        let sftp_cell = session.ensure_sftp().await?;
+        let mut dirs_to_visit: Vec<String> = vec![remote_root.clone()];
+        let mut files: Vec<(String, PathBuf)> = Vec::new();
+
         while let Some(d) = dirs_to_visit.pop() {
-            let entries = {
-                let sftp = sftp_cell.lock().await;
-                sftp.read_dir(&d).await.with_context(|| format!("read_dir {d}"))?
-            };
+            let entries = fs.list_dir(&d).await.with_context(|| format!("read_dir {d}"))?;
             for entry in entries {
-                let name = entry.file_name();
-                if name == "." || name == ".." {
-                    continue;
-                }
-                let attrs = entry.metadata();
-                let remote_child = format!("{}/{}", d.trim_end_matches('/'), name);
-                // Compute the local path mirroring the remote sub-path.
+                let remote_child = entry.path.clone();
                 let rel = remote_child
                     .strip_prefix(&remote_root)
                     .unwrap_or(&remote_child)
                     .trim_start_matches('/');
                 let local_child = local_root.join(rel);
-                if attrs.is_dir() {
-                    tokio::fs::create_dir_all(&local_child).await.ok();
-                    dirs_to_visit.push(remote_child);
-                } else if attrs.is_regular() {
-                    files.push((remote_child, local_child, attrs.size.unwrap_or(0)));
+                match entry.kind {
+                    crate::remotefs::FileKind::Directory => {
+                        tokio::fs::create_dir_all(&local_child).await.ok();
+                        dirs_to_visit.push(remote_child);
+                    }
+                    crate::remotefs::FileKind::File => {
+                        files.push((remote_child, local_child));
+                    }
+                    _ => {}
                 }
             }
         }
 
         let mut ids = Vec::with_capacity(files.len());
-        for (remote_path, local_path, _size) in files {
-            // Each file goes through start_download so it reuses overwrite logic.
+        for (remote_path, local_path) in files {
             let parent_dir = local_path
                 .parent()
                 .map(|p| p.to_string_lossy().into_owned())
@@ -458,7 +468,7 @@ impl TransferManager {
 
     pub async fn start_directory_upload(
         self: &Arc<Self>,
-        session: Arc<SshSession>,
+        session: Arc<Session>,
         local_root: String,
         remote_dir: String,
         policy: OverwritePolicy,
@@ -475,15 +485,11 @@ impl TransferManager {
             format!("{remote_dir}/{root_name}")
         };
 
-        // Ensure remote root exists.
-        {
-            let sftp_cell = session.ensure_sftp().await?;
-            let sftp = sftp_cell.lock().await;
-            // Best-effort mkdir; ignore "already exists".
-            let _ = sftp.create_dir(&remote_root).await;
-        }
+        let fs = fs_for_session(&session);
 
-        // Walk local tree.
+        // Best-effort: create the remote root.
+        let _ = fs.create_dir(&remote_root).await;
+
         let mut dirs_to_visit: Vec<PathBuf> = vec![local_root_path.clone()];
         let mut files: Vec<(PathBuf, String)> = Vec::new();
         let mut subdirs: Vec<String> = Vec::new();
@@ -512,14 +518,9 @@ impl TransferManager {
             }
         }
 
-        // Create subdirs on remote (shallowest first).
         subdirs.sort_by_key(|s| s.matches('/').count());
-        {
-            let sftp_cell = session.ensure_sftp().await?;
-            let sftp = sftp_cell.lock().await;
-            for sd in subdirs {
-                let _ = sftp.create_dir(&sd).await;
-            }
+        for sd in subdirs {
+            let _ = fs.create_dir(&sd).await;
         }
 
         let mut ids = Vec::with_capacity(files.len());
@@ -540,6 +541,163 @@ impl TransferManager {
             ids.push(id);
         }
         Ok(ids)
+    }
+
+    async fn run_ftp_download(
+        &self,
+        id: &str,
+        session: Arc<FtpSession>,
+        remote_path: &str,
+        local_path: &Path,
+        app: &AppHandle,
+    ) -> Result<()> {
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+
+        // FTP's data channel doesn't surface incremental progress easily without
+        // an extra control round-trip. We can still report mid-transfer by
+        // calling .size() up front, then bumping `transferred` to size on
+        // completion. For now we keep it simple: 0 -> size on done.
+        let final_path = local_path.to_path_buf();
+        let path = remote_path.to_string();
+        let id_for_emit = id.to_string();
+        let app_for_emit = app.clone();
+        let mgr_for_emit: *const TransferManager = self;
+        // The pointer cast keeps the closure 'static — we re-form an Arc via
+        // the field on the manager's containing Arc inside the blocking task.
+        // Since the blocking task is awaited (not detached), the manager
+        // outlives the borrow. We update progress after the task returns.
+
+        let _ = (mgr_for_emit, id_for_emit, app_for_emit);
+
+        let res: Result<u64> = session
+            .with_stream(move |stream| {
+                let file = std::fs::File::create(&final_path)
+                    .with_context(|| format!("create {}", final_path.display()))?;
+                let written = stream
+                    .retr_to_writer(&path, std::io::BufWriter::new(file))?;
+                Ok(written)
+            })
+            .await;
+
+        let written = res?;
+        self.update(id, |t| t.transferred = written).await;
+        Ok(())
+    }
+
+    async fn run_ftp_upload(
+        &self,
+        id: &str,
+        session: Arc<FtpSession>,
+        local_path: &Path,
+        remote_path: &str,
+        app: &AppHandle,
+    ) -> Result<()> {
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+        let _ = app; // progress events come at completion for FTP
+
+        let local = local_path.to_path_buf();
+        let remote = remote_path.to_string();
+        let res: Result<u64> = session
+            .with_stream(move |stream| {
+                let file = std::fs::File::open(&local)
+                    .with_context(|| format!("open {}", local.display()))?;
+                let mut reader = std::io::BufReader::new(file);
+                let written = stream.put_from_reader(&remote, &mut reader)?;
+                Ok(written)
+            })
+            .await;
+        let written = res?;
+        self.update(id, |t| t.transferred = written).await;
+        Ok(())
+    }
+}
+
+/// Build a RemoteFs handle for the right backend.
+fn fs_for_session(session: &Arc<Session>) -> Box<dyn crate::remotefs::RemoteFs> {
+    match &**session {
+        Session::Ssh(ssh) => Box::new(crate::remotefs::sftp::SftpFs::new(ssh.clone())),
+        Session::Ftp(ftp) => Box::new(crate::remotefs::ftp::FtpFs::new(ftp.clone())),
+    }
+}
+
+/// Lookup the size of a remote file using each backend's native API.
+async fn remote_size(session: &Arc<Session>, path: &str) -> Result<u64> {
+    match &**session {
+        Session::Ssh(ssh) => {
+            let cell = ssh.ensure_sftp().await?;
+            let sftp = cell.lock().await;
+            Ok(sftp
+                .metadata(path)
+                .await
+                .with_context(|| format!("stat {path}"))?
+                .size
+                .unwrap_or(0))
+        }
+        Session::Ftp(ftp) => {
+            let path = path.to_string();
+            let sz = ftp.with_stream(move |s| s.size(&path)).await?;
+            Ok(sz as u64)
+        }
+    }
+}
+
+/// Apply the overwrite policy on the remote side; returns (final_path, skip).
+async fn remote_resolve(
+    session: &Arc<Session>,
+    initial_remote: &str,
+    policy: OverwritePolicy,
+) -> Result<(String, bool)> {
+    match &**session {
+        Session::Ssh(ssh) => {
+            let cell = ssh.ensure_sftp().await?;
+            let sftp = cell.lock().await;
+            Ok(match policy {
+                OverwritePolicy::Overwrite => (initial_remote.to_string(), false),
+                OverwritePolicy::Skip => {
+                    let exists = sftp.metadata(initial_remote).await.is_ok();
+                    (initial_remote.to_string(), exists)
+                }
+                OverwritePolicy::Rename => {
+                    let renamed = resolve_remote_rename(&sftp, initial_remote).await;
+                    (renamed, false)
+                }
+            })
+        }
+        Session::Ftp(ftp) => {
+            let probe = initial_remote.to_string();
+            let exists = ftp.with_stream(move |s| Ok(s.size(&probe).is_ok())).await?;
+            Ok(match policy {
+                OverwritePolicy::Overwrite => (initial_remote.to_string(), false),
+                OverwritePolicy::Skip => (initial_remote.to_string(), exists),
+                OverwritePolicy::Rename if !exists => (initial_remote.to_string(), false),
+                OverwritePolicy::Rename => {
+                    // FTP has no fast stat; probe candidates linearly.
+                    let mut candidate = initial_remote.to_string();
+                    let session = ftp.clone();
+                    for i in 1..=999 {
+                        let (stem, ext) = split_ext(initial_remote);
+                        candidate = format!("{stem}_{i}{ext}");
+                        let probe = candidate.clone();
+                        let found = session
+                            .with_stream(move |s| Ok(s.size(&probe).is_ok()))
+                            .await?;
+                        if !found {
+                            break;
+                        }
+                    }
+                    (candidate, false)
+                }
+            })
+        }
+    }
+}
+
+fn split_ext(path: &str) -> (&str, &str) {
+    match path.rfind('.') {
+        Some(dot) if dot > path.rfind('/').unwrap_or(0) => (&path[..dot], &path[dot..]),
+        _ => (path, ""),
     }
 }
 

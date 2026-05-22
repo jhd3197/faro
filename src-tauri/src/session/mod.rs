@@ -1,3 +1,6 @@
+pub mod ftp;
+pub use ftp::{ftp_connect, FtpSession};
+
 use crate::known_hosts;
 use crate::profiles::{AuthMethod, ConnectionProfile};
 use anyhow::{anyhow, Context, Result};
@@ -203,18 +206,49 @@ async fn open_agent() -> Result<russh_keys::agent::client::AgentClient<tokio::ne
 async fn open_agent(
 ) -> Result<russh_keys::agent::client::AgentClient<tokio::net::windows::named_pipe::NamedPipeClient>>
 {
-    // OpenSSH-for-Windows (shipped with Win10/11) listens on this named pipe
-    // when its service is running. Pageant proper is out of scope for v0.3.
-    const PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
-    let stream = tokio::net::windows::named_pipe::ClientOptions::new()
-        .open(PIPE)
-        .with_context(|| {
-            format!(
-                "opening OpenSSH agent pipe {PIPE} \
-                 (start the 'OpenSSH Authentication Agent' service, or `ssh-add` your key)"
-            )
-        })?;
-    Ok(russh_keys::agent::client::AgentClient::connect(stream))
+    // First try OpenSSH-for-Windows (shipped with Win10/11) which listens
+    // on a fixed pipe when the 'OpenSSH Authentication Agent' service runs.
+    const OPENSSH_PIPE: &str = r"\\.\pipe\openssh-ssh-agent";
+    if let Ok(stream) =
+        tokio::net::windows::named_pipe::ClientOptions::new().open(OPENSSH_PIPE)
+    {
+        return Ok(russh_keys::agent::client::AgentClient::connect(stream));
+    }
+
+    // Fall back to PuTTY Pageant 0.78+, which uses pipes like
+    // `\\.\pipe\pageant.<user>.<random>`. The random suffix is per-launch,
+    // so we enumerate `\\.\pipe\` and try each pageant.* entry. Older
+    // Pageant (file-mapping IPC) is not supported.
+    if let Some(pipe) = find_pageant_pipe() {
+        if let Ok(stream) =
+            tokio::net::windows::named_pipe::ClientOptions::new().open(&pipe)
+        {
+            return Ok(russh_keys::agent::client::AgentClient::connect(stream));
+        }
+    }
+
+    Err(anyhow!(
+        "no ssh-agent found on Windows. Tried OpenSSH ({OPENSSH_PIPE}) and Pageant pipes. \
+         Start the 'OpenSSH Authentication Agent' service or launch Pageant (PuTTY 0.78+)."
+    ))
+}
+
+#[cfg(windows)]
+fn find_pageant_pipe() -> Option<std::ffi::OsString> {
+    // Listing `\\.\pipe\` returns the names of every named pipe on the system.
+    // The OS exposes them as a directory since Windows 7 / 10.
+    let entries = std::fs::read_dir(r"\\.\pipe\").ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let s = name.to_string_lossy();
+        if s.starts_with("pageant.") {
+            // The full pipe path is `\\.\pipe\<name>`.
+            let mut p = std::ffi::OsString::from(r"\\.\pipe\");
+            p.push(&name);
+            return Some(p);
+        }
+    }
+    None
 }
 
 async fn authenticate_with_agent(
@@ -289,10 +323,36 @@ pub async fn ssh_connect(
     Ok(session)
 }
 
-// ---- SessionManager ----
+// ---- Session enum + SessionManager ----
+//
+// SessionManager keeps a single map of remote sessions regardless of
+// protocol. Most commands speak through the `RemoteFs` trait so they don't
+// care which variant they're talking to; commands that DO care (terminal
+// open, host-key prompts) match explicitly.
+
+pub enum Session {
+    Ssh(Arc<SshSession>),
+    Ftp(Arc<FtpSession>),
+}
+
+impl Session {
+    pub fn profile(&self) -> &ConnectionProfile {
+        match self {
+            Self::Ssh(s) => &s.profile,
+            Self::Ftp(s) => &s.profile,
+        }
+    }
+
+    pub fn protocol(&self) -> &'static str {
+        match self {
+            Self::Ssh(_) => "sftp",
+            Self::Ftp(_) => "ftp",
+        }
+    }
+}
 
 pub struct SessionManager {
-    sessions: Mutex<HashMap<String, Arc<SshSession>>>,
+    sessions: Mutex<HashMap<String, Arc<Session>>>,
     pub prompts: Arc<HostPromptRegistry>,
 }
 
@@ -309,29 +369,68 @@ impl SessionManager {
         profile: ConnectionProfile,
         app: AppHandle,
     ) -> Result<String> {
-        let handle = ssh_connect(&profile, app, self.prompts.clone()).await?;
-        let id = Uuid::new_v4().to_string();
-        let session = Arc::new(SshSession {
-            id: id.clone(),
-            profile,
-            handle: Mutex::new(handle),
-            sftp: OnceCell::new(),
-        });
-        self.sessions.lock().await.insert(id.clone(), session);
+        let session = match profile.protocol.as_str() {
+            "sftp" | "ssh" | "" => {
+                let handle = ssh_connect(&profile, app, self.prompts.clone()).await?;
+                let id = Uuid::new_v4().to_string();
+                let ssh = Arc::new(SshSession {
+                    id: id.clone(),
+                    profile,
+                    handle: Mutex::new(handle),
+                    sftp: OnceCell::new(),
+                });
+                (id, Session::Ssh(ssh))
+            }
+            "ftp" | "ftps" => {
+                let ftp = ftp_connect(&profile).await?;
+                let id = ftp.id.clone();
+                (id, Session::Ftp(Arc::new(ftp)))
+            }
+            other => return Err(anyhow!("unsupported protocol: {other}")),
+        };
+        let (id, sess) = session;
+        self.sessions
+            .lock()
+            .await
+            .insert(id.clone(), Arc::new(sess));
         Ok(id)
     }
 
-    pub async fn get(&self, id: &str) -> Option<Arc<SshSession>> {
+    pub async fn get(&self, id: &str) -> Option<Arc<Session>> {
         self.sessions.lock().await.get(id).cloned()
+    }
+
+    /// Convenience accessor when the caller specifically needs an SSH session
+    /// (e.g. opening a PTY). Returns None if the session is FTP or missing.
+    pub async fn get_ssh(&self, id: &str) -> Option<Arc<SshSession>> {
+        match self.sessions.lock().await.get(id) {
+            Some(s) => match &**s {
+                Session::Ssh(ssh) => Some(ssh.clone()),
+                _ => None,
+            },
+            None => None,
+        }
     }
 
     pub async fn disconnect(&self, id: &str) -> Result<()> {
         let s = self.sessions.lock().await.remove(id);
         if let Some(s) = s {
-            let h = s.handle.lock().await;
-            let _ = h
-                .disconnect(russh::Disconnect::ByApplication, "bye", "en")
-                .await;
+            match &*s {
+                Session::Ssh(ssh) => {
+                    let h = ssh.handle.lock().await;
+                    let _ = h
+                        .disconnect(russh::Disconnect::ByApplication, "bye", "en")
+                        .await;
+                }
+                Session::Ftp(ftp) => {
+                    let _ = ftp
+                        .with_stream(|s| {
+                            s.quit();
+                            Ok(())
+                        })
+                        .await;
+                }
+            }
         }
         Ok(())
     }

@@ -1,7 +1,14 @@
 import { useState } from "react";
 import { useConnections } from "@/stores/connectionsStore";
 import { useSettings } from "@/stores/settingsStore";
-import type { ConnectionProfile, AuthMethod } from "@/lib/types";
+import {
+  PROTOCOL_DEFAULT_PORT,
+  PROTOCOL_LABEL,
+  type AuthMethod,
+  type ConnectionProfile,
+  type Protocol,
+} from "@/lib/types";
+import { ShieldCheck, ShieldOff, Terminal as TerminalIcon } from "lucide-react";
 
 interface Props {
   profile: ConnectionProfile | null;
@@ -17,8 +24,12 @@ export function ProfileEditor({ profile, onClose }: Props) {
   const defaultPort = useSettings((s) => s.defaultPort);
 
   const [name, setName] = useState(profile?.name ?? "");
+  const [protocol, setProtocol] = useState<Protocol>(profile?.protocol ?? "sftp");
   const [host, setHost] = useState(profile?.host ?? "");
   const [port, setPort] = useState(profile?.port ?? defaultPort);
+  // Track whether the user has manually edited the port; if not, switching
+  // protocol re-applies that protocol's standard port.
+  const [portTouched, setPortTouched] = useState<boolean>(!!profile?.port);
   const [username, setUsername] = useState(profile?.username ?? "");
   const [authKind, setAuthKind] = useState<AuthMethod["kind"]>(
     profile?.auth.kind ?? "password"
@@ -36,16 +47,25 @@ export function ProfileEditor({ profile, onClose }: Props) {
     profile?.defaultRemotePath ?? "."
   );
 
+  const onProtocolChange = (p: Protocol) => {
+    setProtocol(p);
+    if (!portTouched) {
+      setPort(PROTOCOL_DEFAULT_PORT[p]);
+    }
+    // FTP / FTPS don't support key/agent auth — coerce to password.
+    if ((p === "ftp" || p === "ftps") && authKind !== "password") {
+      setAuthKind("password");
+    }
+  };
+
+  const isFtp = protocol === "ftp" || protocol === "ftps";
+
   const save = async () => {
     let auth: AuthMethod;
     if (authKind === "password") {
       auth = { kind: "password", password };
     } else if (authKind === "key") {
-      auth = {
-        kind: "key",
-        path: keyPath,
-        passphrase: passphrase || undefined,
-      };
+      auth = { kind: "key", path: keyPath, passphrase: passphrase || undefined };
     } else {
       auth = { kind: "agent" };
     }
@@ -53,7 +73,7 @@ export function ProfileEditor({ profile, onClose }: Props) {
     const next: ConnectionProfile = {
       id: profile?.id ?? genId(),
       name: name || `${username}@${host}`,
-      protocol: "sftp",
+      protocol,
       host,
       port,
       username,
@@ -67,7 +87,7 @@ export function ProfileEditor({ profile, onClose }: Props) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="anim-modal w-[28rem] rounded-xl border border-border bg-bg-panel p-5 shadow-elev-3">
+      <div className="anim-modal w-[30rem] rounded-xl border border-border bg-bg-panel p-5 shadow-elev-3">
         <div className="mb-4 text-sm font-semibold">
           {profile ? "Edit connection" : "New connection"}
         </div>
@@ -79,6 +99,20 @@ export function ProfileEditor({ profile, onClose }: Props) {
             placeholder="my-prod-box"
             className={inputCls}
           />
+        </Field>
+
+        <Field label="Protocol">
+          <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-bg-subtle p-1">
+            {(["sftp", "ftp", "ftps"] as Protocol[]).map((p) => (
+              <ProtocolButton
+                key={p}
+                active={protocol === p}
+                onClick={() => onProtocolChange(p)}
+                label={PROTOCOL_LABEL[p]}
+                hint={protocolHint(p)}
+              />
+            ))}
+          </div>
         </Field>
 
         <div className="flex gap-2">
@@ -94,7 +128,10 @@ export function ProfileEditor({ profile, onClose }: Props) {
             <input
               type="number"
               value={port}
-              onChange={(e) => setPort(parseInt(e.target.value) || 22)}
+              onChange={(e) => {
+                setPort(parseInt(e.target.value) || PROTOCOL_DEFAULT_PORT[protocol]);
+                setPortTouched(true);
+              }}
               className={inputCls}
             />
           </Field>
@@ -104,7 +141,7 @@ export function ProfileEditor({ profile, onClose }: Props) {
           <input
             value={username}
             onChange={(e) => setUsername(e.target.value)}
-            placeholder="root"
+            placeholder={isFtp ? "anonymous" : "root"}
             className={inputCls}
           />
         </Field>
@@ -112,29 +149,30 @@ export function ProfileEditor({ profile, onClose }: Props) {
         <Field label="Auth">
           <select
             value={authKind}
-            onChange={(e) =>
-              setAuthKind(e.target.value as AuthMethod["kind"])
-            }
+            onChange={(e) => setAuthKind(e.target.value as AuthMethod["kind"])}
             className={inputCls}
           >
             <option value="password">Password</option>
-            <option value="key">Private key file</option>
-            <option value="agent">SSH agent</option>
+            <option value="key" disabled={isFtp}>
+              Private key file{isFtp ? " — SFTP only" : ""}
+            </option>
+            <option value="agent" disabled={isFtp}>
+              SSH agent{isFtp ? " — SFTP only" : ""}
+            </option>
           </select>
         </Field>
 
         {authKind === "agent" && (
-          <div className="mb-3 rounded-md border border-border bg-bg-subtle px-2.5 py-2 text-[11.5px] leading-relaxed text-text-muted">
-            Uses the running SSH agent for authentication.
-            {" "}
+          <Hint>
+            Uses the running SSH agent for authentication.{" "}
             <span className="font-mono text-text-dim">
               {/* eslint-disable-next-line no-undef */}
               {navigator.platform.startsWith("Win")
-                ? "OpenSSH Authentication Agent service (\\.\\pipe\\openssh-ssh-agent)"
+                ? "\\\\.\\pipe\\openssh-ssh-agent (OpenSSH Authentication Agent service)"
                 : "$SSH_AUTH_SOCK"}
             </span>
             . Run <span className="font-mono">ssh-add</span> first to load your keys.
-          </div>
+          </Hint>
         )}
 
         {authKind === "password" && (
@@ -173,10 +211,21 @@ export function ProfileEditor({ profile, onClose }: Props) {
           <input
             value={defaultRemotePath}
             onChange={(e) => setDefaultRemotePath(e.target.value)}
-            placeholder="."
+            placeholder={isFtp ? "/" : "."}
             className={inputCls}
           />
         </Field>
+
+        {isFtp && (
+          <Hint tone="warn">
+            <ShieldOff size={11} className="inline-block mr-1 align-text-bottom" />
+            FTP has no integrated terminal and{" "}
+            {protocol === "ftp"
+              ? "transmits credentials in clear text"
+              : "uses TLS for the control channel only"}
+            . Prefer SFTP when the server supports it.
+          </Hint>
+        )}
 
         <div className="mt-5 flex justify-end gap-2">
           <button
@@ -194,6 +243,75 @@ export function ProfileEditor({ profile, onClose }: Props) {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function protocolHint(p: Protocol): string {
+  switch (p) {
+    case "sftp":
+      return "SSH · :22";
+    case "ftp":
+      return "Plain · :21";
+    case "ftps":
+      return "TLS · :21";
+  }
+}
+
+function ProtocolButton({
+  active,
+  onClick,
+  label,
+  hint,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  hint: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={
+        "flex flex-col items-start rounded-sm px-2 py-1.5 text-left transition-colors " +
+        (active
+          ? "bg-accent-soft text-text ring-1 ring-inset ring-accent/40"
+          : "text-text-muted hover:bg-bg-hover hover:text-text")
+      }
+    >
+      <span className="flex items-center gap-1 text-[11px] font-semibold">
+        {label === "SFTP" ? (
+          <TerminalIcon size={11} className={active ? "text-accent" : ""} />
+        ) : label === "FTPS" ? (
+          <ShieldCheck size={11} className={active ? "text-accent" : ""} />
+        ) : (
+          <ShieldOff size={11} />
+        )}
+        {label}
+      </span>
+      <span className="text-[10px] text-text-dim">{hint}</span>
+    </button>
+  );
+}
+
+function Hint({
+  children,
+  tone,
+}: {
+  children: React.ReactNode;
+  tone?: "warn";
+}) {
+  return (
+    <div
+      className={
+        "mb-3 rounded-md border px-2.5 py-2 text-[11.5px] leading-relaxed " +
+        (tone === "warn"
+          ? "border-danger/30 bg-danger-soft/60 text-text-muted"
+          : "border-border bg-bg-subtle text-text-muted")
+      }
+    >
+      {children}
     </div>
   );
 }

@@ -6,10 +6,12 @@ export type AuthMethod =
   | { kind: "key"; path: string; passphrase?: string }
   | { kind: "agent" };
 
+export type Protocol = "sftp" | "ftp" | "ftps";
+
 export interface ConnectionProfile {
   id: string;
   name: string;
-  protocol: "sftp"; // v0.1 only sftp; v0.2 adds ftp, v0.3 adds s3 etc.
+  protocol: Protocol;
   host: string;
   port: number;
   username: string;
@@ -17,6 +19,18 @@ export interface ConnectionProfile {
   defaultRemotePath?: string;
   color?: string;
 }
+
+export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {
+  sftp: 22,
+  ftp: 21,
+  ftps: 21,
+};
+
+export const PROTOCOL_LABEL: Record<Protocol, string> = {
+  sftp: "SFTP",
+  ftp: "FTP",
+  ftps: "FTPS",
+};
 
 export type FileKind = "file" | "directory" | "symlink" | "other";
 

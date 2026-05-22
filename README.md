@@ -11,17 +11,21 @@ terminals, and work with S3-compatible storage — all in one window.
 
 ## Status
 
-**v0.3 dev.** New in v0.3: known-hosts verification with an interactive
-fingerprint prompt, ssh-agent auth (unix `$SSH_AUTH_SOCK` and
-OpenSSH-for-Windows named pipe), multi-tab terminals sharing one SSH session.
+**v0.4 dev.** New in v0.4: FTP and FTPS backends sharing the dual-pane browser
+and transfer engine (one polymorphic `RemoteFs` trait, separate session
+backends), Pageant pipe support (PuTTY 0.78+), per-protocol port defaults in
+the profile editor.
 
-Working from v0.2: connection profiles, SFTP browser, integrated SSH terminal,
+From v0.3: known-hosts verification with an interactive fingerprint prompt,
+ssh-agent auth (unix `$SSH_AUTH_SOCK` and OpenSSH-for-Windows named pipe,
+plus Pageant), multi-tab terminals sharing one SSH session.
+
+From v0.2: connection profiles, SFTP browser, integrated SSH terminal,
 drag-and-drop transfers, recursive directory transfers, multi-select,
-right-click file ops (rename, delete, mkdir, chmod, copy path), settings
-(dark/light themes, terminal customisation, sort/hidden, default port).
+right-click file ops (rename, delete, mkdir, chmod, copy path), settings.
 
-Roadmap: FTP, S3 / R2 / B2 / Azure Blob backends, Pageant proper, profile
-importers (PuTTY `.ppk`, OpenSSH `~/.ssh/config`, WinSCP).
+Roadmap: S3 / R2 / B2 / Azure Blob backends, profile importers
+(PuTTY `.ppk`, OpenSSH `~/.ssh/config`, WinSCP).
 
 ## Architecture
 
@@ -118,8 +122,8 @@ src-tauri/src/
 ## Roadmap (concrete)
 
 - **v0.2** — SFTP, integrated terminal, drag-and-drop, recursive transfers, file ops, settings
-- **v0.3** — known-hosts verification, ssh-agent (unix + OpenSSH-for-Windows pipe), multi-tab terminals (this)
-- **v0.4** — FTP backend, Pageant proper
+- **v0.3** — known-hosts verification, ssh-agent (unix + OpenSSH-for-Windows pipe), multi-tab terminals
+- **v0.4** — FTP / FTPS backends, Pageant pipe support (this)
 - **v0.5** — S3 / R2 / B2 (one backend, three endpoint configs)
 - **v0.6** — Azure Blob, conflict resolution, sync mode
 - **v0.7** — Profile importers (PuTTY, OpenSSH config, WinSCP, FileZilla)

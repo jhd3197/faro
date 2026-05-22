@@ -22,6 +22,11 @@ import { cn } from "./lib/cn";
 
 export default function App() {
   const activeSessionId = useConnections((s) => s.activeSessionId);
+  const activeProfileId = useConnections((s) => s.activeProfileId);
+  const profiles = useConnections((s) => s.profiles);
+  const activeProfile = profiles.find((p) => p.id === activeProfileId);
+  const supportsTerminal = activeProfile?.protocol === "sftp";
+
   const terminalOpen = useLayout((s) => s.terminalOpen);
   const toggleTerminal = useLayout((s) => s.toggleTerminal);
   const togglePanel = useTransfers((s) => s.togglePanel);
@@ -44,15 +49,16 @@ export default function App() {
           <div className="flex-1 overflow-hidden">
             <DualPaneBrowser />
           </div>
-          {activeSessionId && terminalOpen && (
+          {activeSessionId && terminalOpen && supportsTerminal && (
             <div className="h-72 border-t border-border">
               <TerminalDock sessionId={activeSessionId} />
             </div>
           )}
           <TransferQueue />
           <StatusBar
-            terminalOpen={terminalOpen}
+            terminalOpen={terminalOpen && supportsTerminal}
             onToggleTerminal={toggleTerminal}
+            terminalAvailable={supportsTerminal}
             transferPanelOpen={transferPanelOpen}
             onToggleTransfers={togglePanel}
             activeTransfers={activeTransfers}
@@ -74,7 +80,7 @@ function TitleBar({ onOpenSettings }: { onOpenSettings: () => void }) {
         servers · storage · sessions
       </span>
       <span className="rounded-full bg-accent-soft px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-accent">
-        v0.3
+        v0.4
       </span>
       <div className="flex-1" />
       <button
@@ -119,12 +125,14 @@ function Logo() {
 function StatusBar({
   terminalOpen,
   onToggleTerminal,
+  terminalAvailable,
   transferPanelOpen,
   onToggleTransfers,
   activeTransfers,
 }: {
   terminalOpen: boolean;
   onToggleTerminal: () => void;
+  terminalAvailable: boolean;
   transferPanelOpen: boolean;
   onToggleTransfers: () => void;
   activeTransfers: number;
@@ -153,6 +161,9 @@ function StatusBar({
           <span className="font-mono text-text-dim">
             {profile.username}@{profile.host}:{profile.port}
           </span>
+          <span className="rounded-sm bg-bg-subtle px-1 text-[9px] font-medium uppercase tracking-wider text-text-dim">
+            {profile.protocol}
+          </span>
         </div>
       ) : (
         <div className="flex items-center gap-1.5 pl-1 text-text-dim">
@@ -164,8 +175,13 @@ function StatusBar({
       <PillButton
         active={terminalOpen}
         onClick={onToggleTerminal}
-        disabled={!activeSessionId}
+        disabled={!activeSessionId || !terminalAvailable}
         icon={<TerminalSquare size={11} />}
+        title={
+          !terminalAvailable && activeSessionId
+            ? "Terminal is only available for SFTP sessions"
+            : undefined
+        }
       >
         Terminal
       </PillButton>
@@ -193,6 +209,7 @@ function PillButton({
   active,
   disabled,
   badge,
+  title,
 }: {
   children: React.ReactNode;
   onClick: () => void;
@@ -200,11 +217,13 @@ function PillButton({
   active?: boolean;
   disabled?: boolean;
   badge?: number;
+  title?: string;
 }) {
   return (
     <button
       onClick={onClick}
       disabled={disabled}
+      title={title}
       className={cn(
         "flex items-center gap-1.5 rounded-md px-2 py-0.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed",
         active

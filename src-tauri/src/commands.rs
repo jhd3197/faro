@@ -1,8 +1,9 @@
 use crate::profiles::ConnectionProfile;
 use crate::remotefs::{Capabilities, DirEntry, RemoteFs};
-use crate::session::HostDecision;
+use crate::session::{HostDecision, Session};
 use crate::transfer::{OverwritePolicy, Transfer};
 use crate::AppState;
+use std::sync::Arc;
 use tauri::{AppHandle, State};
 
 pub const LOCAL_SESSION: &str = "local";
@@ -85,15 +86,7 @@ pub async fn list_directory(
     path: String,
     state: State<'_, AppState>,
 ) -> Result<Vec<DirEntry>, String> {
-    if session_id == LOCAL_SESSION {
-        return crate::remotefs::local::LocalFs.list_dir(&path).await.map_err(err);
-    }
-    let session = state
-        .sessions
-        .get(&session_id)
-        .await
-        .ok_or_else(|| format!("session {session_id} not found"))?;
-    let fs = crate::remotefs::sftp::SftpFs::new(session);
+    let fs = fs_for(&session_id, &state).await?;
     fs.list_dir(&path).await.map_err(err)
 }
 
@@ -102,20 +95,8 @@ pub async fn capabilities(
     session_id: String,
     state: State<'_, AppState>,
 ) -> Result<Capabilities, String> {
-    if session_id == LOCAL_SESSION {
-        return Ok(crate::remotefs::local::LocalFs.capabilities());
-    }
-    let _ = state
-        .sessions
-        .get(&session_id)
-        .await
-        .ok_or_else(|| format!("session {session_id} not found"))?;
-    Ok(Capabilities {
-        can_chmod: true,
-        can_symlink: true,
-        can_rename: true,
-        has_directories: true,
-    })
+    let fs = fs_for(&session_id, &state).await?;
+    Ok(fs.capabilities())
 }
 
 // ---------- Terminal ----------
@@ -129,16 +110,16 @@ pub async fn open_terminal(
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     if session_id == LOCAL_SESSION {
-        return Err("Local terminal not supported in v0.1".into());
+        return Err("Local terminal is not supported".into());
     }
-    let session = state
+    let ssh = state
         .sessions
-        .get(&session_id)
+        .get_ssh(&session_id)
         .await
-        .ok_or_else(|| format!("session {session_id} not found"))?;
+        .ok_or_else(|| format!("FTP sessions have no shell"))?;
     state
         .ptys
-        .open(&session, cols, rows, app)
+        .open(&ssh, cols, rows, app)
         .await
         .map_err(err)
 }
@@ -301,8 +282,8 @@ pub async fn start_directory_upload(
 
 // ---------- File ops (rename, delete, mkdir, chmod) ----------
 //
-// Dispatched to LocalFs when session_id == "local", else SftpFs over the
-// session. Same command surface either way.
+// Polymorphic dispatch on session type. The UI doesn't need to know whether
+// it's talking to SFTP or FTP — RemoteFs hides that.
 
 async fn fs_for(
     session_id: &str,
@@ -316,7 +297,14 @@ async fn fs_for(
         .get(session_id)
         .await
         .ok_or_else(|| format!("session {session_id} not found"))?;
-    Ok(Box::new(crate::remotefs::sftp::SftpFs::new(session)))
+    Ok(fs_for_session(&session))
+}
+
+fn fs_for_session(session: &Arc<Session>) -> Box<dyn RemoteFs> {
+    match &**session {
+        Session::Ssh(ssh) => Box::new(crate::remotefs::sftp::SftpFs::new(ssh.clone())),
+        Session::Ftp(ftp) => Box::new(crate::remotefs::ftp::FtpFs::new(ftp.clone())),
+    }
 }
 
 #[tauri::command]
