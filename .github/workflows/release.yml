@@ -225,6 +225,16 @@ jobs:
             libssl-dev \
             pkg-config
 
+      # faro_lib's `run()` calls `tauri::generate_context!`, which validates
+      # frontendDist (../dist) at COMPILE time — even though the CLI never
+      # serves a UI. Building faro-cli compiles faro_lib, so stub the dir to
+      # satisfy the macro without running a full Vite build here.
+      - name: Stub frontend dist
+        shell: bash
+        run: |
+          mkdir -p dist
+          echo '<!doctype html><meta charset="utf-8"><title>faro-cli</title>' > dist/index.html
+
       - name: Build faro-cli
         working-directory: src-tauri
         # -p selects the workspace member; without it `--bin` only searches the
