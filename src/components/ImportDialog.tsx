@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Download,
   FileText,
@@ -79,17 +79,27 @@ export function ImportDialog({ onClose }: Props) {
           ))}
         </div>
 
-        <ImporterTab kind={tab} paths={paths} onDone={onClose} />
+        {(["openssh", "filezilla", "putty"] as const).map((kind) => (
+          <ImporterTab
+            key={kind}
+            active={tab === kind}
+            kind={kind}
+            paths={paths}
+            onDone={onClose}
+          />
+        ))}
       </div>
     </div>
   );
 }
 
 function ImporterTab({
+  active,
   kind,
   paths,
   onDone,
 }: {
+  active: boolean;
   kind: ImporterKind;
   paths: ImporterPaths | null;
   onDone: () => void;
@@ -103,6 +113,7 @@ function ImporterTab({
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [savedCount, setSavedCount] = useState<number | null>(null);
+  const [autoScanned, setAutoScanned] = useState(false);
 
   // Pre-populate the path from the auto-detected default the moment paths arrive.
   useEffect(() => {
@@ -117,7 +128,7 @@ function ImporterTab({
     }
   }, [paths, kind, pathTouched]);
 
-  const scan = async () => {
+  const scan = useCallback(async () => {
     setLoading(true);
     setError(null);
     setSavedCount(null);
@@ -139,16 +150,16 @@ function ImporterTab({
       setPreviews(null);
     } finally {
       setLoading(false);
+      setAutoScanned(true);
     }
-  };
+  }, [kind, path]);
 
   // Auto-scan when the tab opens, but only when the path is autodetected.
   useEffect(() => {
-    if (!pathTouched && (kind === "putty" || path)) {
+    if (active && !autoScanned && !pathTouched && (kind === "putty" || path)) {
       scan();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kind, paths]);
+  }, [active, autoScanned, kind, path, pathTouched, scan]);
 
   const toggle = (id: string) =>
     setSelected((prev) => {
@@ -185,7 +196,12 @@ function ImporterTab({
   const isRegistry = kind === "putty" && path.startsWith("HKCU\\");
 
   return (
-    <div className="flex flex-1 flex-col overflow-hidden px-4 py-3">
+    <div
+      className={cn(
+        "flex flex-1 flex-col overflow-hidden px-4 py-3",
+        !active && "hidden"
+      )}
+    >
       <div className="mb-3 flex items-end gap-2">
         <label className="flex-1">
           <div className="mb-1 text-[10px] uppercase tracking-wider text-text-muted">
