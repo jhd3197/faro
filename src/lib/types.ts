@@ -196,6 +196,34 @@ export interface HostPromptEvent {
   kind: HostPromptKind;
 }
 
+// ---- Agent Bridge ----
+
+export interface BridgeStatus {
+  running: boolean;
+  url: string | null;
+  port: number | null;
+  token: string | null;
+  enabledSessions: string[];
+}
+
+export interface BridgeActivity {
+  id: string;
+  sessionId: string;
+  kind: string; // "exec" | "denied" | "error"
+  detail: string;
+  ok: boolean;
+  at: number; // unix millis
+}
+
+export interface BridgeApproval {
+  requestId: string;
+  sessionId: string;
+  sessionName: string;
+  command: string;
+}
+
+export type ApprovalDecision = "approve" | "deny";
+
 export type TransferKind = "download" | "upload";
 export type TransferStatus =
   | "queued"

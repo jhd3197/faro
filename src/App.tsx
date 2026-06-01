@@ -24,12 +24,15 @@ import {
   AlertCircle,
   Info,
   AlertTriangle,
+  Radio,
 } from "lucide-react";
 import { useEditor } from "./stores/editorStore";
 import { useToasts, type ToastVariant } from "./stores/toastStore";
+import { useBridge } from "./stores/bridgeStore";
 import { Toaster } from "./components/ui/Toaster";
 import { CommandPalette } from "./components/CommandPalette";
 import { KeyboardShortcutsDialog } from "./components/KeyboardShortcutsDialog";
+import { AgentBridge, AgentBridgeHost } from "./components/AgentBridge";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { relTime } from "./lib/format";
 import { cn } from "./lib/cn";
@@ -65,8 +68,10 @@ export default function App() {
       )}
       {dialog === "import" && <ImportDialog onClose={closeDialog} />}
       {dialog === "about" && <AboutDialog onClose={closeDialog} />}
+      {dialog === "agentBridge" && <AgentBridge onClose={closeDialog} />}
       <HostKeyModal />
       <Toaster />
+      <AgentBridgeHost />
       <CommandPalette />
       <KeyboardShortcutsDialog />
       <div className="flex flex-1 overflow-hidden">
@@ -133,6 +138,9 @@ function StatusBar({
   const markAllRead = useToasts((s) => s.markAllRead);
   const clearHistory = useToasts((s) => s.clearHistory);
   const [notifOpen, setNotifOpen] = useState(false);
+
+  const bridgeRunning = useBridge((s) => s.status.running);
+  const openDialog = useLayout((s) => s.openDialog);
 
   return (
     <div className="flex h-7 shrink-0 items-center gap-2 border-t border-border bg-bg-panel px-2 text-[11px]">
@@ -282,6 +290,19 @@ function StatusBar({
           </div>
         )}
       </div>
+      <PillButton
+        active={bridgeRunning}
+        onClick={() => openDialog("agentBridge")}
+        icon={
+          <Radio
+            size={11}
+            className={bridgeRunning ? "text-emerald-400" : undefined}
+          />
+        }
+        title="Agent Bridge — let a local AI agent run commands on your server"
+      >
+        Bridge
+      </PillButton>
       <PillButton
         active={terminalOpen}
         onClick={onToggleTerminal}

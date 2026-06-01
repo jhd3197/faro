@@ -12,6 +12,7 @@ import {
   Keyboard,
   Palette,
   SunMoon,
+  Radio,
 } from "lucide-react";
 import { useConnections } from "@/stores/connectionsStore";
 import { useTransfers } from "@/stores/transfersStore";
@@ -82,6 +83,14 @@ export function useCommands(): Command[] {
       icon: <Keyboard size={14} />,
       combo: "mod+/",
       run: () => setShortcutsOpen(true),
+    },
+    {
+      id: "agent-bridge",
+      title: "Agent Bridge…",
+      group: "General",
+      icon: <Radio size={14} />,
+      keywords: "agent bridge mcp claude code remote exec",
+      run: () => openDialog("agentBridge"),
     },
     {
       id: "about",

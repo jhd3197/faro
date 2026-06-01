@@ -543,3 +543,56 @@ pub async fn stop_edit(
 ) -> Result<(), String> {
     state.editors.stop(&edit_id).await.map_err(err)
 }
+
+// ---------- Agent Bridge ----------
+
+use crate::bridge::{ActivityEntry, ApprovalDecision, BridgeStatus};
+
+#[tauri::command]
+pub async fn bridge_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<BridgeStatus, String> {
+    state.bridge.start(app).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn bridge_stop(state: State<'_, AppState>) -> Result<BridgeStatus, String> {
+    state.bridge.stop().await;
+    Ok(state.bridge.status().await)
+}
+
+#[tauri::command]
+pub async fn bridge_status(state: State<'_, AppState>) -> Result<BridgeStatus, String> {
+    Ok(state.bridge.status().await)
+}
+
+#[tauri::command]
+pub async fn bridge_set_session_access(
+    session_id: String,
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> Result<BridgeStatus, String> {
+    state.bridge.set_access(&session_id, enabled).await;
+    Ok(state.bridge.status().await)
+}
+
+#[tauri::command]
+pub async fn respond_to_bridge_approval(
+    request_id: String,
+    decision: ApprovalDecision,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .bridge
+        .resolve_approval(&request_id, decision)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn bridge_activity(
+    state: State<'_, AppState>,
+) -> Result<Vec<ActivityEntry>, String> {
+    Ok(state.bridge.recent_activity().await)
+}

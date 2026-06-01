@@ -5,6 +5,7 @@ use tauri::Manager;
 // crate, so they need to be `pub` rather than `mod`. None of them expose
 // secrets directly — credentials live in profiles::ConnectionProfile, which
 // the CLI deliberately redacts in `profiles show`.
+pub mod bridge;
 mod commands;
 mod editor;
 pub mod importers;
@@ -22,6 +23,7 @@ pub struct AppState {
     pub profiles: Arc<profiles::ProfileStore>,
     pub transfers: Arc<transfer::TransferManager>,
     pub editors: Arc<editor::EditManager>,
+    pub bridge: Arc<bridge::BridgeState>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -46,6 +48,7 @@ pub fn run() {
                 profiles: profile_store,
                 transfers: Arc::new(transfer::TransferManager::new()),
                 editors: Arc::new(editor::EditManager::new()),
+                bridge: Arc::new(bridge::BridgeState::new()),
             };
             app.manage(state);
             Ok(())
@@ -82,6 +85,12 @@ pub fn run() {
             commands::delete_path,
             commands::create_directory,
             commands::chmod_path,
+            commands::bridge_start,
+            commands::bridge_stop,
+            commands::bridge_status,
+            commands::bridge_set_session_access,
+            commands::respond_to_bridge_approval,
+            commands::bridge_activity,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

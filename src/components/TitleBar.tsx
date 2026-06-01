@@ -25,6 +25,7 @@ import {
   RefreshCw,
   Command as CommandIcon,
   Keyboard,
+  Radio,
 } from "lucide-react";
 import { useSettings } from "@/stores/settingsStore";
 import { useLayout } from "@/stores/layoutStore";
@@ -130,6 +131,12 @@ export function TitleBar() {
           icon: <ArrowDownUp size={11} />,
           shortcut: "Ctrl+T",
           onClick: togglePanel,
+        },
+        { kind: "sep" },
+        {
+          label: "Agent Bridge…",
+          icon: <Radio size={11} />,
+          onClick: () => openDialog("agentBridge"),
         },
         { kind: "sep" },
         {

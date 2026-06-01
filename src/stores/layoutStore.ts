@@ -3,7 +3,12 @@ import { create } from "zustand";
 // Which app-level modal is open (mutually exclusive). Centralized here so the
 // command palette, keyboard shortcuts and title-bar menus can all open them
 // without prop-threading through App.
-export type AppDialog = "settings" | "newConnection" | "import" | "about";
+export type AppDialog =
+  | "settings"
+  | "newConnection"
+  | "import"
+  | "about"
+  | "agentBridge";
 
 interface LayoutState {
   terminalOpen: boolean;

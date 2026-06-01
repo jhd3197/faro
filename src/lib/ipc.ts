@@ -19,6 +19,10 @@ import type {
   TerminalExitEvent,
   Transfer,
   OverwritePolicy,
+  BridgeStatus,
+  BridgeActivity,
+  BridgeApproval,
+  ApprovalDecision,
 } from "./types";
 
 // Typed wrappers around the Tauri command surface. The string names must match
@@ -163,6 +167,16 @@ export const ipc = {
     invoke<EditStartedEvent>("start_edit", { sessionId, remotePath }),
 
   stopEdit: (editId: string) => invoke<void>("stop_edit", { editId }),
+
+  // Agent Bridge
+  bridgeStart: () => invoke<BridgeStatus>("bridge_start"),
+  bridgeStop: () => invoke<BridgeStatus>("bridge_stop"),
+  bridgeStatus: () => invoke<BridgeStatus>("bridge_status"),
+  bridgeSetSessionAccess: (sessionId: SessionId, enabled: boolean) =>
+    invoke<BridgeStatus>("bridge_set_session_access", { sessionId, enabled }),
+  respondToBridgeApproval: (requestId: string, decision: ApprovalDecision) =>
+    invoke<void>("respond_to_bridge_approval", { requestId, decision }),
+  bridgeActivity: () => invoke<BridgeActivity[]>("bridge_activity"),
 };
 
 export async function onEditSaved(
@@ -193,6 +207,18 @@ export async function onTerminalExit(
   cb: (event: TerminalExitEvent) => void
 ): Promise<UnlistenFn> {
   return listen<TerminalExitEvent>("terminal://exit", (e) => cb(e.payload));
+}
+
+export async function onBridgeApproval(
+  cb: (event: BridgeApproval) => void
+): Promise<UnlistenFn> {
+  return listen<BridgeApproval>("bridge://approval", (e) => cb(e.payload));
+}
+
+export async function onBridgeActivity(
+  cb: (event: BridgeActivity) => void
+): Promise<UnlistenFn> {
+  return listen<BridgeActivity>("bridge://activity", (e) => cb(e.payload));
 }
 
 export async function onTransferEvent(

@@ -7,7 +7,7 @@ use crate::known_hosts;
 use crate::profiles::{AuthMethod, ConnectionProfile};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use russh::client;
+use russh::{client, ChannelMsg};
 use russh_keys::key;
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
@@ -234,6 +234,52 @@ impl SshSession {
             })
             .await
     }
+
+    /// Run a single non-interactive command on a fresh exec channel and collect
+    /// its full stdout/stderr + exit code. Used by the Agent Bridge so a local
+    /// AI agent can run commands through this already-authenticated session.
+    pub async fn exec(&self, command: &str) -> Result<ExecOutput> {
+        let mut channel = {
+            let h = self.handle.lock().await;
+            h.channel_open_session().await?
+        };
+        channel.exec(true, command.as_bytes()).await?;
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut exit_code = None;
+        loop {
+            let Some(msg) = channel.wait().await else { break };
+            match msg {
+                ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
+                ChannelMsg::ExtendedData { ref data, ext } => {
+                    // ext == 1 is the conventional stderr stream.
+                    if ext == 1 {
+                        stderr.extend_from_slice(data);
+                    } else {
+                        stdout.extend_from_slice(data);
+                    }
+                }
+                ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status as i32),
+                ChannelMsg::Eof | ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+
+        Ok(ExecOutput {
+            stdout: String::from_utf8_lossy(&stdout).to_string(),
+            stderr: String::from_utf8_lossy(&stderr).to_string(),
+            exit_code,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecOutput {
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
 }
 
 /// Open a Session for any supported protocol given a profile and a verifier.
