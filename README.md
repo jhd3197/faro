@@ -12,6 +12,8 @@
 
 *Servers · storage · sessions, all in one workspace.*
 
+**🤖 New — [Agent Bridge](#-agent-bridge): hand a live server to Claude Code (or any MCP agent) — through your authenticated session, with per-command approval, and zero credentials shared.**
+
 </div>
 
 ---
@@ -19,6 +21,36 @@
 ## What it is
 
 Faro is what you'd get if you let FileZilla, PuTTY, and a half-dozen cloud-storage browsers share one window and one connection list. Save a server once, open its files in the dual-pane browser and a terminal tab against the same SSH session, drag-and-drop transfers between sides, sync directories one-way, edit remote files in your local editor with auto-upload on save — and run all of the same operations from a CLI when you don't feel like clicking.
+
+And when you want an AI agent to actually *do* something on a box, the **[Agent Bridge](#-agent-bridge)** lets it run commands through the session you already opened — no remote install, no keys handed over, every command gated behind your approval.
+
+## 🤖 Agent Bridge
+
+**Let a local AI agent run commands on your servers — safely.**
+
+This is the part that makes Faro more than a file client. Connect to a server once, and Faro can lend that **already-authenticated SSH session** to a local AI agent — Claude Code, Cursor, anything that speaks [MCP](https://modelcontextprotocol.io) — so the agent operates on the box **without installing anything remote and without ever seeing your credentials.** Faro stays the gatekeeper.
+
+> **Why it's different:** most "AI over SSH" setups make you hand the agent your keys or stand up a server-side daemon. Faro does neither. The agent borrows the session *you* already opened, *you* approve every command, and nothing reaches the server except the commands you OK.
+
+**Wire it into Claude Code — native MCP, auto-discovered tools:**
+
+1. Connect to a server, open the **Bridge** panel (status-bar pill), hit **Start**, and flip on **Allow agent access**.
+2. Copy the one-liner the panel generates and run it in your project:
+   ```bash
+   claude mcp add --transport http faro http://127.0.0.1:<port>/mcp \
+     --header "Authorization: Bearer <token>"
+   ```
+3. Claude Code now has two tools — `faro_list_sessions` and `faro_exec`. Ask it *"check disk usage on the server"* and it runs through Faro. (Prefer curl or another agent? The panel also exports a ready-to-paste `SKILL.md` for the plain HTTP API.)
+
+**The guardrails — all on by default:**
+
+- 🔒 **Localhost only** — bound to `127.0.0.1` on a random port.
+- 🔑 **Bearer token** — per-launch, required on every request.
+- ☑️ **Per-session opt-in** — no connection is reachable until you turn it on.
+- 🙋 **Approve every command** — each `exec` pops a prompt in Faro and blocks until you click Approve (or it times out).
+- 📋 **Live audit log** — every command, approval, and denial, right in the panel.
+
+Surface: `GET /health`, `GET /sessions`, `POST /exec`, and `POST /mcp` (MCP Streamable HTTP). It's a hand-rolled localhost server on the existing tokio runtime — **zero new dependencies.**
 
 ## Backends
 
@@ -34,6 +66,7 @@ Faro is what you'd get if you let FileZilla, PuTTY, and a half-dozen cloud-stora
 
 ## Highlights
 
+- **🤖 Agent Bridge** — give Claude Code (or any MCP agent) command access to a connected server through your authenticated session, gated by per-command approval and no shared credentials. [Details ↑](#-agent-bridge)
 - **One SSH session, two surfaces** — the SFTP browser and the terminal pane share a single connection per profile. No PuTTY/FileZilla double-login dance.
 - **Known-hosts verification** with an interactive fingerprint prompt. Mismatched keys get a danger-toned UI so MITM attempts are obvious.
 - **ssh-agent everywhere** — `$SSH_AUTH_SOCK` on unix, OpenSSH-for-Windows pipe, and Pageant (PuTTY 0.78+) on Windows. `ssh-add` once, connect everywhere.
@@ -113,6 +146,8 @@ src/                       React frontend
 
 src-tauri/src/
   commands.rs              Tauri command surface
+  bridge.rs                Agent Bridge — localhost MCP/HTTP server,
+                           per-command approval, audit log
   remotefs/                RemoteFs trait + Local / Sftp / Ftp / Object
   session/                 SshSession, FtpSession, ObjectSession,
                            HostKeyVerifier trait, SessionManager
@@ -150,7 +185,8 @@ npm run tauri icon src-tauri/icons/source.png
 - **v1.0** — one-way sync mode
 - **v1.1** — `faro-cli` binary
 - **v1.2** — edit-in-place external editor
-- **v1.3** — custom title bar with File/Edit/View/Help menus + integrated window controls; GitHub Actions release pipeline + CI *(this)*
+- **v1.3** — custom title bar with File/Edit/View/Help menus + integrated window controls; GitHub Actions release pipeline + CI
+- **unreleased** — UI density pass (named themes, command palette, sortable detail columns, breadcrumbs, in-pane filter, toasts) and the **🤖 Agent Bridge**: AI-agent command access over native MCP *(this)*
 - **next** — transfer speed limits, queue editing (priority/retry/pause), filename filters (`.gitignore`-style), WebDAV backend, search/filter
 - **release polish** — code signing (Apple Developer / Windows EV cert), Tauri auto-updater, landing page
 
