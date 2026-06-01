@@ -28,6 +28,9 @@ import {
 import { useEditor } from "./stores/editorStore";
 import { useToasts, type ToastVariant } from "./stores/toastStore";
 import { Toaster } from "./components/ui/Toaster";
+import { CommandPalette } from "./components/CommandPalette";
+import { KeyboardShortcutsDialog } from "./components/KeyboardShortcutsDialog";
+import { useShortcuts } from "./hooks/useShortcuts";
 import { relTime } from "./lib/format";
 import { cn } from "./lib/cn";
 
@@ -40,6 +43,8 @@ export default function App() {
 
   const terminalOpen = useLayout((s) => s.terminalOpen);
   const toggleTerminal = useLayout((s) => s.toggleTerminal);
+  const dialog = useLayout((s) => s.dialog);
+  const closeDialog = useLayout((s) => s.closeDialog);
   const togglePanel = useTransfers((s) => s.togglePanel);
   const transferPanelOpen = useTransfers((s) => s.panelOpen);
   const activeTransfers = useTransfers((s) =>
@@ -47,31 +52,23 @@ export default function App() {
       (t) => t.status === "transferring" || t.status === "queued"
     ).length
   );
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [editsMenuOpen, setEditsMenuOpen] = useState(false);
-  const [newConnectionOpen, setNewConnectionOpen] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
-  const [aboutOpen, setAboutOpen] = useState(false);
+
+  useShortcuts();
 
   return (
     <div className="flex h-screen w-screen flex-col">
-      <TitleBar
-        onOpenSettings={() => setSettingsOpen(true)}
-        onOpenNewConnection={() => setNewConnectionOpen(true)}
-        onOpenImport={() => setImportOpen(true)}
-        onOpenAbout={() => setAboutOpen(true)}
-      />
-      {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
-      {newConnectionOpen && (
-        <ProfileEditor
-          profile={null}
-          onClose={() => setNewConnectionOpen(false)}
-        />
+      <TitleBar />
+      {dialog === "settings" && <Settings onClose={closeDialog} />}
+      {dialog === "newConnection" && (
+        <ProfileEditor profile={null} onClose={closeDialog} />
       )}
-      {importOpen && <ImportDialog onClose={() => setImportOpen(false)} />}
-      {aboutOpen && <AboutDialog onClose={() => setAboutOpen(false)} />}
+      {dialog === "import" && <ImportDialog onClose={closeDialog} />}
+      {dialog === "about" && <AboutDialog onClose={closeDialog} />}
       <HostKeyModal />
       <Toaster />
+      <CommandPalette />
+      <KeyboardShortcutsDialog />
       <div className="flex flex-1 overflow-hidden">
         <ConnectionManager />
         <div className="flex flex-1 flex-col">

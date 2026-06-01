@@ -23,6 +23,8 @@ import {
   Info,
   ExternalLink,
   RefreshCw,
+  Command as CommandIcon,
+  Keyboard,
 } from "lucide-react";
 import { useSettings } from "@/stores/settingsStore";
 import { useLayout } from "@/stores/layoutStore";
@@ -32,27 +34,18 @@ import { cn } from "@/lib/cn";
 const APP_VERSION = "v1.3";
 const REPO_URL = "https://github.com/jhd3197/faro";
 
-interface Props {
-  onOpenSettings: () => void;
-  onOpenNewConnection: () => void;
-  onOpenImport: () => void;
-  onOpenAbout: () => void;
-}
-
 /// Single custom title bar — replaces the OS chrome + the old app header.
 /// Draggable region via `data-tauri-drag-region` (Tauri picks it up); the
 /// menu buttons and window controls explicitly opt out via `data-no-drag`
 /// (handled by them being interactive elements — Tauri skips drag handling
 /// when the event target is a button or has the explicit attribute).
-export function TitleBar({
-  onOpenSettings,
-  onOpenNewConnection,
-  onOpenImport,
-  onOpenAbout,
-}: Props) {
+export function TitleBar() {
   const appTheme = useSettings((s) => s.appTheme);
   const setAppTheme = useSettings((s) => s.setAppTheme);
   const toggleTerminal = useLayout((s) => s.toggleTerminal);
+  const openDialog = useLayout((s) => s.openDialog);
+  const togglePalette = useLayout((s) => s.togglePalette);
+  const setShortcutsOpen = useLayout((s) => s.setShortcutsOpen);
   const togglePanel = useTransfers((s) => s.togglePanel);
   const [maximized, setMaximized] = useState(false);
 
@@ -73,7 +66,7 @@ export function TitleBar({
   const toggleMaximize = () => win.toggleMaximize();
   const close = () => win.close();
   const switchTheme = () =>
-    setAppTheme(appTheme === "dark" ? "light" : "dark");
+    setAppTheme(appTheme === "light" ? "dark" : "light");
 
   const menus: MenuSpec[] = [
     {
@@ -83,12 +76,12 @@ export function TitleBar({
           label: "New connection",
           icon: <Plus size={11} />,
           shortcut: "Ctrl+N",
-          onClick: onOpenNewConnection,
+          onClick: () => openDialog("newConnection"),
         },
         {
           label: "Import connections…",
           icon: <Download size={11} />,
-          onClick: onOpenImport,
+          onClick: () => openDialog("import"),
         },
         { kind: "sep" },
         {
@@ -105,7 +98,7 @@ export function TitleBar({
           label: "Preferences…",
           icon: <SettingsIcon size={11} />,
           shortcut: "Ctrl+,",
-          onClick: onOpenSettings,
+          onClick: () => openDialog("settings"),
         },
         { kind: "sep" },
         {
@@ -120,6 +113,13 @@ export function TitleBar({
       label: "View",
       items: [
         {
+          label: "Command palette…",
+          icon: <CommandIcon size={11} />,
+          shortcut: "Ctrl+K",
+          onClick: togglePalette,
+        },
+        { kind: "sep" },
+        {
           label: "Toggle terminal",
           icon: <TerminalSquare size={11} />,
           shortcut: "Ctrl+`",
@@ -133,8 +133,8 @@ export function TitleBar({
         },
         { kind: "sep" },
         {
-          label: appTheme === "dark" ? "Switch to light theme" : "Switch to dark theme",
-          icon: appTheme === "dark" ? <Sun size={11} /> : <Moon size={11} />,
+          label: appTheme === "light" ? "Switch to dark theme" : "Switch to light theme",
+          icon: appTheme === "light" ? <Moon size={11} /> : <Sun size={11} />,
           shortcut: "Ctrl+Shift+T",
           onClick: switchTheme,
         },
@@ -144,9 +144,15 @@ export function TitleBar({
       label: "Help",
       items: [
         {
+          label: "Keyboard shortcuts",
+          icon: <Keyboard size={11} />,
+          shortcut: "Ctrl+/",
+          onClick: () => setShortcutsOpen(true),
+        },
+        {
           label: "About Faro",
           icon: <Info size={11} />,
-          onClick: onOpenAbout,
+          onClick: () => openDialog("about"),
         },
         { kind: "sep" },
         {
@@ -163,31 +169,6 @@ export function TitleBar({
       ],
     },
   ];
-
-  // Hook a few keyboard shortcuts. Anything more elaborate gets its own
-  // hook later; this covers the ones the menu items label.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const ctrl = e.ctrlKey || e.metaKey;
-      if (!ctrl) return;
-      if (e.key.toLowerCase() === "n" && !e.shiftKey) {
-        e.preventDefault();
-        onOpenNewConnection();
-      } else if (e.key === ",") {
-        e.preventDefault();
-        onOpenSettings();
-      } else if (e.key === "`") {
-        e.preventDefault();
-        toggleTerminal();
-      } else if (e.key.toLowerCase() === "t" && e.shiftKey) {
-        e.preventDefault();
-        switchTheme();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appTheme]);
 
   return (
     <div
@@ -209,10 +190,10 @@ export function TitleBar({
 
       <div className="flex-1" data-tauri-drag-region />
 
-      <IconButton onClick={switchTheme} title={`Switch to ${appTheme === "dark" ? "light" : "dark"} theme`}>
-        {appTheme === "dark" ? <Sun size={13} /> : <Moon size={13} />}
+      <IconButton onClick={switchTheme} title={`Switch to ${appTheme === "light" ? "dark" : "light"} theme`}>
+        {appTheme === "light" ? <Moon size={13} /> : <Sun size={13} />}
       </IconButton>
-      <IconButton onClick={onOpenSettings} title="Settings">
+      <IconButton onClick={() => openDialog("settings")} title="Settings">
         <SettingsIcon size={13} />
       </IconButton>
 
