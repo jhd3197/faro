@@ -144,6 +144,10 @@ Notes:
 `;
 }
 
+function mcpAddCmd(url: string, token: string): string {
+  return `claude mcp add --transport http faro ${url}/mcp --header "Authorization: Bearer ${token}"`;
+}
+
 // The Agent Bridge control panel (opened as a modal).
 export function AgentBridge({ onClose }: { onClose: () => void }) {
   const status = useBridge((s) => s.status);
@@ -284,20 +288,40 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
           {/* Setup */}
           <Card title="Connect Claude Code">
             <div className="mb-2 text-xs text-text-muted">
-              Drop this into your project as{" "}
-              <span className="font-mono">.claude/skills/faro-server/SKILL.md</span>{" "}
-              (or paste it to the agent). It documents the endpoint + token.
+              Native MCP — run this in your project and Claude Code gains{" "}
+              <span className="font-mono">faro_exec</span> +{" "}
+              <span className="font-mono">faro_list_sessions</span> tools (you
+              still approve every command):
             </div>
-            <CopyButton
-              wide
-              disabled={!canCopySetup}
-              label="Copy SKILL.md"
-              text={
-                canCopySetup
-                  ? skillMd(status.url ?? "", status.token ?? "", activeSessionId ?? "")
-                  : ""
-              }
-            />
+            <div className="flex items-center gap-2">
+              <code className="min-w-0 flex-1 truncate rounded border border-border bg-bg-panel px-2 py-1 font-mono text-[10px] text-text-muted">
+                {canCopySetup
+                  ? mcpAddCmd(status.url ?? "", status.token ?? "")
+                  : "claude mcp add --transport http faro …"}
+              </code>
+              <CopyButton
+                disabled={!canCopySetup}
+                text={
+                  canCopySetup ? mcpAddCmd(status.url ?? "", status.token ?? "") : ""
+                }
+              />
+            </div>
+            <div className="mt-3 flex items-center gap-2 text-[11px] text-text-dim">
+              <span>Prefer a curl-based skill?</span>
+              <CopyButton
+                disabled={!canCopySetup}
+                label="Copy SKILL.md"
+                text={
+                  canCopySetup
+                    ? skillMd(
+                        status.url ?? "",
+                        status.token ?? "",
+                        activeSessionId ?? ""
+                      )
+                    : ""
+                }
+              />
+            </div>
             {!canCopySetup && (
               <div className="mt-1.5 text-[11px] text-text-dim">
                 Start the bridge and grant access to a session to enable this.
