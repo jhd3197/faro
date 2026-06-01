@@ -6,6 +6,8 @@ import {
   type OverwritePolicy,
   type SortField,
   type SortDirection,
+  type PaneViewMode,
+  type PaneDensity,
   type TerminalTheme,
 } from "@/stores/settingsStore";
 import { cn } from "@/lib/cn";
@@ -98,6 +100,24 @@ export function Settings({ onClose }: Props) {
                 options={[
                   { value: "asc", label: "Asc" },
                   { value: "desc", label: "Desc" },
+                ]}
+              />
+            </Field>
+            <Field label="View" help="Switchable per pane from the toolbar too.">
+              <Segmented<PaneViewMode>
+                value={s.paneViewMode}
+                onChange={s.setPaneViewMode}
+                options={[
+                  { value: "details", label: "Details" },
+                  { value: "list", label: "List" },
+                ]}
+              />
+              <Segmented<PaneDensity>
+                value={s.paneDensity}
+                onChange={s.setPaneDensity}
+                options={[
+                  { value: "comfortable", label: "Comfortable" },
+                  { value: "compact", label: "Compact" },
                 ]}
               />
             </Field>

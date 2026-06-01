@@ -7,6 +7,10 @@ import { formatCombo } from "@/lib/shortcuts";
 // Global shortcuts that aren't registry commands (palette + FilePane keys).
 const EXTRAS: { group: string; title: string; combo: string }[] = [
   { group: "General", title: "Command Palette", combo: "mod+k" },
+  { group: "File pane", title: "Move cursor", combo: "arrows" },
+  { group: "File pane", title: "Open / transfer", combo: "enter" },
+  { group: "File pane", title: "Up one folder", combo: "backspace" },
+  { group: "File pane", title: "Jump to name", combo: "type" },
   { group: "File pane", title: "Select all", combo: "mod+a" },
   { group: "File pane", title: "Delete selection", combo: "delete" },
   { group: "File pane", title: "Clear filter / selection", combo: "escape" },
@@ -101,9 +105,17 @@ export function KeyboardShortcutsDialog() {
   );
 }
 
+const SPECIAL_KEYS: Record<string, string> = {
+  delete: "Del",
+  escape: "Esc",
+  arrows: "↑ ↓",
+  enter: "Enter",
+  backspace: "Backspace",
+  type: "Type a name",
+};
+
 function Kbd({ combo }: { combo: string }) {
-  const label =
-    combo === "delete" ? "Del" : combo === "escape" ? "Esc" : formatCombo(combo);
+  const label = SPECIAL_KEYS[combo] ?? formatCombo(combo);
   return (
     <span className="rounded border border-border bg-bg-subtle px-1.5 py-0.5 font-mono text-[11px] text-text-dim">
       {label}

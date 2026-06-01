@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import {
   ArrowUp,
+  ArrowLeft,
+  ArrowRight,
   RefreshCw,
   Folder,
   FileText,
@@ -20,12 +22,21 @@ import {
   Pencil,
   Inbox,
   SearchX,
+  List,
+  Table2,
+  AlignJustify,
 } from "lucide-react";
 import { ipc } from "@/lib/ipc";
 import type { Capabilities, DirEntry, SessionId } from "@/lib/types";
 import { LOCAL_SESSION } from "@/lib/types";
-import { useSettings, type SortField } from "@/stores/settingsStore";
+import {
+  useSettings,
+  type SortField,
+  type PaneViewMode,
+  type PaneDensity,
+} from "@/stores/settingsStore";
 import { useEditor } from "@/stores/editorStore";
+import { usePathHistory } from "@/hooks/usePathHistory";
 import { cn } from "@/lib/cn";
 import { fmtSize, fmtMtime, formatMode } from "@/lib/format";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
@@ -106,6 +117,10 @@ export function FilePane({
     sortDirection,
     setSortField,
     setSortDirection,
+    paneViewMode,
+    paneDensity,
+    setPaneViewMode,
+    setPaneDensity,
   } = useSettings();
 
   const [entries, setEntries] = useState<DirEntry[]>([]);
@@ -126,6 +141,18 @@ export function FilePane({
   const [modal, setModal] = useState<ModalState>(null);
   const dragCounter = useRef(0);
   const containerRef = useRef<HTMLDivElement>(null);
+  const typeBufRef = useRef("");
+  const typeAtRef = useRef(0);
+
+  const history = usePathHistory(path, onPathChange);
+
+  const scrollToIdx = (n: number) => {
+    requestAnimationFrame(() => {
+      containerRef.current
+        ?.querySelector(`[data-idx="${n}"]`)
+        ?.scrollIntoView({ block: "nearest" });
+    });
+  };
 
   useEffect(() => {
     setDraftPath(path);
@@ -222,18 +249,68 @@ export function FilePane({
         }
         return;
       }
-      if (typing) return; // don't hijack Ctrl+A / Delete while editing text
+      if (typing) return; // don't hijack keys while editing text
+      // Only run list nav when the pane/list area is focused, not a toolbar btn.
+      if (target && target.closest('button, a, [role="button"]')) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
         e.preventDefault();
         setSelected(new Set(visible.map((x) => x.path)));
-      } else if (e.key === "Delete" && selected.size > 0) {
+        return;
+      }
+      if (e.key === "Delete" && selected.size > 0) {
         const items = visible.filter((v) => selected.has(v.path));
         if (items.length > 0) setModal({ type: "delete", entries: items });
+        return;
+      }
+      if (e.ctrlKey || e.metaKey || e.altKey) return; // leave app shortcuts alone
+
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        if (visible.length === 0) return;
+        const cur = anchor ? visible.findIndex((v) => v.path === anchor) : -1;
+        let next = e.key === "ArrowDown" ? cur + 1 : cur - 1;
+        next = Math.max(0, Math.min(visible.length - 1, next));
+        const targetItem = visible[next];
+        if (targetItem) {
+          if (e.shiftKey) setSelected((prev) => new Set(prev).add(targetItem.path));
+          else setSelected(new Set([targetItem.path]));
+          setAnchor(targetItem.path);
+          scrollToIdx(next);
+        }
+        return;
+      }
+      if (e.key === "Enter" && anchor) {
+        const item = visible.find((v) => v.path === anchor);
+        if (item) {
+          e.preventDefault();
+          onRowActivate(item);
+        }
+        return;
+      }
+      if (e.key === "Backspace") {
+        e.preventDefault();
+        goUp();
+        return;
+      }
+      // Type-ahead: jump to the first item matching the recently-typed run.
+      if (e.key.length === 1) {
+        const now = Date.now();
+        typeBufRef.current =
+          now - typeAtRef.current > 800 ? e.key : typeBufRef.current + e.key;
+        typeAtRef.current = now;
+        const buf = typeBufRef.current.toLowerCase();
+        let idx = visible.findIndex((v) => v.name.toLowerCase().startsWith(buf));
+        if (idx < 0) idx = visible.findIndex((v) => v.name.toLowerCase().includes(buf));
+        if (idx >= 0) {
+          setSelected(new Set([visible[idx].path]));
+          setAnchor(visible[idx].path);
+          scrollToIdx(idx);
+        }
       }
     };
     el.addEventListener("keydown", handler);
     return () => el.removeEventListener("keydown", handler);
-  }, [visible, selected, filter]);
+  }, [visible, selected, filter, anchor]);
 
   const goUp = () => {
     const isLocal = sessionId === LOCAL_SESSION;
@@ -258,6 +335,7 @@ export function FilePane({
   };
 
   const onRowClick = (entry: DirEntry, e: React.MouseEvent) => {
+    containerRef.current?.focus(); // so arrow / type-ahead nav works after a click
     if (e.shiftKey && anchor) {
       const idxA = visible.findIndex((x) => x.path === anchor);
       const idxB = visible.findIndex((x) => x.path === entry.path);
@@ -584,10 +662,26 @@ export function FilePane({
           </button>
         )}
         <button
+          onClick={history.back}
+          disabled={!sessionId || !history.canBack}
+          className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-30"
+          title="Back"
+        >
+          <ArrowLeft size={13} />
+        </button>
+        <button
+          onClick={history.forward}
+          disabled={!sessionId || !history.canForward}
+          className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-30"
+          title="Forward"
+        >
+          <ArrowRight size={13} />
+        </button>
+        <button
           onClick={goUp}
           disabled={!sessionId}
           className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"
-          title="Up"
+          title="Up (Backspace)"
         >
           <ArrowUp size={13} />
         </button>
@@ -641,6 +735,50 @@ export function FilePane({
             })}
           </div>
         )}
+        <div className="flex shrink-0 items-center gap-0.5">
+          <button
+            onClick={() => setPaneViewMode("list")}
+            className={cn(
+              "rounded p-1 hover:bg-bg-hover",
+              paneViewMode === "list"
+                ? "text-accent"
+                : "text-text-dim hover:text-text"
+            )}
+            title="List view"
+          >
+            <List size={13} />
+          </button>
+          <button
+            onClick={() => setPaneViewMode("details")}
+            className={cn(
+              "rounded p-1 hover:bg-bg-hover",
+              paneViewMode === "details"
+                ? "text-accent"
+                : "text-text-dim hover:text-text"
+            )}
+            title="Details view"
+          >
+            <Table2 size={13} />
+          </button>
+          <button
+            onClick={() =>
+              setPaneDensity(paneDensity === "compact" ? "comfortable" : "compact")
+            }
+            className={cn(
+              "rounded p-1 hover:bg-bg-hover",
+              paneDensity === "compact"
+                ? "text-accent"
+                : "text-text-dim hover:text-text"
+            )}
+            title={
+              paneDensity === "compact"
+                ? "Compact rows — click for comfortable"
+                : "Comfortable rows — click for compact"
+            }
+          >
+            <AlignJustify size={13} />
+          </button>
+        </div>
         {!editingPath && (
           <button
             onClick={() => {
@@ -678,7 +816,7 @@ export function FilePane({
         </div>
       </div>
 
-      {sessionId && (
+      {sessionId && paneViewMode === "details" && (
         <div
           className="grid items-center gap-2 border-b border-border bg-bg-subtle px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted"
           style={{ gridTemplateColumns: cols }}
@@ -747,10 +885,13 @@ export function FilePane({
             <EmptyState icon={<Inbox size={20} />} title="Empty folder" />
           )
         ) : (
-          visible.map((entry) => (
+          visible.map((entry, i) => (
             <Row
               key={entry.path}
               entry={entry}
+              index={i}
+              viewMode={paneViewMode}
+              density={paneDensity}
               selected={selected.has(entry.path)}
               cols={cols}
               showPerms={showPerms}
@@ -861,6 +1002,9 @@ export function FilePane({
 
 function Row({
   entry,
+  index,
+  viewMode,
+  density,
   selected,
   cols,
   showPerms,
@@ -870,6 +1014,9 @@ function Row({
   onContextMenu,
 }: {
   entry: DirEntry;
+  index: number;
+  viewMode: PaneViewMode;
+  density: PaneDensity;
   selected: boolean;
   cols: string;
   showPerms: boolean;
@@ -884,32 +1031,67 @@ function Row({
       : entry.kind === "symlink"
         ? Link2
         : FileText;
+  const pad = density === "compact" ? "py-0.5 text-xs" : "py-1 text-sm";
+  const sel = selected
+    ? "bg-accent/15 hover:bg-accent/20"
+    : "hover:bg-bg-hover";
+  const title =
+    entry.kind === "file"
+      ? "Drag to other pane • Double-click to transfer • Right-click for more"
+      : "Drag, double-click to open, right-click for more";
+  const iconEl = (
+    <Icon
+      size={13}
+      className={cn(
+        "shrink-0",
+        entry.kind === "directory" ? "text-accent" : "text-text-muted"
+      )}
+    />
+  );
+
+  if (viewMode === "list") {
+    return (
+      <div
+        data-idx={index}
+        onClick={onClick}
+        onDoubleClick={onActivate}
+        onContextMenu={onContextMenu}
+        draggable
+        onDragStart={onDragStart}
+        title={title}
+        className={cn(
+          "flex cursor-default select-none items-center gap-2 border-b border-border-subtle px-3",
+          pad,
+          sel
+        )}
+      >
+        {iconEl}
+        <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+        <span className="shrink-0 text-xs tabular-nums text-text-dim">
+          {entry.kind === "file" ? fmtSize(entry.size) : ""}
+        </span>
+      </div>
+    );
+  }
+
   return (
     <div
+      data-idx={index}
       onClick={onClick}
       onDoubleClick={onActivate}
       onContextMenu={onContextMenu}
       draggable
       onDragStart={onDragStart}
+      title={title}
       style={{ gridTemplateColumns: cols }}
       className={cn(
-        "grid cursor-default select-none items-center gap-2 border-b border-border-subtle px-3 py-1 text-sm",
-        selected ? "bg-accent/15 hover:bg-accent/20" : "hover:bg-bg-hover"
+        "grid cursor-default select-none items-center gap-2 border-b border-border-subtle px-3",
+        pad,
+        sel
       )}
-      title={
-        entry.kind === "file"
-          ? "Drag to other pane • Double-click to transfer • Right-click for more"
-          : "Drag, double-click to open, right-click for more"
-      }
     >
       <span className="flex min-w-0 items-center gap-2">
-        <Icon
-          size={13}
-          className={cn(
-            "shrink-0",
-            entry.kind === "directory" ? "text-accent" : "text-text-muted"
-          )}
-        />
+        {iconEl}
         <span className="truncate">{entry.name}</span>
       </span>
       <span className="truncate text-xs text-text-dim">

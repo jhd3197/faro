@@ -3,6 +3,8 @@ import { create } from "zustand";
 export type OverwritePolicy = "overwrite" | "skip" | "rename";
 export type SortField = "name" | "size" | "modified";
 export type SortDirection = "asc" | "desc";
+export type PaneViewMode = "list" | "details";
+export type PaneDensity = "comfortable" | "compact";
 export type AppTheme =
   | "dark"
   | "light"
@@ -38,6 +40,8 @@ interface SettingsState {
   showHiddenFiles: boolean;
   sortField: SortField;
   sortDirection: SortDirection;
+  paneViewMode: PaneViewMode;
+  paneDensity: PaneDensity;
 
   // Terminal
   terminalFontSize: number;
@@ -54,6 +58,8 @@ interface SettingsState {
   setShowHiddenFiles: (v: boolean) => void;
   setSortField: (f: SortField) => void;
   setSortDirection: (d: SortDirection) => void;
+  setPaneViewMode: (m: PaneViewMode) => void;
+  setPaneDensity: (d: PaneDensity) => void;
   setTerminalFontSize: (n: number) => void;
   setTerminalFontFamily: (s: string) => void;
   setTerminalTheme: (t: TerminalTheme) => void;
@@ -71,6 +77,8 @@ type Persisted = Omit<
   | "setShowHiddenFiles"
   | "setSortField"
   | "setSortDirection"
+  | "setPaneViewMode"
+  | "setPaneDensity"
   | "setTerminalFontSize"
   | "setTerminalFontFamily"
   | "setTerminalTheme"
@@ -85,6 +93,8 @@ const DEFAULTS: Persisted = {
   showHiddenFiles: false,
   sortField: "name",
   sortDirection: "asc",
+  paneViewMode: "details",
+  paneDensity: "comfortable",
   terminalFontSize: 13,
   terminalFontFamily:
     '"JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace',
@@ -129,6 +139,8 @@ function mutate<K extends keyof Persisted>(
     showHiddenFiles: s.showHiddenFiles,
     sortField: s.sortField,
     sortDirection: s.sortDirection,
+    paneViewMode: s.paneViewMode,
+    paneDensity: s.paneDensity,
     terminalFontSize: s.terminalFontSize,
     terminalFontFamily: s.terminalFontFamily,
     terminalTheme: s.terminalTheme,
@@ -147,6 +159,8 @@ export const useSettings = create<SettingsState>((set, get) => ({
   setShowHiddenFiles: (v) => mutate(set, get, "showHiddenFiles", v),
   setSortField: (f) => mutate(set, get, "sortField", f),
   setSortDirection: (d) => mutate(set, get, "sortDirection", d),
+  setPaneViewMode: (m) => mutate(set, get, "paneViewMode", m),
+  setPaneDensity: (d) => mutate(set, get, "paneDensity", d),
   setTerminalFontSize: (n) => mutate(set, get, "terminalFontSize", n),
   setTerminalFontFamily: (s) => mutate(set, get, "terminalFontFamily", s),
   setTerminalTheme: (t) => mutate(set, get, "terminalTheme", t),
