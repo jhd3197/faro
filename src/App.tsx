@@ -19,8 +19,16 @@ import {
   WifiOff,
   Edit3,
   X,
+  Bell,
+  CheckCircle2,
+  AlertCircle,
+  Info,
+  AlertTriangle,
 } from "lucide-react";
 import { useEditor } from "./stores/editorStore";
+import { useToasts, type ToastVariant } from "./stores/toastStore";
+import { Toaster } from "./components/ui/Toaster";
+import { relTime } from "./lib/format";
 import { cn } from "./lib/cn";
 
 export default function App() {
@@ -63,6 +71,7 @@ export default function App() {
       {importOpen && <ImportDialog onClose={() => setImportOpen(false)} />}
       {aboutOpen && <AboutDialog onClose={() => setAboutOpen(false)} />}
       <HostKeyModal />
+      <Toaster />
       <div className="flex flex-1 overflow-hidden">
         <ConnectionManager />
         <div className="flex flex-1 flex-col">
@@ -121,6 +130,12 @@ function StatusBar({
   const edits = useEditor((s) => s.edits);
   const stopEditing = useEditor((s) => s.stopEditing);
   const editList = Object.values(edits);
+
+  const history = useToasts((s) => s.history);
+  const unread = useToasts((s) => s.unreadCount);
+  const markAllRead = useToasts((s) => s.markAllRead);
+  const clearHistory = useToasts((s) => s.clearHistory);
+  const [notifOpen, setNotifOpen] = useState(false);
 
   return (
     <div className="flex h-7 shrink-0 items-center gap-2 border-t border-border bg-bg-panel px-2 text-[11px]">
@@ -210,6 +225,66 @@ function StatusBar({
           )}
         </div>
       )}
+      <div className="relative">
+        <PillButton
+          active={notifOpen}
+          onClick={() => {
+            const next = !notifOpen;
+            setNotifOpen(next);
+            if (next) markAllRead();
+          }}
+          icon={<Bell size={11} />}
+          badge={unread > 0 ? unread : undefined}
+          title="Notifications"
+        />
+        {notifOpen && (
+          <div
+            className="anim-modal absolute bottom-7 right-0 z-30 w-80 overflow-hidden rounded-md border border-border bg-bg-panel shadow-elev-3"
+            onMouseLeave={() => setNotifOpen(false)}
+          >
+            <div className="flex items-center justify-between border-b border-border bg-bg-subtle px-3 py-1.5">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+                Notifications
+              </span>
+              {history.length > 0 && (
+                <button
+                  onClick={clearHistory}
+                  className="text-[10px] text-text-dim hover:text-text"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            {history.length === 0 ? (
+              <div className="px-3 py-6 text-center text-[11px] text-text-dim">
+                No notifications yet
+              </div>
+            ) : (
+              <div className="max-h-72 overflow-y-auto">
+                {history.slice(0, 50).map((n) => (
+                  <div
+                    key={n.id}
+                    className="flex items-start gap-2 border-b border-border-subtle px-3 py-2 last:border-0"
+                  >
+                    <NotifIcon variant={n.variant} />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[11px] font-medium">{n.title}</div>
+                      {n.message && (
+                        <div className="truncate text-[10px] text-text-dim">
+                          {n.message}
+                        </div>
+                      )}
+                    </div>
+                    <span className="shrink-0 text-[9px] text-text-dim">
+                      {relTime(n.createdAt)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
       <PillButton
         active={terminalOpen}
         onClick={onToggleTerminal}
@@ -249,7 +324,7 @@ function PillButton({
   badge,
   title,
 }: {
-  children: React.ReactNode;
+  children?: React.ReactNode;
   onClick: () => void;
   icon: React.ReactNode;
   active?: boolean;
@@ -278,4 +353,15 @@ function PillButton({
       )}
     </button>
   );
+}
+
+function NotifIcon({ variant }: { variant: ToastVariant }) {
+  const map = {
+    info: { Icon: Info, cls: "text-accent" },
+    success: { Icon: CheckCircle2, cls: "text-emerald-400" },
+    error: { Icon: AlertCircle, cls: "text-danger" },
+    warning: { Icon: AlertTriangle, cls: "text-amber-400" },
+  } as const;
+  const { Icon, cls } = map[variant];
+  return <Icon size={12} className={cn("mt-0.5 shrink-0", cls)} />;
 }

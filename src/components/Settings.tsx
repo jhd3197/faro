@@ -1,6 +1,7 @@
 import { X, Palette, ArrowDownUp, FolderTree, TerminalSquare, Plug } from "lucide-react";
 import {
   useSettings,
+  APP_THEMES,
   type AppTheme,
   type OverwritePolicy,
   type SortField,
@@ -38,15 +39,11 @@ export function Settings({ onClose }: Props) {
 
         <div className="flex-1 overflow-y-auto px-5 py-2">
           <Section title="Appearance" icon={<Palette size={13} />}>
-            <Field label="App theme" help="Light or dark for the whole interface.">
-              <Segmented<AppTheme>
-                value={s.appTheme}
-                onChange={s.setAppTheme}
-                options={[
-                  { value: "dark", label: "Dark" },
-                  { value: "light", label: "Light" },
-                ]}
-              />
+            <Field
+              label="App theme"
+              help="Recolors the whole interface — accent, surfaces, scrollbars and focus rings all follow the selected palette."
+            >
+              <ThemeGrid value={s.appTheme} onChange={s.setAppTheme} />
             </Field>
           </Section>
 
@@ -292,6 +289,47 @@ function Toggle({
         )}
       />
     </button>
+  );
+}
+
+function ThemeGrid({
+  value,
+  onChange,
+}: {
+  value: AppTheme;
+  onChange: (v: AppTheme) => void;
+}) {
+  return (
+    <div className="grid w-full grid-cols-3 gap-2">
+      {APP_THEMES.map((t) => {
+        const active = value === t.value;
+        return (
+          <button
+            key={t.value}
+            onClick={() => onChange(t.value)}
+            className={cn(
+              "flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors",
+              active
+                ? "border-accent bg-accent/10"
+                : "border-border bg-bg-subtle hover:border-text-dim"
+            )}
+          >
+            <span
+              className="h-4 w-4 shrink-0 rounded-full border border-white/10"
+              style={{ background: t.swatch }}
+            />
+            <span
+              className={cn(
+                "truncate text-xs font-medium",
+                active ? "text-text" : "text-text-muted"
+              )}
+            >
+              {t.label}
+            </span>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

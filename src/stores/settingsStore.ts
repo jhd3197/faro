@@ -3,7 +3,22 @@ import { create } from "zustand";
 export type OverwritePolicy = "overwrite" | "skip" | "rename";
 export type SortField = "name" | "size" | "modified";
 export type SortDirection = "asc" | "desc";
-export type AppTheme = "dark" | "light";
+export type AppTheme =
+  | "dark"
+  | "light"
+  | "tokyo"
+  | "nord"
+  | "dracula"
+  | "catppuccin";
+
+export const APP_THEMES: { value: AppTheme; label: string; swatch: string }[] = [
+  { value: "dark", label: "Dark", swatch: "rgb(139 127 246)" },
+  { value: "light", label: "Light", swatch: "rgb(99 88 220)" },
+  { value: "tokyo", label: "Tokyo Night", swatch: "rgb(122 162 247)" },
+  { value: "nord", label: "Nord", swatch: "rgb(136 192 208)" },
+  { value: "dracula", label: "Dracula", swatch: "rgb(189 147 249)" },
+  { value: "catppuccin", label: "Catppuccin", swatch: "rgb(203 166 247)" },
+];
 export type TerminalTheme =
   | "dark"
   | "light"

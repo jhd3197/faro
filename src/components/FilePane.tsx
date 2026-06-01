@@ -13,16 +13,57 @@ import {
   ShieldCheck,
   ServerOff,
   ExternalLink,
+  Search,
+  X,
+  ChevronUp,
+  ChevronDown,
+  Pencil,
+  Inbox,
+  SearchX,
 } from "lucide-react";
 import { ipc } from "@/lib/ipc";
 import type { Capabilities, DirEntry, SessionId } from "@/lib/types";
 import { LOCAL_SESSION } from "@/lib/types";
-import { useSettings } from "@/stores/settingsStore";
+import { useSettings, type SortField } from "@/stores/settingsStore";
 import { useEditor } from "@/stores/editorStore";
 import { cn } from "@/lib/cn";
+import { fmtSize, fmtMtime, formatMode } from "@/lib/format";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { PromptModal } from "./PromptModal";
 import { ConfirmModal } from "./ConfirmModal";
+import { FileListSkeleton } from "./ui/Skeleton";
+import { EmptyState } from "./ui/EmptyState";
+
+interface Segment {
+  label: string;
+  path: string;
+}
+
+// Build clickable breadcrumb segments for the address bar. Session-aware:
+// Windows-local paths keep drive + backslashes, everything else is POSIX "/".
+function parseSegments(path: string, isLocal: boolean): Segment[] {
+  if (!path || path === ".") return [{ label: path || "/", path: path || "/" }];
+  if (path === "/") return [{ label: "/", path: "/" }];
+  const isWin = isLocal && /^[a-zA-Z]:/.test(path);
+  const parts = path.split(/[/\\]/).filter(Boolean);
+  const segs: Segment[] = [];
+  if (isWin) {
+    let acc = parts[0] + "\\";
+    segs.push({ label: parts[0], path: acc });
+    for (let i = 1; i < parts.length; i++) {
+      acc = acc.endsWith("\\") ? acc + parts[i] : acc + "\\" + parts[i];
+      segs.push({ label: parts[i], path: acc });
+    }
+  } else {
+    segs.push({ label: "/", path: "/" });
+    let acc = "";
+    for (const p of parts) {
+      acc = acc + "/" + p;
+      segs.push({ label: p, path: acc });
+    }
+  }
+  return segs;
+}
 
 const DRAG_MIME = "application/x-faro";
 
@@ -59,10 +100,18 @@ export function FilePane({
   onDrop,
   transferLabel = "Transfer",
 }: Props) {
-  const { showHiddenFiles, sortField, sortDirection } = useSettings();
+  const {
+    showHiddenFiles,
+    sortField,
+    sortDirection,
+    setSortField,
+    setSortDirection,
+  } = useSettings();
 
   const [entries, setEntries] = useState<DirEntry[]>([]);
   const [draftPath, setDraftPath] = useState(path);
+  const [editingPath, setEditingPath] = useState(false);
+  const [filter, setFilter] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -80,6 +129,8 @@ export function FilePane({
 
   useEffect(() => {
     setDraftPath(path);
+    setEditingPath(false);
+    setFilter("");
   }, [path]);
 
   const load = useCallback(
@@ -129,9 +180,11 @@ export function FilePane({
     };
   }, [sessionId]);
 
-  // Apply filter + sort from settings.
+  // Apply hidden-file rule + in-pane name filter + sort from settings.
+  const q = filter.trim().toLowerCase();
   const visible = entries
     .filter((e) => showHiddenFiles || !e.name.startsWith("."))
+    .filter((e) => q === "" || e.name.toLowerCase().includes(q))
     .slice()
     .sort((a, b) => {
       // Directories always come before files regardless of sort.
@@ -152,10 +205,25 @@ export function FilePane({
     const el = containerRef.current;
     if (!el) return;
     const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const typing =
+        !!target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable);
       if (e.key === "Escape") {
-        setSelected(new Set());
-        setAnchor(null);
-      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+        // Filter first, then selection — least-surprising unwind order.
+        if (filter) {
+          setFilter("");
+          if (typing) (target as HTMLInputElement).blur();
+        } else {
+          setSelected(new Set());
+          setAnchor(null);
+        }
+        return;
+      }
+      if (typing) return; // don't hijack Ctrl+A / Delete while editing text
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
         e.preventDefault();
         setSelected(new Set(visible.map((x) => x.path)));
       } else if (e.key === "Delete" && selected.size > 0) {
@@ -165,7 +233,7 @@ export function FilePane({
     };
     el.addEventListener("keydown", handler);
     return () => el.removeEventListener("keydown", handler);
-  }, [visible, selected]);
+  }, [visible, selected, filter]);
 
   const goUp = () => {
     const isLocal = sessionId === LOCAL_SESSION;
@@ -438,6 +506,33 @@ export function FilePane({
   };
 
   const selectionCount = selected.size;
+  const segments = parseSegments(path, sessionId === LOCAL_SESSION);
+  const showPerms =
+    !!sessionId && caps?.canChmod !== false && visible.some((e) => e.mode != null);
+  const cols = showPerms
+    ? "minmax(0,1fr) 7.5rem 5.5rem 5.5rem"
+    : "minmax(0,1fr) 9rem 5.5rem";
+  const selectedBytes = visible
+    .filter((e) => selected.has(e.path))
+    .reduce((a, e) => a + (e.kind === "file" ? e.size : 0), 0);
+
+  const onSort = (f: SortField) => {
+    if (sortField === f) {
+      setSortDirection(sortDirection === "asc" ? "desc" : "asc");
+    } else {
+      setSortField(f);
+      setSortDirection("asc");
+    }
+  };
+
+  const commitPath = () => {
+    onPathChange(draftPath.trim() || (sessionId === LOCAL_SESSION ? path : "/"));
+    setEditingPath(false);
+  };
+  const cancelPathEdit = () => {
+    setDraftPath(path);
+    setEditingPath(false);
+  };
 
   return (
     <div
@@ -506,36 +601,122 @@ export function FilePane({
         </button>
       </div>
 
-      <div className="border-b border-border px-2 py-1">
-        <input
-          value={draftPath}
-          onChange={(e) => setDraftPath(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") onPathChange(draftPath);
-          }}
-          disabled={!sessionId}
-          className="w-full rounded border border-border bg-bg-subtle px-2 py-1 font-mono text-xs outline-none focus:border-accent disabled:opacity-50"
-          placeholder="/"
-        />
-      </div>
-
-      <div className="flex-1 overflow-y-auto">
-        {!sessionId && (
-          <div className="flex h-full flex-col items-center justify-center px-3 py-12 text-center anim-fade">
-            <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-bg-subtle text-text-dim">
-              <ServerOff size={20} />
-            </div>
-            <div className="text-xs text-text-dim">
-              No connection.
-              <br />
-              Click a profile in the sidebar to connect.
-            </div>
+      <div className="flex items-center gap-1.5 border-b border-border px-2 py-1">
+        {editingPath ? (
+          <input
+            autoFocus
+            value={draftPath}
+            onChange={(e) => setDraftPath(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commitPath();
+              else if (e.key === "Escape") cancelPathEdit();
+            }}
+            onBlur={commitPath}
+            disabled={!sessionId}
+            className="min-w-0 flex-1 rounded border border-accent bg-bg-subtle px-2 py-1 font-mono text-xs outline-none disabled:opacity-50"
+            placeholder="/"
+          />
+        ) : (
+          <div className="flex min-w-0 flex-1 items-center overflow-x-auto whitespace-nowrap [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            {segments.map((seg, i) => {
+              const last = i === segments.length - 1;
+              return (
+                <span key={seg.path + i} className="flex items-center">
+                  {i > 0 && <span className="px-0.5 text-text-dim">/</span>}
+                  <button
+                    onClick={() => !last && sessionId && onPathChange(seg.path)}
+                    disabled={!sessionId || last}
+                    className={cn(
+                      "max-w-[12rem] truncate rounded px-1 py-0.5 font-mono text-xs",
+                      last
+                        ? "font-medium text-text"
+                        : "text-text-muted hover:bg-bg-hover hover:text-text"
+                    )}
+                    title={seg.path}
+                  >
+                    {seg.label}
+                  </button>
+                </span>
+              );
+            })}
           </div>
         )}
-        {loading && (
-          <div className="px-3 py-2 text-xs text-text-muted">Loading…</div>
+        {!editingPath && (
+          <button
+            onClick={() => {
+              setDraftPath(path);
+              setEditingPath(true);
+            }}
+            disabled={!sessionId}
+            className="shrink-0 rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"
+            title="Edit path"
+          >
+            <Pencil size={12} />
+          </button>
         )}
-        {error && (
+        <div className="relative shrink-0">
+          <Search
+            size={12}
+            className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-text-dim"
+          />
+          <input
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            disabled={!sessionId}
+            placeholder="Filter"
+            className="w-32 rounded border border-border bg-bg-subtle py-1 pl-7 pr-6 text-xs outline-none focus:border-accent disabled:opacity-50"
+          />
+          {filter && (
+            <button
+              onClick={() => setFilter("")}
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-text-dim hover:text-text"
+              title="Clear filter"
+            >
+              <X size={11} />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {sessionId && (
+        <div
+          className="grid items-center gap-2 border-b border-border bg-bg-subtle px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-text-muted"
+          style={{ gridTemplateColumns: cols }}
+        >
+          <SortHeader
+            label="Name"
+            field="name"
+            sortField={sortField}
+            sortDirection={sortDirection}
+            onSort={onSort}
+          />
+          <SortHeader
+            label="Modified"
+            field="modified"
+            sortField={sortField}
+            sortDirection={sortDirection}
+            onSort={onSort}
+          />
+          <SortHeader
+            label="Size"
+            field="size"
+            align="right"
+            sortField={sortField}
+            sortDirection={sortDirection}
+            onSort={onSort}
+          />
+          {showPerms && <span className="text-right">Perms</span>}
+        </div>
+      )}
+
+      <div className="flex-1 overflow-y-auto">
+        {!sessionId ? (
+          <EmptyState
+            icon={<ServerOff size={20} />}
+            title="No connection"
+            hint="Click a profile in the sidebar to connect."
+          />
+        ) : error ? (
           <div className="px-3 py-2 text-xs text-danger">
             {error}{" "}
             <button
@@ -545,19 +726,63 @@ export function FilePane({
               dismiss
             </button>
           </div>
+        ) : loading ? (
+          <FileListSkeleton />
+        ) : visible.length === 0 ? (
+          filter ? (
+            <EmptyState
+              icon={<SearchX size={20} />}
+              title="No matches"
+              hint={`Nothing here matches “${filter}”.`}
+              action={
+                <button
+                  onClick={() => setFilter("")}
+                  className="rounded-md border border-border bg-bg-subtle px-2.5 py-1 text-xs text-text-muted hover:text-text"
+                >
+                  Clear filter
+                </button>
+              }
+            />
+          ) : (
+            <EmptyState icon={<Inbox size={20} />} title="Empty folder" />
+          )
+        ) : (
+          visible.map((entry) => (
+            <Row
+              key={entry.path}
+              entry={entry}
+              selected={selected.has(entry.path)}
+              cols={cols}
+              showPerms={showPerms}
+              onClick={(e) => onRowClick(entry, e)}
+              onActivate={() => onRowActivate(entry)}
+              onDragStart={(e) => onRowDragStart(e, entry)}
+              onContextMenu={(e) => openRowMenu(e, entry)}
+            />
+          ))
         )}
-        {visible.map((entry) => (
-          <Row
-            key={entry.path}
-            entry={entry}
-            selected={selected.has(entry.path)}
-            onClick={(e) => onRowClick(entry, e)}
-            onActivate={() => onRowActivate(entry)}
-            onDragStart={(e) => onRowDragStart(e, entry)}
-            onContextMenu={(e) => openRowMenu(e, entry)}
-          />
-        ))}
       </div>
+
+      {sessionId && (
+        <div className="flex shrink-0 items-center gap-1.5 border-t border-border bg-bg-subtle px-2.5 py-1 text-[10px] text-text-dim">
+          <span>
+            {visible.length} item{visible.length === 1 ? "" : "s"}
+            {filter && entries.length !== visible.length
+              ? ` of ${entries.length}`
+              : ""}
+          </span>
+          {selectionCount > 0 && (
+            <span className="text-text-muted">
+              · {selectionCount} selected
+              {selectedBytes > 0 ? ` · ${fmtSize(selectedBytes)}` : ""}
+            </span>
+          )}
+          <div className="flex-1" />
+          <span className="max-w-[55%] truncate font-mono" title={path}>
+            {path}
+          </span>
+        </div>
+      )}
 
       {menu && (
         <ContextMenu
@@ -637,6 +862,8 @@ export function FilePane({
 function Row({
   entry,
   selected,
+  cols,
+  showPerms,
   onClick,
   onActivate,
   onDragStart,
@@ -644,6 +871,8 @@ function Row({
 }: {
   entry: DirEntry;
   selected: boolean;
+  cols: string;
+  showPerms: boolean;
   onClick: (e: React.MouseEvent) => void;
   onActivate: () => void;
   onDragStart: (e: React.DragEvent) => void;
@@ -662,8 +891,9 @@ function Row({
       onContextMenu={onContextMenu}
       draggable
       onDragStart={onDragStart}
+      style={{ gridTemplateColumns: cols }}
       className={cn(
-        "flex cursor-default select-none items-center gap-2 border-b border-border-subtle px-3 py-1 text-sm",
+        "grid cursor-default select-none items-center gap-2 border-b border-border-subtle px-3 py-1 text-sm",
         selected ? "bg-accent/15 hover:bg-accent/20" : "hover:bg-bg-hover"
       )}
       title={
@@ -672,23 +902,66 @@ function Row({
           : "Drag, double-click to open, right-click for more"
       }
     >
-      <Icon
-        size={13}
-        className={
-          entry.kind === "directory" ? "text-accent" : "text-text-muted"
-        }
-      />
-      <span className="flex-1 truncate">{entry.name}</span>
-      <span className="text-xs text-text-dim">
+      <span className="flex min-w-0 items-center gap-2">
+        <Icon
+          size={13}
+          className={cn(
+            "shrink-0",
+            entry.kind === "directory" ? "text-accent" : "text-text-muted"
+          )}
+        />
+        <span className="truncate">{entry.name}</span>
+      </span>
+      <span className="truncate text-xs text-text-dim">
+        {fmtMtime(entry.modified)}
+      </span>
+      <span className="text-right text-xs tabular-nums text-text-dim">
         {entry.kind === "file" ? fmtSize(entry.size) : ""}
       </span>
+      {showPerms && (
+        <span
+          className="text-right font-mono text-[10px] text-text-dim"
+          title={entry.mode != null ? (entry.mode & 0o777).toString(8) : ""}
+        >
+          {formatMode(entry.mode)}
+        </span>
+      )}
     </div>
   );
 }
 
-function fmtSize(n: number): string {
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+function SortHeader({
+  label,
+  field,
+  align = "left",
+  sortField,
+  sortDirection,
+  onSort,
+}: {
+  label: string;
+  field: SortField;
+  align?: "left" | "right";
+  sortField: SortField;
+  sortDirection: "asc" | "desc";
+  onSort: (f: SortField) => void;
+}) {
+  const active = sortField === field;
+  return (
+    <button
+      onClick={() => onSort(field)}
+      className={cn(
+        "flex items-center gap-1 uppercase tracking-wider hover:text-text",
+        align === "right" ? "justify-end" : "justify-start text-left",
+        active ? "text-text" : "text-text-muted"
+      )}
+    >
+      {label}
+      {active &&
+        (sortDirection === "asc" ? (
+          <ChevronUp size={11} />
+        ) : (
+          <ChevronDown size={11} />
+        ))}
+    </button>
+  );
 }

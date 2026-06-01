@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { ipc, onTransferEvent } from "@/lib/ipc";
 import { useSettings } from "./settingsStore";
+import { toast } from "./toastStore";
+import { baseName } from "@/lib/format";
 import type { SessionId, Transfer } from "@/lib/types";
 
 interface TransfersState {
@@ -58,6 +60,17 @@ export const useTransfers = create<TransfersState>((set, get) => ({
         if (useSettings.getState().autoOpenTransferPanel) {
           set({ panelOpen: true });
         }
+      }
+      // Surface terminal outcomes as toasts so background transfers aren't silent.
+      if (kind === "done") {
+        const verb = t.kind === "upload" ? "Uploaded" : "Downloaded";
+        if (t.status === "skipped") {
+          toast.info("Transfer skipped", baseName(t.source));
+        } else {
+          toast.success("Transfer complete", `${verb} ${baseName(t.source)}`);
+        }
+      } else if (kind === "error") {
+        toast.error("Transfer failed", t.error || baseName(t.source));
       }
     });
     return unlisten;

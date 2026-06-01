@@ -41,6 +41,81 @@
   color-scheme: light;
 }
 
+/* --- Additional named themes. Same token contract as dark/light; each just
+   re-tints the ~14 vars, so every surface (scrollbars, focus rings, selection,
+   accent gradient) follows automatically. Authored in Faro's RGB-triple format. */
+[data-theme="tokyo"] {
+  --bg: 26 27 38;
+  --bg-panel: 31 35 53;
+  --bg-subtle: 36 40 59;
+  --bg-hover: 47 53 73;
+  --border: 59 66 97;
+  --border-subtle: 42 47 69;
+  --text: 192 202 245;
+  --text-muted: 154 165 206;
+  --text-dim: 86 95 137;
+  --accent: 122 162 247;
+  --accent-hover: 106 146 231;
+  --accent-glow: 122 162 247;
+  --danger: 247 118 142;
+  --shadow: 0 0 0;
+  color-scheme: dark;
+}
+
+[data-theme="nord"] {
+  --bg: 46 52 64;
+  --bg-panel: 52 59 73;
+  --bg-subtle: 59 66 82;
+  --bg-hover: 67 76 94;
+  --border: 76 86 106;
+  --border-subtle: 59 66 82;
+  --text: 236 239 244;
+  --text-muted: 216 222 233;
+  --text-dim: 123 136 161;
+  --accent: 136 192 208;
+  --accent-hover: 121 176 192;
+  --accent-glow: 136 192 208;
+  --danger: 191 97 106;
+  --shadow: 0 0 0;
+  color-scheme: dark;
+}
+
+[data-theme="dracula"] {
+  --bg: 40 42 54;
+  --bg-panel: 45 47 61;
+  --bg-subtle: 52 55 70;
+  --bg-hover: 60 63 81;
+  --border: 68 71 90;
+  --border-subtle: 52 55 70;
+  --text: 248 248 242;
+  --text-muted: 184 185 196;
+  --text-dim: 98 114 164;
+  --accent: 189 147 249;
+  --accent-hover: 168 127 228;
+  --accent-glow: 189 147 249;
+  --danger: 255 85 85;
+  --shadow: 0 0 0;
+  color-scheme: dark;
+}
+
+[data-theme="catppuccin"] {
+  --bg: 30 30 46;
+  --bg-panel: 36 37 58;
+  --bg-subtle: 49 50 68;
+  --bg-hover: 58 60 81;
+  --border: 69 71 90;
+  --border-subtle: 49 50 68;
+  --text: 205 214 244;
+  --text-muted: 166 173 200;
+  --text-dim: 108 112 134;
+  --accent: 203 166 247;
+  --accent-hover: 183 146 227;
+  --accent-glow: 203 166 247;
+  --danger: 243 139 168;
+  --shadow: 0 0 0;
+  color-scheme: dark;
+}
+
 html,
 body,
 #root {
@@ -264,4 +339,25 @@ textarea:focus-visible:not(.xterm-helper-textarea),
 }
 .anim-slide-up {
   animation: slideInFromBottom 200ms ease-out;
+}
+
+/* Skeleton shimmer — a moving highlight band over a base block. Tints with the
+   theme because it interpolates between two theme tokens. */
+@keyframes faroShimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+.faro-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    rgb(var(--bg-subtle)) 0%,
+    rgb(var(--bg-hover)) 50%,
+    rgb(var(--bg-subtle)) 100%
+  );
+  background-size: 200% 100%;
+  animation: faroShimmer 1.4s ease-in-out infinite;
 }
