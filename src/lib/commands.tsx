@@ -93,6 +93,14 @@ export function useCommands(): Command[] {
       run: () => openDialog("agentBridge"),
     },
     {
+      id: "agent-console",
+      title: "Agent console (live)…",
+      group: "General",
+      icon: <TerminalSquare size={14} />,
+      keywords: "agent console live output stream terminal bridge watch",
+      run: () => openDialog("agentConsole"),
+    },
+    {
       id: "about",
       title: "About Faro",
       group: "General",

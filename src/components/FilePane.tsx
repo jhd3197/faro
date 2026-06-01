@@ -626,8 +626,11 @@ export function FilePane({
         isDropTarget && "ring-2 ring-inset ring-accent/60 bg-accent/5"
       )}
     >
-      <div className="flex items-center gap-1 border-b border-border bg-bg-subtle px-2 py-1.5">
-        <span className="text-xs font-semibold uppercase tracking-wider text-text-muted">
+      <div className="flex min-w-0 items-center gap-1 border-b border-border bg-bg-subtle px-2 py-1.5">
+        <span
+          title={title}
+          className="min-w-0 truncate text-xs font-semibold uppercase tracking-wider text-text-muted"
+        >
           {title}
         </span>
         {selectionCount > 0 && (
