@@ -53,7 +53,14 @@ pub async fn connect(
         .await
         .map_err(err)?
         .ok_or_else(|| format!("profile {profile_id} not found"))?;
-    state.sessions.connect(profile, app).await.map_err(err)
+    let session_id = state.sessions.connect(profile, app).await.map_err(err)?;
+    // Re-apply a previously-granted Agent Bridge access for this profile (session
+    // ids are per-connect, so the bridge tracks the persistent grant by profile).
+    state
+        .bridge
+        .on_session_connected(&session_id, &profile_id)
+        .await;
+    Ok(session_id)
 }
 
 #[tauri::command]
@@ -300,7 +307,7 @@ async fn fs_for(
     Ok(fs_for_session(&session))
 }
 
-fn fs_for_session(session: &Arc<Session>) -> Box<dyn RemoteFs> {
+pub fn fs_for_session(session: &Arc<Session>) -> Box<dyn RemoteFs> {
     match &**session {
         Session::Ssh(ssh) => Box::new(crate::remotefs::sftp::SftpFs::new(ssh.clone())),
         Session::Ftp(ftp) => Box::new(crate::remotefs::ftp::FtpFs::new(ftp.clone())),
@@ -546,7 +553,7 @@ pub async fn stop_edit(
 
 // ---------- Agent Bridge ----------
 
-use crate::bridge::{ActivityEntry, ApprovalDecision, BridgeStatus};
+use crate::bridge::{ActivityEntry, ApprovalDecision, ApprovalPolicy, BridgeStatus};
 
 #[tauri::command]
 pub async fn bridge_start(
@@ -571,9 +578,19 @@ pub async fn bridge_status(state: State<'_, AppState>) -> Result<BridgeStatus, S
 pub async fn bridge_set_session_access(
     session_id: String,
     enabled: bool,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<BridgeStatus, String> {
-    state.bridge.set_access(&session_id, enabled).await;
+    state.bridge.set_access(&app, &session_id, enabled).await;
+    Ok(state.bridge.status().await)
+}
+
+#[tauri::command]
+pub async fn bridge_set_policy(
+    policy: ApprovalPolicy,
+    state: State<'_, AppState>,
+) -> Result<BridgeStatus, String> {
+    state.bridge.set_policy(policy).await;
     Ok(state.bridge.status().await)
 }
 

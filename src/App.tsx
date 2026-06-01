@@ -33,6 +33,7 @@ import { Toaster } from "./components/ui/Toaster";
 import { CommandPalette } from "./components/CommandPalette";
 import { KeyboardShortcutsDialog } from "./components/KeyboardShortcutsDialog";
 import { AgentBridge, AgentBridgeHost } from "./components/AgentBridge";
+import { AgentConsole } from "./components/AgentConsole";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { relTime } from "./lib/format";
 import { cn } from "./lib/cn";
@@ -69,6 +70,7 @@ export default function App() {
       {dialog === "import" && <ImportDialog onClose={closeDialog} />}
       {dialog === "about" && <AboutDialog onClose={closeDialog} />}
       {dialog === "agentBridge" && <AgentBridge onClose={closeDialog} />}
+      {dialog === "agentConsole" && <AgentConsole onClose={closeDialog} />}
       <HostKeyModal />
       <Toaster />
       <AgentBridgeHost />
@@ -156,7 +158,9 @@ function StatusBar({
               style={{ background: profile.color || "rgb(var(--accent))" }}
             />
           </div>
-          <span className="font-medium">{profile.name}</span>
+          <span className="max-w-[18rem] truncate font-medium" title={profile.name}>
+            {profile.name}
+          </span>
           <span className="font-mono text-text-dim">
             {profile.username}@{profile.host}:{profile.port}
           </span>

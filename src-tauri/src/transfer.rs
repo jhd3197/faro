@@ -136,6 +136,12 @@ impl TransferManager {
         self.transfers.lock().await.get(id).cloned()
     }
 
+    /// Public snapshot of a single transfer by id (used by the Agent Bridge so
+    /// an agent can poll whether a download/upload it started has finished).
+    pub async fn snapshot(&self, id: &str) -> Option<Transfer> {
+        self.transfers.lock().await.get(id).cloned()
+    }
+
     async fn update<F: FnOnce(&mut Transfer)>(&self, id: &str, f: F) {
         if let Some(t) = self.transfers.lock().await.get_mut(id) {
             f(t);

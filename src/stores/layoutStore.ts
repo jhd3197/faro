@@ -8,7 +8,8 @@ export type AppDialog =
   | "newConnection"
   | "import"
   | "about"
-  | "agentBridge";
+  | "agentBridge"
+  | "agentConsole";
 
 interface LayoutState {
   terminalOpen: boolean;

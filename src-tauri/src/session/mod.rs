@@ -13,6 +13,7 @@ use russh_sftp::client::SftpSession;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{oneshot, Mutex, OnceCell};
 use uuid::Uuid;
@@ -236,9 +237,27 @@ impl SshSession {
     }
 
     /// Run a single non-interactive command on a fresh exec channel and collect
-    /// its full stdout/stderr + exit code. Used by the Agent Bridge so a local
-    /// AI agent can run commands through this already-authenticated session.
+    /// its full stdout/stderr + exit code, unbounded. Thin wrapper over
+    /// `exec_bounded` with no caps.
     pub async fn exec(&self, command: &str) -> Result<ExecOutput> {
+        self.exec_bounded(command, usize::MAX, Duration::from_secs(86_400), None)
+            .await
+    }
+
+    /// Like `exec`, but bounds total captured output to `max_bytes` and the
+    /// whole run to `timeout` (so `tail -f`, `top`, or a huge dump can't hang
+    /// the bridge or balloon memory). If `stream` is set, stdout/stderr chunks
+    /// are emitted as `agent://output` events as they arrive, so Faro's UI can
+    /// show the agent's command output live. The returned `ExecOutput` carries
+    /// `truncated`/`timed_out` flags so the caller (and the agent) can tell the
+    /// output was cut short or the command didn't finish.
+    pub async fn exec_bounded(
+        &self,
+        command: &str,
+        max_bytes: usize,
+        timeout: Duration,
+        stream: Option<&ExecStream>,
+    ) -> Result<ExecOutput> {
         let mut channel = {
             let h = self.handle.lock().await;
             h.channel_open_session().await?
@@ -248,29 +267,82 @@ impl SshSession {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut exit_code = None;
-        loop {
-            let Some(msg) = channel.wait().await else { break };
-            match msg {
-                ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
-                ChannelMsg::ExtendedData { ref data, ext } => {
-                    // ext == 1 is the conventional stderr stream.
-                    if ext == 1 {
-                        stderr.extend_from_slice(data);
-                    } else {
-                        stdout.extend_from_slice(data);
+        let mut truncated = false;
+
+        let collect = async {
+            loop {
+                let Some(msg) = channel.wait().await else { break };
+                match msg {
+                    ChannelMsg::Data { ref data } => {
+                        let total = stdout.len() + stderr.len();
+                        append_capped(&mut stdout, data, max_bytes, total, &mut truncated);
+                        if let Some(s) = stream {
+                            emit_chunk(s, "stdout", data);
+                        }
                     }
+                    ChannelMsg::ExtendedData { ref data, ext } => {
+                        // ext == 1 is the conventional stderr stream.
+                        let total = stdout.len() + stderr.len();
+                        let is_err = ext == 1;
+                        if is_err {
+                            append_capped(&mut stderr, data, max_bytes, total, &mut truncated);
+                        } else {
+                            append_capped(&mut stdout, data, max_bytes, total, &mut truncated);
+                        }
+                        if let Some(s) = stream {
+                            emit_chunk(s, if is_err { "stderr" } else { "stdout" }, data);
+                        }
+                    }
+                    ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status as i32),
+                    ChannelMsg::Eof | ChannelMsg::Close => break,
+                    _ => {}
                 }
-                ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status as i32),
-                ChannelMsg::Eof | ChannelMsg::Close => break,
-                _ => {}
+                if truncated {
+                    break;
+                }
             }
-        }
+        };
+
+        let timed_out = tokio::time::timeout(timeout, collect).await.is_err();
 
         Ok(ExecOutput {
             stdout: String::from_utf8_lossy(&stdout).to_string(),
             stderr: String::from_utf8_lossy(&stderr).to_string(),
             exit_code,
+            truncated,
+            timed_out,
         })
+    }
+}
+
+/// Sink for live exec output — emits `agent://output` events tagged with `op_id`.
+pub struct ExecStream {
+    pub app: AppHandle,
+    pub op_id: String,
+}
+
+fn emit_chunk(s: &ExecStream, stream: &str, data: &[u8]) {
+    let _ = s.app.emit(
+        "agent://output",
+        serde_json::json!({
+            "opId": s.op_id,
+            "stream": stream,
+            "chunk": String::from_utf8_lossy(data),
+        }),
+    );
+}
+
+/// Append `data` to `buf`, but never let `buf+other` exceed `max_bytes`. Sets
+/// `truncated` if anything was dropped.
+fn append_capped(buf: &mut Vec<u8>, data: &[u8], max_bytes: usize, total: usize, truncated: &mut bool) {
+    if total >= max_bytes {
+        *truncated = true;
+        return;
+    }
+    let take = (max_bytes - total).min(data.len());
+    buf.extend_from_slice(&data[..take]);
+    if take < data.len() {
+        *truncated = true;
     }
 }
 
@@ -280,6 +352,8 @@ pub struct ExecOutput {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: Option<i32>,
+    pub truncated: bool,
+    pub timed_out: bool,
 }
 
 /// Open a Session for any supported protocol given a profile and a verifier.

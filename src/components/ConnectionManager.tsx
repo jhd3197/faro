@@ -172,19 +172,21 @@ function ProfileRow({
         onClick={onConnect}
         title={
           p.protocol === "s3"
-            ? `s3://${p.bucket ?? "?"}${p.endpoint ? ` @ ${p.endpoint}` : ""}`
+            ? `${p.name}\ns3://${p.bucket ?? "?"}${p.endpoint ? ` @ ${p.endpoint}` : ""}`
             : p.protocol === "azure"
-              ? `azure://${p.account ?? "?"}/${p.bucket ?? "?"}`
-              : `${p.username}@${p.host}:${p.port}`
+              ? `${p.name}\nazure://${p.account ?? "?"}/${p.bucket ?? "?"}`
+              : `${p.name}\n${p.username}@${p.host}:${p.port}`
         }
       >
         <div className="flex items-center gap-1 truncate text-[13px] font-medium">
           {p.protocol === "s3" || p.protocol === "azure" ? (
-            <Cloud size={11} className="text-text-dim" />
+            <Cloud size={11} className="shrink-0 text-text-dim" />
           ) : (
-            <Server size={11} className="text-text-dim" />
+            <Server size={11} className="shrink-0 text-text-dim" />
           )}
-          <span className="truncate">{p.name}</span>
+          <span className="truncate" title={p.name}>
+            {p.name}
+          </span>
         </div>
         <div className="truncate font-mono text-[11px] text-text-dim">
           {p.protocol === "s3"

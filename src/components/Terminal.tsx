@@ -149,7 +149,7 @@ function TabChip({
         setDraft(tab.title);
         setEditing(true);
       }}
-      title="Double-click to rename"
+      title={`${tab.title} — double-click to rename`}
       className={cn(
         "group/tab flex h-6 shrink-0 items-center gap-1.5 rounded-md px-2 text-[11px] transition-colors",
         active
@@ -157,8 +157,8 @@ function TabChip({
           : "text-text-muted hover:bg-bg-hover hover:text-text"
       )}
     >
-      <TerminalSquare size={11} className={active ? "text-accent" : ""} />
-      <span className="max-w-[10rem] truncate">{tab.title}</span>
+      <TerminalSquare size={11} className={cn("shrink-0", active && "text-accent")} />
+      <span className="max-w-[18rem] truncate">{tab.title}</span>
       <span
         role="button"
         tabIndex={-1}

@@ -23,6 +23,9 @@ import type {
   BridgeActivity,
   BridgeApproval,
   ApprovalDecision,
+  ApprovalPolicy,
+  AgentExecStart,
+  AgentOutput,
 } from "./types";
 
 // Typed wrappers around the Tauri command surface. The string names must match
@@ -174,6 +177,8 @@ export const ipc = {
   bridgeStatus: () => invoke<BridgeStatus>("bridge_status"),
   bridgeSetSessionAccess: (sessionId: SessionId, enabled: boolean) =>
     invoke<BridgeStatus>("bridge_set_session_access", { sessionId, enabled }),
+  bridgeSetPolicy: (policy: ApprovalPolicy) =>
+    invoke<BridgeStatus>("bridge_set_policy", { policy }),
   respondToBridgeApproval: (requestId: string, decision: ApprovalDecision) =>
     invoke<void>("respond_to_bridge_approval", { requestId, decision }),
   bridgeActivity: () => invoke<BridgeActivity[]>("bridge_activity"),
@@ -219,6 +224,18 @@ export async function onBridgeActivity(
   cb: (event: BridgeActivity) => void
 ): Promise<UnlistenFn> {
   return listen<BridgeActivity>("bridge://activity", (e) => cb(e.payload));
+}
+
+export async function onAgentExecStart(
+  cb: (event: AgentExecStart) => void
+): Promise<UnlistenFn> {
+  return listen<AgentExecStart>("agent://exec-start", (e) => cb(e.payload));
+}
+
+export async function onAgentOutput(
+  cb: (event: AgentOutput) => void
+): Promise<UnlistenFn> {
+  return listen<AgentOutput>("agent://output", (e) => cb(e.payload));
 }
 
 export async function onTransferEvent(

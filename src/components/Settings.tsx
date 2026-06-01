@@ -1,4 +1,5 @@
-import { X, Palette, ArrowDownUp, FolderTree, TerminalSquare, Plug } from "lucide-react";
+import { useEffect } from "react";
+import { X, Palette, ArrowDownUp, FolderTree, TerminalSquare, Plug, Radio } from "lucide-react";
 import {
   useSettings,
   APP_THEMES,
@@ -10,6 +11,7 @@ import {
   type PaneDensity,
   type TerminalTheme,
 } from "@/stores/settingsStore";
+import { useBridge } from "@/stores/bridgeStore";
 import { cn } from "@/lib/cn";
 
 interface Props {
@@ -18,6 +20,15 @@ interface Props {
 
 export function Settings({ onClose }: Props) {
   const s = useSettings();
+
+  // Agent Bridge approval policy lives in the Rust backend (it enforces it), so
+  // these toggles read/write the same source as the Agent Bridge panel.
+  const policy = useBridge((b) => b.status.policy);
+  const setPolicy = useBridge((b) => b.setPolicy);
+  const refreshBridge = useBridge((b) => b.refresh);
+  useEffect(() => {
+    refreshBridge();
+  }, [refreshBridge]);
 
   return (
     <div
@@ -197,6 +208,35 @@ export function Settings({ onClose }: Props) {
                 onChange={s.setDefaultPort}
               />
             </Field>
+          </Section>
+
+          <Section title="Agent Bridge" icon={<Radio size={13} />}>
+            <ToggleField
+              label="Allow all — no prompts"
+              help="Let connected AI agents run every request (commands, reads, transfers) on enabled sessions without asking. Most permissive."
+              checked={policy.allowAll}
+              onChange={(v) => setPolicy({ ...policy, allowAll: v })}
+            />
+            {!policy.allowAll && (
+              <>
+                <ToggleField
+                  label="Auto-approve read-only operations"
+                  help="List directories, read files and search run without asking. Downloads & uploads write to disk, so they still prompt unless Allow all is on."
+                  checked={policy.autoRead}
+                  onChange={(v) => setPolicy({ ...policy, autoRead: v })}
+                />
+                <ToggleField
+                  label="Auto-approve safe shell commands"
+                  help="Read-only commands (ls, cat, df, grep…) run without asking; anything that could change the server still prompts. Best-effort heuristic."
+                  checked={policy.autoSafeExec}
+                  onChange={(v) => setPolicy({ ...policy, autoSafeExec: v })}
+                />
+              </>
+            )}
+            <Help>
+              Same setting as the Agent Bridge panel — applies to every
+              agent-enabled session and persists across restarts.
+            </Help>
           </Section>
         </div>
 

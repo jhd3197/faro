@@ -15,9 +15,27 @@ import {
 } from "lucide-react";
 import { useBridge } from "@/stores/bridgeStore";
 import { useConnections } from "@/stores/connectionsStore";
+import { useLayout } from "@/stores/layoutStore";
 import { cn } from "@/lib/cn";
 import { relTime } from "@/lib/format";
-import type { BridgeApproval } from "@/lib/types";
+import type { BridgeApproval, ApprovalPolicy } from "@/lib/types";
+
+// Phrase the approval prompt per operation kind.
+const APPROVAL_COPY: Record<string, { title: string; foot: string }> = {
+  exec: { title: "Agent wants to run a command", foot: "Runs over your authenticated SSH session." },
+  read: { title: "Agent wants to read from the server", foot: "Reads through your authenticated Faro session." },
+  download: { title: "Agent wants to download a file", foot: "Downloads through Faro's transfer engine." },
+  upload: { title: "Agent wants to upload a file", foot: "Uploads through Faro's transfer engine." },
+  search: { title: "Agent wants to search the server", foot: "Searches through your authenticated Faro session." },
+};
+function approvalCopy(kind: string) {
+  return (
+    APPROVAL_COPY[kind] ?? {
+      title: "Agent wants to run an operation",
+      foot: "Runs through your authenticated Faro session.",
+    }
+  );
+}
 
 // Always-mounted: boots the bridge store (status + event listeners) and renders
 // the per-command approval modal whenever a request is pending.
@@ -64,13 +82,14 @@ function ApprovalModal({
   onApprove: () => void;
   onDeny: () => void;
 }) {
+  const copy = approvalCopy(approval.kind);
   return (
     <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div className="anim-modal w-[28rem] max-w-[92vw] rounded-xl border border-border bg-bg-panel shadow-elev-3">
         <div className="flex items-center gap-2 border-b border-border px-5 py-3.5">
           <ShieldCheck size={15} className="text-accent" />
           <span className="text-[15px] font-semibold tracking-tight">
-            Agent wants to run a command
+            {copy.title}
           </span>
         </div>
         <div className="px-5 py-4">
@@ -82,7 +101,7 @@ function ApprovalModal({
             {approval.command}
           </pre>
           <div className="mt-3 flex items-center gap-1.5 text-[11px] text-text-dim">
-            <TerminalIcon size={11} /> Runs over your authenticated SSH session.
+            <TerminalIcon size={11} /> {copy.foot}
           </div>
         </div>
         <div className="flex items-center justify-between gap-2 border-t border-border px-5 py-3">
@@ -112,25 +131,18 @@ function ApprovalModal({
 function skillMd(url: string, token: string, sessionId: string): string {
   return `---
 name: faro-server
-description: Run shell commands on a remote server through Faro's authenticated SSH session. Use when the user asks to inspect, run, or operate on a server they have open in Faro.
+description: Operate on a remote server through Faro's authenticated session — run commands, browse, read, search and transfer files. Use when the user asks to inspect, run, or operate on a server they have open in Faro.
 ---
 
 # Faro server access
 
-Faro is bridging a live SSH session at \`${url}\`. You can run commands on the
-server without any credentials — Faro holds the authenticated session and the
-user approves each command in the Faro window.
+Faro is bridging a live session at \`${url}\`. You can operate on the server
+without any credentials — Faro holds the authenticated session and the user
+approves requests in the Faro window (some kinds may be auto-approved per the
+user's policy). Authenticate every call with the bearer token below.
 
-## Run a command
-
-\`\`\`bash
-curl -s ${url}/exec \\
-  -H "Authorization: Bearer ${token}" \\
-  -H "Content-Type: application/json" \\
-  -d '{"sessionId":"${sessionId}","command":"df -h"}'
-\`\`\`
-
-Response: \`{ "stdout": "...", "stderr": "...", "exitCode": 0 }\`.
+All endpoints are \`POST\` with a JSON body and require these headers:
+\`-H "Authorization: Bearer ${token}" -H "Content-Type: application/json"\`.
 
 ## List available sessions
 
@@ -138,9 +150,48 @@ Response: \`{ "stdout": "...", "stderr": "...", "exitCode": 0 }\`.
 curl -s ${url}/sessions -H "Authorization: Bearer ${token}"
 \`\`\`
 
+## Run a command (SSH only)
+
+\`\`\`bash
+curl -s ${url}/exec -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" \\
+  -d '{"sessionId":"${sessionId}","command":"df -h"}'
+\`\`\`
+
+Response: \`{ "stdout": "...", "stderr": "...", "exitCode": 0 }\`. Keep commands
+non-interactive (no prompts/pagers); add flags like \`-y\`, \`| cat\`.
+
+## Browse / read / search
+
+\`\`\`bash
+# list a directory
+curl -s ${url}/list   -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"sessionId":"${sessionId}","path":"/var/log"}'
+# read a text file (SSH/SFTP, capped at 256 KiB)
+curl -s ${url}/read   -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"sessionId":"${sessionId}","path":"/etc/hostname"}'
+# search by name (recursive, case-insensitive)
+curl -s ${url}/search -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"sessionId":"${sessionId}","path":"/var/log","query":".log"}'
+# session context
+curl -s ${url}/info   -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"sessionId":"${sessionId}"}'
+\`\`\`
+
+## Transfer files
+
+\`\`\`bash
+# download to the user's machine (defaults to their Downloads folder)
+curl -s ${url}/download -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"sessionId":"${sessionId}","path":"/etc/hosts"}'
+# upload a local file to a remote directory
+curl -s ${url}/upload   -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"sessionId":"${sessionId}","localPath":"/tmp/a.txt","remoteDir":"/home/user"}'
+# check whether a transfer finished (poll until status is done/error)
+curl -s ${url}/transfer -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"transferId":"<id from download/upload>"}'
+\`\`\`
+
 Notes:
-- Every \`/exec\` call blocks until the user approves it in Faro (or it times out).
-- Keep commands non-interactive (no prompts/pagers); add flags like \`-y\`, \`| cat\`.
+- Requests block until the user approves them in Faro (or time out), unless the
+  user has enabled auto-approve for that kind of operation.
+- Transfers run in the background and also appear in Faro's transfer panel:
+  \`/download\`/\`/upload\` return a \`transferId\`; poll \`/transfer\` to learn the
+  outcome (status \`done\` or \`error\`).
+- \`/exec\` output is capped (512 KiB) and times out after 60s; the result's
+  \`truncated\`/\`timedOut\` flags tell you if it was cut short.
 `;
 }
 
@@ -155,7 +206,9 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
   const start = useBridge((s) => s.start);
   const stop = useBridge((s) => s.stop);
   const setSessionAccess = useBridge((s) => s.setSessionAccess);
+  const setPolicy = useBridge((s) => s.setPolicy);
   const refresh = useBridge((s) => s.refresh);
+  const openDialog = useLayout((s) => s.openDialog);
 
   const activeSessionId = useConnections((s) => s.activeSessionId);
   const activeProfileId = useConnections((s) => s.activeProfileId);
@@ -164,6 +217,9 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
   const isSsh = activeProfile?.protocol === "sftp";
   const granted =
     !!activeSessionId && status.enabledSessions.includes(activeSessionId);
+  const policy = status.policy;
+  const patchPolicy = (patch: Partial<ApprovalPolicy>) =>
+    setPolicy({ ...policy, ...patch });
 
   const [showToken, setShowToken] = useState(false);
 
@@ -194,6 +250,12 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
           )}
           <div className="flex-1" />
           <button
+            onClick={() => openDialog("agentConsole")}
+            className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-text-muted hover:bg-bg-hover hover:text-text"
+          >
+            <TerminalIcon size={12} /> Live console
+          </button>
+          <button
             onClick={onClose}
             className="rounded-md p-1.5 text-text-muted hover:bg-bg-hover hover:text-text"
           >
@@ -203,10 +265,11 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
 
         <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
           <p className="text-xs leading-relaxed text-text-muted">
-            Let a local AI agent (Claude Code, Cursor…) run commands on your
-            connected server through Faro — no agent install on the server, no
-            credentials shared. Faro brokers its authenticated SSH session over a
-            localhost endpoint and asks you to approve every command.
+            Let a local AI agent (Claude Code, Cursor…) operate on your connected
+            servers through Faro — run commands, browse, read, search and transfer
+            files, with no agent install on the server and no credentials shared.
+            Faro brokers its authenticated session over a localhost endpoint and
+            asks you to approve each request (unless you relax that below).
           </p>
 
           {/* Server */}
@@ -261,11 +324,6 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
               <div className="text-xs text-text-dim">
                 Connect to a server first, then grant the agent access to it here.
               </div>
-            ) : !isSsh ? (
-              <div className="text-xs text-text-dim">
-                The active connection ({activeProfile?.name}) isn’t SSH/SFTP —
-                command execution needs an SSH session.
-              </div>
             ) : (
               <div className="flex items-center gap-3">
                 <div className="min-w-0 flex-1">
@@ -276,6 +334,12 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
                   <div className="truncate font-mono text-[11px] text-text-dim">
                     {activeProfile?.username}@{activeProfile?.host}
                   </div>
+                  {!isSsh && (
+                    <div className="mt-0.5 text-[11px] text-text-dim">
+                      File ops only (browse, read, search, transfer) — exec needs
+                      an SSH session.
+                    </div>
+                  )}
                 </div>
                 <Toggle
                   checked={granted}
@@ -285,13 +349,54 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
             )}
           </Card>
 
+          {/* Auto-approve */}
+          <Card title="Auto-approve">
+            <div className="mb-2.5 text-xs text-text-muted">
+              By default Faro asks before every agent request. Loosen that here —
+              applies to all enabled sessions.
+            </div>
+            <div className="space-y-2.5">
+              <PolicyRow
+                label="Allow all — no prompts"
+                help="Approve every agent request (commands, reads, transfers) automatically. Most permissive."
+                checked={policy.allowAll}
+                onChange={(v) => patchPolicy({ allowAll: v })}
+                danger
+              />
+              <PolicyRow
+                label="Auto-approve read-only operations"
+                help="List directories, read files and search run without asking. Downloads & uploads write to disk, so they still prompt unless Allow all is on."
+                checked={policy.allowAll || policy.autoRead}
+                disabled={policy.allowAll}
+                onChange={(v) => patchPolicy({ autoRead: v })}
+              />
+              <PolicyRow
+                label="Auto-approve safe shell commands"
+                help="Read-only commands (ls, cat, df, grep…) run without asking; anything that could change the server still prompts. Best-effort heuristic."
+                checked={policy.allowAll || policy.autoSafeExec}
+                disabled={policy.allowAll}
+                onChange={(v) => patchPolicy({ autoSafeExec: v })}
+              />
+            </div>
+            {policy.allowAll && (
+              <div className="mt-2.5 flex items-start gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300/90">
+                <CircleAlert size={12} className="mt-0.5 shrink-0" />
+                The agent can run anything on enabled sessions without confirmation.
+              </div>
+            )}
+          </Card>
+
           {/* Setup */}
           <Card title="Connect Claude Code">
             <div className="mb-2 text-xs text-text-muted">
               Native MCP — run this in your project and Claude Code gains{" "}
-              <span className="font-mono">faro_exec</span> +{" "}
-              <span className="font-mono">faro_list_sessions</span> tools (you
-              still approve every command):
+              <span className="font-mono">faro_exec</span>,{" "}
+              <span className="font-mono">faro_list_dir</span>,{" "}
+              <span className="font-mono">faro_read_file</span>,{" "}
+              <span className="font-mono">faro_search</span>,{" "}
+              <span className="font-mono">faro_download</span>/
+              <span className="font-mono">upload</span> + more (approval follows
+              your policy above):
             </div>
             <div className="flex items-center gap-2">
               <code className="min-w-0 flex-1 truncate rounded border border-border bg-bg-panel px-2 py-1 font-mono text-[10px] text-text-muted">
@@ -353,8 +458,13 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
 
         <div className="border-t border-border px-5 py-3 text-[11px] text-text-dim">
           <ShieldCheck size={11} className="mr-1 inline" />
-          Bound to 127.0.0.1 only · token required · per-session opt-in · every
-          command needs your approval.
+          Bound to 127.0.0.1 only · token required · per-session opt-in ·{" "}
+          {policy.allowAll
+            ? "auto-approving all requests"
+            : policy.autoRead || policy.autoSafeExec
+              ? "auto-approving some requests"
+              : "you approve every request"}
+          .
         </div>
       </div>
     </div>
@@ -417,18 +527,22 @@ function CopyButton({
 function Toggle({
   checked,
   onChange,
+  disabled,
 }: {
   checked: boolean;
   onChange: (v: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       role="switch"
       aria-checked={checked}
+      disabled={disabled}
       onClick={() => onChange(!checked)}
       className={cn(
         "relative h-5 w-9 shrink-0 rounded-full border transition-colors",
+        disabled && "cursor-not-allowed opacity-50",
         checked
           ? "border-accent bg-accent"
           : "border-border bg-bg-subtle hover:border-text-dim"
@@ -441,6 +555,34 @@ function Toggle({
         )}
       />
     </button>
+  );
+}
+
+function PolicyRow({
+  label,
+  help,
+  checked,
+  onChange,
+  disabled,
+  danger,
+}: {
+  label: string;
+  help: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  disabled?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <div className="flex items-start gap-3">
+      <div className="min-w-0 flex-1">
+        <div className={cn("text-sm", danger && "font-medium text-amber-300")}>
+          {label}
+        </div>
+        <div className="text-[11px] leading-snug text-text-dim">{help}</div>
+      </div>
+      <Toggle checked={checked} onChange={onChange} disabled={disabled} />
+    </div>
   );
 }
 

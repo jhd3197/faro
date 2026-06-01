@@ -198,12 +198,22 @@ export interface HostPromptEvent {
 
 // ---- Agent Bridge ----
 
+export interface ApprovalPolicy {
+  /** Master switch — approve every agent request on enabled sessions. */
+  allowAll: boolean;
+  /** Auto-approve read-only ops (list_dir, read_file, download, search). */
+  autoRead: boolean;
+  /** Auto-approve shell commands that look read-only (best-effort heuristic). */
+  autoSafeExec: boolean;
+}
+
 export interface BridgeStatus {
   running: boolean;
   url: string | null;
   port: number | null;
   token: string | null;
   enabledSessions: string[];
+  policy: ApprovalPolicy;
 }
 
 export interface BridgeActivity {
@@ -219,10 +229,39 @@ export interface BridgeApproval {
   requestId: string;
   sessionId: string;
   sessionName: string;
+  /** Operation kind: "exec" | "read" | "download" | "upload" | "search". */
+  kind: string;
+  /** Human-readable summary of what the agent wants to do. */
   command: string;
 }
 
 export type ApprovalDecision = "approve" | "deny";
+
+// Live agent console (streamed exec output + op feed).
+export interface AgentExecStart {
+  opId: string;
+  sessionId: string;
+  sessionName: string;
+  command: string;
+}
+
+export interface AgentOutput {
+  opId: string;
+  stream: "stdout" | "stderr";
+  chunk: string;
+}
+
+export interface AgentConsoleEntry {
+  id: string;
+  sessionId: string;
+  sessionName?: string;
+  kind: string; // exec | read | download | upload | search | denied | error
+  command: string; // command (exec) or op summary
+  output: string; // streamed stdout/stderr (exec only)
+  status: "running" | "done";
+  ok?: boolean;
+  at: number;
+}
 
 export type TransferKind = "download" | "upload";
 export type TransferStatus =

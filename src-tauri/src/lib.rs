@@ -48,7 +48,9 @@ pub fn run() {
                 profiles: profile_store,
                 transfers: Arc::new(transfer::TransferManager::new()),
                 editors: Arc::new(editor::EditManager::new()),
-                bridge: Arc::new(bridge::BridgeState::new()),
+                bridge: Arc::new(
+                    bridge::BridgeState::load_or_create(&handle).unwrap_or_default(),
+                ),
             };
             app.manage(state);
             Ok(())
@@ -89,6 +91,7 @@ pub fn run() {
             commands::bridge_stop,
             commands::bridge_status,
             commands::bridge_set_session_access,
+            commands::bridge_set_policy,
             commands::respond_to_bridge_approval,
             commands::bridge_activity,
         ])
