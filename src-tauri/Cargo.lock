@@ -1162,10 +1162,8 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bytes",
- "clap",
  "dirs 5.0.1",
  "futures",
- "indicatif",
  "notify",
  "object_store",
  "quick-xml 0.36.2",
@@ -1184,6 +1182,24 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "winreg 0.52.0",
+]
+
+[[package]]
+name = "faro-cli"
+version = "1.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "clap",
+ "dirs 5.0.1",
+ "faro",
+ "futures",
+ "indicatif",
+ "object_store",
+ "russh",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

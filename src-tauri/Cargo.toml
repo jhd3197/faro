@@ -5,20 +5,19 @@ edition = "2021"
 description = "Faro — a modern FTP, SFTP, SSH, and S3 client for developers."
 authors = ["Juan Denis"]
 license = "MIT"
-# Tauri runs `cargo run` without --bin during `tauri dev`; without this it
-# can't pick between `faro` (GUI) and `faro-cli`.
-default-run = "faro"
+# This package builds the Faro GUI only (`src/main.rs` → the `faro` binary).
+# The standalone CLI lives in its own workspace member, `faro-cli/`, so the
+# Tauri bundler only ever sees ONE binary in this package. A second `[[bin]]`
+# here breaks the macOS `universal-apple-darwin` bundle: Tauri lipo's only the
+# main binary into the universal target dir, then the bundler fails trying to
+# copy the un-lipo'd second binary into Faro.app.
+[workspace]
+members = ["faro-cli"]
+resolver = "2"
 
 [lib]
 name = "faro_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
-
-# The CLI ships as a second binary in this crate. It reuses faro_lib's
-# RemoteFs / Session / TransferManager layers but never touches Tauri runtime
-# — so `cargo build --bin faro-cli` produces a stand-alone executable.
-[[bin]]
-name = "faro-cli"
-path = "src/bin/faro_cli.rs"
 
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }
@@ -58,10 +57,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5"
 sha2 = "0.10"
 base64 = "0.22"
-
-# CLI
-clap = { version = "4", features = ["derive"] }
-indicatif = "0.17"
 
 # Filesystem watcher — powers the right-click "Edit with…" flow that
 # downloads a remote file to a tempfile, opens it in the user's editor, and

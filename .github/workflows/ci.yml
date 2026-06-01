@@ -1,8 +1,8 @@
 name: ci
 
-# Fast feedback for every push + PR: cargo check (lib + both bins) and the
-# Vite typecheck + production bundle. No bundling, no platform matrix — that's
-# what release.yml is for.
+# Fast feedback for every push + PR: cargo check across the workspace (GUI
+# lib + bin and the faro-cli crate) and the Vite typecheck + production bundle.
+# No bundling, no platform matrix — that's what release.yml is for.
 
 on:
   push:
@@ -48,11 +48,11 @@ jobs:
       - name: TypeScript + Vite build
         run: npm run build
 
-      - name: cargo check (lib + bins)
+      - name: cargo check (whole workspace — GUI lib/bin + faro-cli)
         working-directory: src-tauri
-        run: cargo check --lib --bins
+        run: cargo check --workspace
 
       - name: cargo clippy (warnings allowed for now)
         working-directory: src-tauri
-        run: cargo clippy --lib --bins -- -D warnings -A clippy::all
+        run: cargo clippy --workspace -- -D warnings -A clippy::all
         continue-on-error: true

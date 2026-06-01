@@ -24,6 +24,27 @@ Faro is what you'd get if you let FileZilla, PuTTY, and a half-dozen cloud-stora
 
 And when you want an AI agent to actually *do* something on a box, the **[Agent Bridge](#-agent-bridge)** lets it run commands through the session you already opened — no remote install, no keys handed over, every command gated behind your approval.
 
+## Download
+
+Grab the latest installer from the [**Releases**](https://github.com/jhd3197/faro/releases/latest) page — every push to `main` publishes fresh builds for all three desktop platforms plus the standalone `faro-cli`.
+
+| Platform | Installer | First-launch note |
+|---|---|---|
+| **macOS** (Intel + Apple Silicon) | `.dmg` (universal) | One-time `xattr` step ↓ |
+| **Windows** (x64) | `.exe` (NSIS) or `.msi` | SmartScreen → *More info → Run anyway* |
+| **Linux** (x64) | `.AppImage`, `.deb`, `.rpm` | `chmod +x` the AppImage |
+
+Builds are **unsigned** (no Apple Developer / Windows EV certificate yet), so each OS guards the first launch:
+
+- **macOS** — after dragging **Faro.app** to **/Applications**, run this once in Terminal, then open the app normally:
+  ```bash
+  xattr -cr /Applications/Faro.app
+  ```
+  It's needed because the build isn't notarized by Apple; without it macOS reports the app as "damaged."
+- **Windows** — on the *"Windows protected your PC"* prompt, click **More info → Run anyway**.
+
+> Prefer to build from source? See [Develop](#develop) below.
+
 ## 🤖 Agent Bridge
 
 **Let a local AI agent run commands on your servers — safely.**
@@ -91,11 +112,11 @@ First build is slow — it's compiling the Rust crate tree. Subsequent builds ar
 
 ## CLI
 
-The same Cargo package ships a second binary, `faro-cli`, that reuses your saved GUI profiles.
+A standalone binary, `faro-cli` — its own workspace crate under `src-tauri/faro-cli/` — reuses your saved GUI profiles. Prebuilt binaries ship with every [release](https://github.com/jhd3197/faro/releases/latest), or build it yourself:
 
 ```bash
 cd src-tauri
-cargo build --bin faro-cli --release
+cargo build -p faro-cli --release
 # → src-tauri/target/release/faro-cli
 
 faro-cli profiles list
@@ -156,7 +177,9 @@ src-tauri/src/
   sync.rs                  Two-tree diff planner, RemoteFs-driven
   importers/               OpenSSH config, FileZilla XML, PuTTY registry
   known_hosts.rs           ~/.ssh/known_hosts read/write
-  bin/faro_cli.rs          CLI binary (clap + indicatif)
+
+src-tauri/faro-cli/        Standalone CLI crate — path-depends on faro_lib
+  src/main.rs              clap + indicatif: ls·cp·mv·rm·mkdir·sync·profiles
 ```
 
 ## Windows PATH gotcha

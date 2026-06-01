@@ -1,27 +1,115 @@
 name: release
 
-# Builds the Tauri GUI on macOS, Windows and Ubuntu plus the `faro-cli`
-# binary on all three, then attaches every artifact to a draft GitHub
-# release. Triggered when a tag matching `v*` is pushed (e.g. `v1.2.0`) or
-# manually via the Actions tab.
+# RustDesk-style "push to main → downloadable release".
+#
+# Every push to main cuts the next patch version: we bump the manifests, tag
+# it, and build the Faro desktop app (macOS universal, Windows, Linux) plus the
+# standalone `faro-cli` for all three platforms, attaching every artifact to a
+# public GitHub Release anyone can download. You can also trigger it by hand
+# from the Actions tab and pin an explicit version.
+#
+# Builds are UNSIGNED (no Apple Developer / Windows EV cert). The release notes
+# spell out the one-time macOS `xattr` step and the Windows SmartScreen click-
+# through. To push to main WITHOUT cutting a release, put [skip ci] in the
+# commit message — GitHub skips the whole workflow.
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Tag to attach the release to (e.g. v1.2.0). Created if missing.'
-        required: true
+      version:
+        description: 'Version to release (e.g. 1.4.0). Blank = auto-bump the patch.'
+        required: false
         type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
 jobs:
-  # ---- GUI app ---------------------------------------------------------
+  # ---- 1. Decide the version, bump manifests, tag, open a draft release ----
+  prepare:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.version }}" ]; then
+            version="${{ inputs.version }}"
+          else
+            last="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' \
+                    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
+            if [ -z "$last" ]; then
+              # No release tags yet — ship whatever the manifest already says.
+              version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+            else
+              v="${last#v}"; IFS=. read -r MA MI PA <<< "$v"
+              version="${MA}.${MI}.$((PA + 1))"
+            fi
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version"    >> "$GITHUB_OUTPUT"
+          echo "Releasing v$version"
+
+      - name: Bump manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.ver.outputs.version }}"
+          node -e "const f='src-tauri/tauri.conf.json';const j=require('./'+f);j.version='${version}';require('fs').writeFileSync(f,JSON.stringify(j,null,2)+'\n')"
+          # Only the first version line of each manifest (the [package] one).
+          sed -i '0,/^version = ".*"/s//version = "'"$version"'"/' src-tauri/Cargo.toml
+          sed -i '0,/^version = ".*"/s//version = "'"$version"'"/' src-tauri/faro-cli/Cargo.toml
+          sed -i -E "s/version-[0-9]+\.[0-9]+\.[0-9]+-/version-${version}-/" README.md || true
+
+      - name: Commit, tag, push
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ver.outputs.tag }}"
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "Tag $tag already exists on origin — reusing it."
+          else
+            git add -A
+            git commit -m "release: $tag [skip ci]" || echo "nothing to commit"
+            git tag -a "$tag" -m "Faro $tag"
+            git push origin HEAD:main
+            git push origin "$tag"
+          fi
+
+      - name: Open draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ver.outputs.tag }}"
+          gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1 || \
+            gh release create "$tag" --repo "${{ github.repository }}" \
+              --draft --title "Faro $tag" \
+              --notes "⏳ Build in progress — downloads appear here in ~10 minutes."
+
+  # ---- 2. Desktop app (macOS universal, Windows, Linux) -------------------
   gui:
+    needs: prepare
     name: gui (${{ matrix.platform.runner }})
     strategy:
       fail-fast: false
@@ -36,6 +124,8 @@ jobs:
     runs-on: ${{ matrix.platform.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -73,39 +163,21 @@ jobs:
       - name: Install npm deps
         run: npm ci
 
-      - name: Resolve tag name
-        id: tag
-        shell: bash
-        run: |
-          if [ -n "${{ inputs.tag }}" ]; then
-            echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          fi
-
       - name: Build + bundle GUI, attach to draft release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ steps.tag.outputs.tag }}
-          releaseName: 'Faro ${{ steps.tag.outputs.tag }}'
-          releaseBody: |
-            See the [CHANGELOG](https://github.com/${{ github.repository }}/blob/main/README.md#roadmap) for what's in this release.
-
-            **Installers**
-            - macOS: `.dmg` (universal — Intel + Apple Silicon)
-            - Windows: `.msi` and `.exe` installer
-            - Linux: `.AppImage` and `.deb`
-
-            **CLI** — see the separate `faro-cli-*` artifacts below for the standalone command-line binary.
+          tagName: ${{ needs.prepare.outputs.tag }}
+          releaseName: 'Faro ${{ needs.prepare.outputs.tag }}'
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.platform.args }}
           projectPath: src-tauri
 
-  # ---- CLI binary ------------------------------------------------------
+  # ---- 3. Standalone CLI binary (all platforms) ---------------------------
   cli:
+    needs: [prepare, gui]
     name: cli (${{ matrix.runner }})
     strategy:
       fail-fast: false
@@ -124,9 +196,10 @@ jobs:
             target: x86_64-pc-windows-msvc
             asset: faro-cli-windows-x86_64.exe
     runs-on: ${{ matrix.runner }}
-    needs: gui
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -138,40 +211,126 @@ jobs:
         with:
           workspaces: './src-tauri -> target'
 
+      # faro-cli links faro_lib, which pulls in tauri — so the Linux build needs
+      # the same webkit/gtk system libs the GUI does, even though the CLI itself
+      # never opens a window.
       - name: Linux — install system deps
         if: matrix.runner == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            pkg-config
 
       - name: Build faro-cli
         working-directory: src-tauri
-        run: cargo build --release --bin faro-cli --target ${{ matrix.target }}
+        # -p selects the workspace member; without it `--bin` only searches the
+        # root `faro` package (which no longer owns the CLI binary).
+        run: cargo build --release -p faro-cli --bin faro-cli --target ${{ matrix.target }}
 
       - name: Stage artifact
         shell: bash
         run: |
           mkdir -p dist
           if [ "${{ matrix.runner }}" = "windows-latest" ]; then
-            cp src-tauri/target/${{ matrix.target }}/release/faro-cli.exe dist/${{ matrix.asset }}
+            cp "src-tauri/target/${{ matrix.target }}/release/faro-cli.exe" "dist/${{ matrix.asset }}"
           else
-            cp src-tauri/target/${{ matrix.target }}/release/faro-cli dist/${{ matrix.asset }}
+            cp "src-tauri/target/${{ matrix.target }}/release/faro-cli" "dist/${{ matrix.asset }}"
           fi
 
-      - name: Resolve tag name
-        id: tag
-        shell: bash
-        run: |
-          if [ -n "${{ inputs.tag }}" ]; then
-            echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
-          else
-            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Upload to release
+      - name: Upload to draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          gh release upload "${{ steps.tag.outputs.tag }}" "dist/${{ matrix.asset }}" \
+          gh release upload "${{ needs.prepare.outputs.tag }}" "dist/${{ matrix.asset }}" \
             --repo "${{ github.repository }}" --clobber
+
+  # ---- 4. Write the final notes and publish the release -------------------
+  publish:
+    needs: [prepare, gui, cli]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Compose download notes & publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.prepare.outputs.tag }}"
+          version="${{ needs.prepare.outputs.version }}"
+          base="https://github.com/${REPO}/releases/download/${tag}"
+
+          mac=""; win=""; lin=""; cli=""
+          while IFS=$'\t' read -r name size; do
+            [ -z "$name" ] && continue
+            # human-readable size
+            if   [ "$size" -ge 1073741824 ]; then hs="$(awk "BEGIN{printf \"%.1f GB\", $size/1073741824}")"
+            elif [ "$size" -ge 1048576 ];    then hs="$(awk "BEGIN{printf \"%.1f MB\", $size/1048576}")"
+            elif [ "$size" -ge 1024 ];       then hs="$(awk "BEGIN{printf \"%.0f KB\", $size/1024}")"
+            else hs="${size} B"; fi
+            row="| [\`${name}\`](${base}/${name}) | ${hs} |"$'\n'
+            case "$name" in
+              *.dmg|*.app.tar.gz)      mac="${mac}${row}" ;;
+              *-setup.exe|*.msi)       win="${win}${row}" ;;
+              *.AppImage|*.deb|*.rpm)  lin="${lin}${row}" ;;
+              faro-cli-*)              cli="${cli}${row}" ;;
+            esac
+          done < <(gh release view "$tag" --repo "$REPO" \
+                    --json assets -q '.assets[] | "\(.name)\t\(.size)"')
+
+          {
+            echo "## Faro ${tag}"
+            echo
+            echo "Cross-platform desktop client for SFTP · FTP · S3 · plus the **Agent Bridge** (hand a live SSH session to an AI agent). Grab the installer for your OS below."
+            echo
+            echo "### 🖥️ Desktop app"
+            echo
+            echo "**macOS** (universal — Intel + Apple Silicon)"
+            echo
+            echo "| File | Size |"
+            echo "|------|------|"
+            printf '%s' "$mac"
+            echo
+            echo "> ⚠️ **macOS Gatekeeper:** these builds are **not notarized by Apple**, so the first launch is blocked (\"Faro is damaged / from an unidentified developer\"). Drag **Faro.app** into **/Applications**, then run this once in Terminal:"
+            echo '> ```bash'
+            echo '> xattr -cr /Applications/Faro.app'
+            echo '> ```'
+            echo "> Then open it normally. (You only need to do this once per install.)"
+            echo
+            echo "**Windows** (x64)"
+            echo
+            echo "| File | Size |"
+            echo "|------|------|"
+            printf '%s' "$win"
+            echo
+            echo "> ⚠️ **Windows SmartScreen:** unsigned installer, so you'll see *\"Windows protected your PC.\"* Click **More info → Run anyway**. The \`-setup.exe\` is the NSIS installer; the \`.msi\` is for managed/MDM deployments."
+            echo
+            echo "**Linux** (x64)"
+            echo
+            echo "| File | Size |"
+            echo "|------|------|"
+            printf '%s' "$lin"
+            echo
+            echo "> \`.AppImage\`: \`chmod +x\` and run. \`.deb\`: \`sudo apt install ./<file>.deb\`. \`.rpm\`: \`sudo dnf install ./<file>.rpm\`."
+            echo
+            echo "### ⌨️ Standalone CLI — \`faro-cli\`"
+            echo
+            echo "Scripts every backend the GUI speaks, using the same saved profiles. Rename to \`faro-cli\` (\`faro-cli.exe\` on Windows), \`chmod +x\` on macOS/Linux, drop it on your \`PATH\`."
+            echo
+            echo "| File | Size |"
+            echo "|------|------|"
+            printf '%s' "$cli"
+            echo
+            echo "> macOS CLI binary is unsigned too — \`xattr -c ./faro-cli-macos-arm64\` before the first run."
+            echo
+            echo "---"
+            echo "See the [README](https://github.com/${REPO}/blob/main/README.md) for the full feature tour and the Agent Bridge setup."
+          } > notes.md
+
+          gh release edit "$tag" --repo "$REPO" \
+            --notes-file notes.md --draft=false --latest
