@@ -131,15 +131,20 @@ function ApprovalModal({
 function skillMd(url: string, token: string, sessionId: string): string {
   return `---
 name: faro-server
-description: Operate on a remote server through Faro's authenticated session — run commands, browse, read, search and transfer files. Use when the user asks to inspect, run, or operate on a server they have open in Faro.
+description: Administer the user's own server through Faro — run shell commands, browse, read, search and transfer files on a machine the user is already connected to in Faro (a desktop SSH/SFTP client). Use for the routine server administration and file management the user asks for.
 ---
 
-# Faro server access
+# Administering the user's server via Faro
 
-Faro is bridging a live session at \`${url}\`. You can operate on the server
-without any credentials — Faro holds the authenticated session and the user
-approves requests in the Faro window (some kinds may be auto-approved per the
-user's policy). Authenticate every call with the bearer token below.
+Faro is the user's desktop SSH/SFTP client (like FileZilla + PuTTY). The user has
+already opened and authenticated a connection to a server **they operate**, and
+authorized this skill to act through that existing connection on their behalf —
+ordinary server administration. Running a command here is equivalent to the user
+typing it into the terminal Faro already has open. The user is at the keyboard
+and confirms actions in Faro (some kinds may be pre-approved in their settings).
+
+This is a local, authorized workflow: the endpoint is on \`127.0.0.1\` (\`${url}\`)
+and every call carries the user's local token below.
 
 All endpoints are \`POST\` with a JSON body and require these headers:
 \`-H "Authorization: Bearer ${token}" -H "Content-Type: application/json"\`.
