@@ -1,4 +1,6 @@
+import { useId, useRef } from "react";
 import { Github, ExternalLink, X } from "lucide-react";
+import { useDialog } from "@/hooks/useDialog";
 
 interface Props {
   onClose: () => void;
@@ -12,13 +14,20 @@ function openExternal(url: string) {
 }
 
 export function AboutDialog({ onClose }: Props) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialog(panelRef, { onClose });
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
-        className="anim-modal w-[26rem] overflow-hidden rounded-xl border border-border bg-bg-panel shadow-elev-3"
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="anim-modal w-[26rem] max-w-[92vw] overflow-hidden rounded-xl border border-border bg-bg-panel shadow-elev-3"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex flex-col items-center gap-2 border-b border-border bg-bg-subtle px-5 py-5">
@@ -41,7 +50,7 @@ export function AboutDialog({ onClose }: Props) {
               />
             </svg>
           </div>
-          <div className="text-base font-semibold">Faro</div>
+          <div id={titleId} className="text-base font-semibold">Faro</div>
           <div className="text-[11px] font-medium uppercase tracking-wider text-accent">
             version {VERSION}
           </div>

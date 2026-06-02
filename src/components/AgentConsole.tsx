@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useId, useRef } from "react";
 import {
   X,
   Trash2,
@@ -14,6 +14,7 @@ import {
   Radio,
 } from "lucide-react";
 import { useBridge } from "@/stores/bridgeStore";
+import { useDialog } from "@/hooks/useDialog";
 import { cn } from "@/lib/cn";
 import { relTime } from "@/lib/format";
 import type { AgentConsoleEntry } from "@/lib/types";
@@ -27,6 +28,9 @@ export function AgentConsole({ onClose }: { onClose: () => void }) {
   const running = entries.filter((e) => e.status === "running").length;
 
   const scrollRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialog(panelRef, { onClose });
   useEffect(() => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
@@ -38,12 +42,16 @@ export function AgentConsole({ onClose }: { onClose: () => void }) {
       onClick={onClose}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         onClick={(e) => e.stopPropagation()}
         className="anim-modal flex max-h-[85vh] w-[44rem] max-w-[95vw] flex-col rounded-xl border border-border bg-bg-panel shadow-elev-3"
       >
         <div className="flex items-center gap-2 border-b border-border px-5 py-3.5">
           <Radio size={15} className="text-accent" />
-          <span className="text-[15px] font-semibold tracking-tight">
+          <span id={titleId} className="text-[15px] font-semibold tracking-tight">
             Agent console
           </span>
           {running > 0 && (
@@ -110,7 +118,7 @@ function KindIcon({ entry }: { entry: AgentConsoleEntry }) {
     case "upload":
       return <Upload size={12} className="mt-0.5 shrink-0 text-text-muted" />;
     default:
-      return <CheckCircle2 size={12} className="mt-0.5 shrink-0 text-emerald-400" />;
+      return <CheckCircle2 size={12} className="mt-0.5 shrink-0 text-success" />;
   }
 }
 

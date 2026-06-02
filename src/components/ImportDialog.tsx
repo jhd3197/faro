@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   Download,
   FileText,
@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { ipc } from "@/lib/ipc";
 import { useConnections } from "@/stores/connectionsStore";
+import { useDialog } from "@/hooks/useDialog";
 import type {
   ImporterKind,
   ImporterPaths,
@@ -32,6 +33,9 @@ interface Props {
 export function ImportDialog({ onClose }: Props) {
   const [tab, setTab] = useState<ImporterKind>("openssh");
   const [paths, setPaths] = useState<ImporterPaths | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialog(panelRef, { onClose });
 
   useEffect(() => {
     ipc.importerDefaultPaths().then(setPaths);
@@ -39,10 +43,16 @@ export function ImportDialog({ onClose }: Props) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="anim-modal flex max-h-[85vh] w-[36rem] flex-col overflow-hidden rounded-xl border border-border bg-bg-panel shadow-elev-3">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="anim-modal flex max-h-[85vh] w-[36rem] max-w-[92vw] flex-col overflow-hidden rounded-xl border border-border bg-bg-panel shadow-elev-3"
+      >
         <div className="flex items-center gap-2 border-b border-border bg-bg-subtle px-4 py-3">
           <Download size={14} className="text-accent" />
-          <span className="text-sm font-semibold">Import connections</span>
+          <span id={titleId} className="text-sm font-semibold">Import connections</span>
           <span className="text-[11px] text-text-dim">
             from another client
           </span>

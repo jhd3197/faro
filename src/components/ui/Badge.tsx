@@ -11,9 +11,9 @@ export type BadgeVariant =
 const VARIANTS: Record<BadgeVariant, string> = {
   default: "bg-bg-hover text-text-muted",
   accent: "bg-accent/15 text-accent",
-  success: "bg-emerald-500/15 text-emerald-400",
+  success: "bg-success/15 text-success",
   danger: "bg-danger/15 text-danger",
-  warning: "bg-amber-500/15 text-amber-400",
+  warning: "bg-warning/15 text-warning",
   muted: "bg-bg-subtle text-text-dim",
 };
 

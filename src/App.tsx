@@ -300,7 +300,7 @@ function StatusBar({
         icon={
           <Radio
             size={11}
-            className={bridgeRunning ? "text-emerald-400" : undefined}
+            className={bridgeRunning ? "text-success" : undefined}
           />
         }
         title="Agent Bridge — let a local AI agent run commands on your server"
@@ -329,7 +329,7 @@ function StatusBar({
         Transfers
       </PillButton>
       {connected && (
-        <div className="flex items-center gap-1 pl-2 pr-1 text-emerald-400">
+        <div className="flex items-center gap-1 pl-2 pr-1 text-success">
           <Wifi size={11} />
         </div>
       )}
@@ -369,7 +369,7 @@ function PillButton({
       {icon}
       {children}
       {badge !== undefined && (
-        <span className="ml-0.5 rounded-full bg-accent px-1.5 py-0 text-[9px] font-semibold text-white">
+        <span className="ml-0.5 rounded-full bg-accent-strong px-1.5 py-0 text-[9px] font-semibold text-white">
           {badge}
         </span>
       )}
@@ -379,10 +379,10 @@ function PillButton({
 
 function NotifIcon({ variant }: { variant: ToastVariant }) {
   const map = {
-    info: { Icon: Info, cls: "text-accent" },
-    success: { Icon: CheckCircle2, cls: "text-emerald-400" },
+    info: { Icon: Info, cls: "text-info" },
+    success: { Icon: CheckCircle2, cls: "text-success" },
     error: { Icon: AlertCircle, cls: "text-danger" },
-    warning: { Icon: AlertTriangle, cls: "text-amber-400" },
+    warning: { Icon: AlertTriangle, cls: "text-warning" },
   } as const;
   const { Icon, cls } = map[variant];
   return <Icon size={12} className={cn("mt-0.5 shrink-0", cls)} />;

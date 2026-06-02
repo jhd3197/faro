@@ -1,5 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, useId, useRef } from "react";
 import { X, Palette, ArrowDownUp, FolderTree, TerminalSquare, Plug, Radio } from "lucide-react";
+import { useDialog } from "@/hooks/useDialog";
 import {
   useSettings,
   APP_THEMES,
@@ -30,17 +31,25 @@ export function Settings({ onClose }: Props) {
     refreshBridge();
   }, [refreshBridge]);
 
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialog(panelRef, { onClose });
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         onClick={(e) => e.stopPropagation()}
-        className="anim-modal flex max-h-[85vh] w-[34rem] flex-col rounded-xl border border-border bg-bg-panel shadow-elev-3"
+        className="anim-modal flex max-h-[85vh] w-[34rem] max-w-[92vw] flex-col rounded-xl border border-border bg-bg-panel shadow-elev-3"
       >
         <div className="flex items-center border-b border-border px-5 py-3.5">
-          <span className="text-[15px] font-semibold tracking-tight">Settings</span>
+          <span id={titleId} className="text-[15px] font-semibold tracking-tight">Settings</span>
           <div className="flex-1" />
           <button
             onClick={onClose}

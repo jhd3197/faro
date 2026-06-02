@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useId, useRef, useState } from "react";
 import { useConnections } from "@/stores/connectionsStore";
 import { useSettings } from "@/stores/settingsStore";
+import { useDialog } from "@/hooks/useDialog";
 import {
   PROTOCOL_DEFAULT_PORT,
   PROTOCOL_LABEL,
@@ -73,6 +74,10 @@ export function ProfileEditor({ profile, onClose }: Props) {
   // Azure-only state.
   const [azureAccount, setAzureAccount] = useState(profile?.account ?? "");
 
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialog(panelRef, { onClose });
+
   const onProtocolChange = (p: Protocol) => {
     setProtocol(p);
     if (!portTouched) {
@@ -144,8 +149,14 @@ export function ProfileEditor({ profile, onClose }: Props) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="anim-modal max-h-[90vh] w-[32rem] overflow-y-auto rounded-xl border border-border bg-bg-panel p-5 shadow-elev-3">
-        <div className="mb-4 text-sm font-semibold">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="anim-modal max-h-[90vh] w-[32rem] max-w-[92vw] overflow-y-auto rounded-xl border border-border bg-bg-panel p-5 shadow-elev-3"
+      >
+        <div id={titleId} className="mb-4 text-sm font-semibold">
           {profile ? "Edit connection" : "New connection"}
         </div>
 

@@ -1,3 +1,6 @@
+import { useId, useRef } from "react";
+import { useDialog } from "@/hooks/useDialog";
+
 interface Props {
   title: string;
   message: string;
@@ -15,16 +18,23 @@ export function ConfirmModal({
   onClose,
   onConfirm,
 }: Props) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialog(panelRef, { onClose });
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         onClick={(e) => e.stopPropagation()}
-        className="anim-modal w-[26rem] rounded-xl border border-border bg-bg-panel p-5 shadow-elev-3"
+        className="anim-modal w-[26rem] max-w-[92vw] rounded-xl border border-border bg-bg-panel p-5 shadow-elev-3"
       >
-        <div className="mb-2 text-sm font-semibold">{title}</div>
+        <div id={titleId} className="mb-2 text-sm font-semibold">{title}</div>
         <div className="mb-4 whitespace-pre-line text-sm text-text-muted">
           {message}
         </div>

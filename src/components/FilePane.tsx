@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import {
   ArrowUp,
   ArrowLeft,
@@ -133,6 +133,10 @@ export function FilePane({
   const [anchor, setAnchor] = useState<string | null>(null);
   const [isDropTarget, setIsDropTarget] = useState(false);
   const [caps, setCaps] = useState<Capabilities | null>(null);
+  // Width tier of THIS pane (not the viewport). Two panes share the window, so
+  // a narrow window squeezes each pane; metadata columns yield to the filename
+  // before it gets crushed. Driven by a ResizeObserver, see below.
+  const [paneTier, setPaneTier] = useState<"wide" | "mid" | "narrow">("wide");
   const [menu, setMenu] = useState<{
     x: number;
     y: number;
@@ -207,26 +211,30 @@ export function FilePane({
     };
   }, [sessionId]);
 
-  // Apply hidden-file rule + in-pane name filter + sort from settings.
-  const q = filter.trim().toLowerCase();
-  const visible = entries
-    .filter((e) => showHiddenFiles || !e.name.startsWith("."))
-    .filter((e) => q === "" || e.name.toLowerCase().includes(q))
-    .slice()
-    .sort((a, b) => {
-      // Directories always come before files regardless of sort.
-      if (a.kind === "directory" && b.kind !== "directory") return -1;
-      if (a.kind !== "directory" && b.kind === "directory") return 1;
-      let cmp = 0;
-      if (sortField === "size") {
-        cmp = a.size - b.size;
-      } else if (sortField === "modified") {
-        cmp = (a.modified ?? 0) - (b.modified ?? 0);
-      } else {
-        cmp = a.name.localeCompare(b.name);
-      }
-      return sortDirection === "asc" ? cmp : -cmp;
-    });
+  // Apply hidden-file rule + in-pane name filter + sort from settings. Memoized
+  // so a big directory isn't re-filtered and re-sorted on every unrelated render
+  // (selection, hover, pane-resize); only the inputs below trigger recompute.
+  const visible = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    return entries
+      .filter((e) => showHiddenFiles || !e.name.startsWith("."))
+      .filter((e) => q === "" || e.name.toLowerCase().includes(q))
+      .slice()
+      .sort((a, b) => {
+        // Directories always come before files regardless of sort.
+        if (a.kind === "directory" && b.kind !== "directory") return -1;
+        if (a.kind !== "directory" && b.kind === "directory") return 1;
+        let cmp = 0;
+        if (sortField === "size") {
+          cmp = a.size - b.size;
+        } else if (sortField === "modified") {
+          cmp = (a.modified ?? 0) - (b.modified ?? 0);
+        } else {
+          cmp = a.name.localeCompare(b.name);
+        }
+        return sortDirection === "asc" ? cmp : -cmp;
+      });
+  }, [entries, showHiddenFiles, filter, sortField, sortDirection]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -311,6 +319,20 @@ export function FilePane({
     el.addEventListener("keydown", handler);
     return () => el.removeEventListener("keydown", handler);
   }, [visible, selected, filter, anchor]);
+
+  // Watch this pane's width and pick a column tier. Content-driven, not
+  // viewport-driven: only re-renders when crossing a threshold, not per pixel.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0].contentRect.width;
+      const tier = w < 360 ? "narrow" : w < 480 ? "mid" : "wide";
+      setPaneTier((prev) => (prev === tier ? prev : tier));
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const goUp = () => {
     const isLocal = sessionId === LOCAL_SESSION;
@@ -584,12 +606,23 @@ export function FilePane({
   };
 
   const selectionCount = selected.size;
+  const activeIdx = anchor ? visible.findIndex((v) => v.path === anchor) : -1;
+  const activeDescId = activeIdx >= 0 ? `${paneId}-row-${activeIdx}` : undefined;
   const segments = parseSegments(path, sessionId === LOCAL_SESSION);
-  const showPerms =
+  const hasPerms =
     !!sessionId && caps?.canChmod !== false && visible.some((e) => e.mode != null);
-  const cols = showPerms
-    ? "minmax(0,1fr) 7.5rem 5.5rem 5.5rem"
-    : "minmax(0,1fr) 9rem 5.5rem";
+  // Columns yield as the pane narrows so the filename never gets crushed:
+  // Modified drops below ~360px, Perms shows only when the pane is wide.
+  const showModified = paneTier !== "narrow";
+  const showPermsCol = hasPerms && paneTier === "wide";
+  const cols = [
+    "minmax(0,1fr)",
+    showModified ? "7.5rem" : null,
+    "5.5rem",
+    showPermsCol ? "5.5rem" : null,
+  ]
+    .filter(Boolean)
+    .join(" ");
   const selectedBytes = visible
     .filter((e) => selected.has(e.path))
     .reduce((a, e) => a + (e.kind === "file" ? e.size : 0), 0);
@@ -616,6 +649,10 @@ export function FilePane({
     <div
       ref={containerRef}
       tabIndex={0}
+      role="listbox"
+      aria-label={`${title} directory listing`}
+      aria-multiselectable="true"
+      aria-activedescendant={activeDescId}
       onDragEnter={onPaneDragEnter}
       onDragOver={onPaneDragOver}
       onDragLeave={onPaneDragLeave}
@@ -623,6 +660,7 @@ export function FilePane({
       onContextMenu={openPaneMenu}
       className={cn(
         "flex h-full flex-1 flex-col bg-bg-panel outline-none transition-colors",
+        "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40",
         isDropTarget && "ring-2 ring-inset ring-accent/60 bg-accent/5"
       )}
     >
@@ -639,7 +677,7 @@ export function FilePane({
           </span>
         )}
         {isDropTarget && (
-          <span className="rounded bg-accent px-1.5 py-0.5 text-[10px] font-medium text-white">
+          <span className="rounded bg-accent-strong px-1.5 py-0.5 text-[10px] font-medium text-white">
             drop to {transferLabel.toLowerCase()}
           </span>
         )}
@@ -647,7 +685,7 @@ export function FilePane({
         {selectionCount > 0 && onTransfer && (
           <button
             onClick={transferSelection}
-            className="flex items-center gap-1 rounded bg-accent px-2 py-0.5 text-[11px] font-medium text-white hover:bg-accent-hover"
+            className="flex items-center gap-1 rounded bg-accent-strong px-2 py-0.5 text-[11px] font-medium text-white hover:brightness-110"
             title={`${transferLabel} ${selectionCount} item(s) to the other pane`}
           >
             <ArrowRightLeft size={11} />
@@ -831,13 +869,15 @@ export function FilePane({
             sortDirection={sortDirection}
             onSort={onSort}
           />
-          <SortHeader
-            label="Modified"
-            field="modified"
-            sortField={sortField}
-            sortDirection={sortDirection}
-            onSort={onSort}
-          />
+          {showModified && (
+            <SortHeader
+              label="Modified"
+              field="modified"
+              sortField={sortField}
+              sortDirection={sortDirection}
+              onSort={onSort}
+            />
+          )}
           <SortHeader
             label="Size"
             field="size"
@@ -846,11 +886,11 @@ export function FilePane({
             sortDirection={sortDirection}
             onSort={onSort}
           />
-          {showPerms && <span className="text-right">Perms</span>}
+          {showPermsCol && <span className="text-right">Perms</span>}
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto">
+      <div role="presentation" className="flex-1 overflow-y-auto">
         {!sessionId ? (
           <EmptyState
             icon={<ServerOff size={20} />}
@@ -891,13 +931,15 @@ export function FilePane({
           visible.map((entry, i) => (
             <Row
               key={entry.path}
+              paneId={paneId}
               entry={entry}
               index={i}
               viewMode={paneViewMode}
               density={paneDensity}
               selected={selected.has(entry.path)}
               cols={cols}
-              showPerms={showPerms}
+              showModified={showModified}
+              showPermsCol={showPermsCol}
               onClick={(e) => onRowClick(entry, e)}
               onActivate={() => onRowActivate(entry)}
               onDragStart={(e) => onRowDragStart(e, entry)}
@@ -1004,25 +1046,29 @@ export function FilePane({
 }
 
 function Row({
+  paneId,
   entry,
   index,
   viewMode,
   density,
   selected,
   cols,
-  showPerms,
+  showModified,
+  showPermsCol,
   onClick,
   onActivate,
   onDragStart,
   onContextMenu,
 }: {
+  paneId: string;
   entry: DirEntry;
   index: number;
   viewMode: PaneViewMode;
   density: PaneDensity;
   selected: boolean;
   cols: string;
-  showPerms: boolean;
+  showModified: boolean;
+  showPermsCol: boolean;
   onClick: (e: React.MouseEvent) => void;
   onActivate: () => void;
   onDragStart: (e: React.DragEvent) => void;
@@ -1056,6 +1102,9 @@ function Row({
     return (
       <div
         data-idx={index}
+        role="option"
+        id={`${paneId}-row-${index}`}
+        aria-selected={selected}
         onClick={onClick}
         onDoubleClick={onActivate}
         onContextMenu={onContextMenu}
@@ -1064,6 +1113,7 @@ function Row({
         title={title}
         className={cn(
           "flex cursor-default select-none items-center gap-2 border-b border-border-subtle px-3",
+          "[content-visibility:auto] [contain-intrinsic-size:auto_28px]",
           pad,
           sel
         )}
@@ -1080,6 +1130,9 @@ function Row({
   return (
     <div
       data-idx={index}
+      role="option"
+      id={`${paneId}-row-${index}`}
+      aria-selected={selected}
       onClick={onClick}
       onDoubleClick={onActivate}
       onContextMenu={onContextMenu}
@@ -1089,6 +1142,7 @@ function Row({
       style={{ gridTemplateColumns: cols }}
       className={cn(
         "grid cursor-default select-none items-center gap-2 border-b border-border-subtle px-3",
+        "[content-visibility:auto] [contain-intrinsic-size:auto_28px]",
         pad,
         sel
       )}
@@ -1097,13 +1151,15 @@ function Row({
         {iconEl}
         <span className="truncate">{entry.name}</span>
       </span>
-      <span className="truncate text-xs text-text-dim">
-        {fmtMtime(entry.modified)}
-      </span>
+      {showModified && (
+        <span className="truncate text-xs text-text-dim">
+          {fmtMtime(entry.modified)}
+        </span>
+      )}
       <span className="text-right text-xs tabular-nums text-text-dim">
         {entry.kind === "file" ? fmtSize(entry.size) : ""}
       </span>
-      {showPerms && (
+      {showPermsCol && (
         <span
           className="text-right font-mono text-[10px] text-text-dim"
           title={entry.mode != null ? (entry.mode & 0o777).toString(8) : ""}

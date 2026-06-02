@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { useDialog } from "@/hooks/useDialog";
 
 interface Props {
   title: string;
@@ -19,6 +20,9 @@ export function PromptModal({
 }: Props) {
   const [value, setValue] = useState(initialValue);
   const inputRef = useRef<HTMLInputElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialog(panelRef, { onClose, initialFocus: inputRef });
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -37,10 +41,14 @@ export function PromptModal({
       onClick={onClose}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         onClick={(e) => e.stopPropagation()}
-        className="anim-modal w-[24rem] rounded-xl border border-border bg-bg-panel p-5 shadow-elev-3"
+        className="anim-modal w-[24rem] max-w-[92vw] rounded-xl border border-border bg-bg-panel p-5 shadow-elev-3"
       >
-        <div className="mb-2 text-sm font-semibold">{title}</div>
+        <div id={titleId} className="mb-2 text-sm font-semibold">{title}</div>
         {label && (
           <div className="mb-2 text-xs text-text-dim">{label}</div>
         )}

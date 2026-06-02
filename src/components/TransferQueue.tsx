@@ -82,7 +82,7 @@ function Row({ t, onCancel }: { t: Transfer; onCancel: () => void }) {
       <Icon
         size={14}
         className={cn(
-          t.kind === "download" ? "text-blue-400" : "text-emerald-400"
+          t.kind === "download" ? "text-info" : "text-success"
         )}
       />
       <div className="min-w-0 flex-1">

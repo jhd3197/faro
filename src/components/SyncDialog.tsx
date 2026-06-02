@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useRef, useState } from "react";
 import {
   ArrowRightLeft,
   ArrowRight,
@@ -15,6 +15,7 @@ import {
 import { ipc } from "@/lib/ipc";
 import { useConnections } from "@/stores/connectionsStore";
 import { useTransfers } from "@/stores/transfersStore";
+import { useDialog } from "@/hooks/useDialog";
 import type {
   SyncDirection,
   SyncPlan,
@@ -45,6 +46,9 @@ export function SyncDialog({ localPath, remotePath, onClose }: Props) {
   const [planning, setPlanning] = useState(false);
   const [executing, setExecuting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialog(panelRef, { onClose });
 
   // The remote pane can be browsing into a path that doesn't make sense as
   // a sync root (e.g. an object-store flat prefix). We don't gate on that
@@ -90,10 +94,16 @@ export function SyncDialog({ localPath, remotePath, onClose }: Props) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="anim-modal flex max-h-[88vh] w-[40rem] flex-col overflow-hidden rounded-xl border border-border bg-bg-panel shadow-elev-3">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="anim-modal flex max-h-[88vh] w-[40rem] max-w-[92vw] flex-col overflow-hidden rounded-xl border border-border bg-bg-panel shadow-elev-3"
+      >
         <div className="flex items-center gap-2 border-b border-border bg-bg-subtle px-4 py-3">
           <ArrowRightLeft size={14} className="text-accent" />
-          <span className="text-sm font-semibold">Sync directory</span>
+          <span id={titleId} className="text-sm font-semibold">Sync directory</span>
           {activeProfile && (
             <span className="text-[11px] text-text-dim">
               · {activeProfile.name}
@@ -413,7 +423,7 @@ function ReasonBadge({ reason }: { reason: SyncReason }) {
         ? "newer"
         : "size";
   const tone =
-    reason === "missing" ? "bg-emerald-500/15 text-emerald-300" : "bg-accent-soft text-accent";
+    reason === "missing" ? "bg-success/15 text-success" : "bg-accent-soft text-accent";
   return (
     <span
       className={cn(

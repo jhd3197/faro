@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   X,
   Copy,
@@ -16,6 +16,7 @@ import {
 import { useBridge } from "@/stores/bridgeStore";
 import { useConnections } from "@/stores/connectionsStore";
 import { useLayout } from "@/stores/layoutStore";
+import { useDialog } from "@/hooks/useDialog";
 import { cn } from "@/lib/cn";
 import { relTime } from "@/lib/format";
 import type { BridgeApproval, ApprovalPolicy } from "@/lib/types";
@@ -83,12 +84,24 @@ function ApprovalModal({
   onDeny: () => void;
 }) {
   const copy = approvalCopy(approval.kind);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const denyRef = useRef<HTMLButtonElement>(null);
+  const titleId = useId();
+  // Escape denies (the safe choice); Deny takes initial focus so a stray
+  // keypress never auto-approves an agent command.
+  useDialog(panelRef, { onClose: onDeny, initialFocus: denyRef });
   return (
     <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="anim-modal w-[28rem] max-w-[92vw] rounded-xl border border-border bg-bg-panel shadow-elev-3">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="anim-modal w-[28rem] max-w-[92vw] rounded-xl border border-border bg-bg-panel shadow-elev-3"
+      >
         <div className="flex items-center gap-2 border-b border-border px-5 py-3.5">
           <ShieldCheck size={15} className="text-accent" />
-          <span className="text-[15px] font-semibold tracking-tight">
+          <span id={titleId} className="text-[15px] font-semibold tracking-tight">
             {copy.title}
           </span>
         </div>
@@ -110,6 +123,7 @@ function ApprovalModal({
           </span>
           <div className="flex gap-2">
             <button
+              ref={denyRef}
               onClick={onDeny}
               className="flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-sm text-text-muted hover:bg-bg-hover hover:text-text"
             >
@@ -227,6 +241,9 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
     setPolicy({ ...policy, ...patch });
 
   const [showToken, setShowToken] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialog(panelRef, { onClose });
 
   useEffect(() => {
     refresh();
@@ -240,17 +257,21 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
       onClick={onClose}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         onClick={(e) => e.stopPropagation()}
         className="anim-modal flex max-h-[85vh] w-[38rem] max-w-[94vw] flex-col rounded-xl border border-border bg-bg-panel shadow-elev-3"
       >
         <div className="flex items-center gap-2 border-b border-border px-5 py-3.5">
           <Radio size={15} className="text-accent" />
-          <span className="text-[15px] font-semibold tracking-tight">
+          <span id={titleId} className="text-[15px] font-semibold tracking-tight">
             Agent Bridge
           </span>
           {status.running && (
-            <span className="flex items-center gap-1 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-400">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /> running
+            <span className="flex items-center gap-1 rounded-full bg-success/15 px-1.5 py-0.5 text-[10px] font-medium text-success">
+              <span className="h-1.5 w-1.5 rounded-full bg-success" /> running
             </span>
           )}
           <div className="flex-1" />
@@ -384,7 +405,7 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
               />
             </div>
             {policy.allowAll && (
-              <div className="mt-2.5 flex items-start gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300/90">
+              <div className="mt-2.5 flex items-start gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2.5 py-1.5 text-[11px] text-warning">
                 <CircleAlert size={12} className="mt-0.5 shrink-0" />
                 The agent can run anything on enabled sessions without confirmation.
               </div>
@@ -581,7 +602,7 @@ function PolicyRow({
   return (
     <div className="flex items-start gap-3">
       <div className="min-w-0 flex-1">
-        <div className={cn("text-sm", danger && "font-medium text-amber-300")}>
+        <div className={cn("text-sm", danger && "font-medium text-warning")}>
           {label}
         </div>
         <div className="text-[11px] leading-snug text-text-dim">{help}</div>
@@ -596,5 +617,5 @@ function ActivityIcon({ kind, ok }: { kind: string; ok: boolean }) {
     return <Ban size={12} className="mt-0.5 shrink-0 text-text-dim" />;
   if (kind === "error" || !ok)
     return <CircleAlert size={12} className="mt-0.5 shrink-0 text-danger" />;
-  return <CheckCircle2 size={12} className="mt-0.5 shrink-0 text-emerald-400" />;
+  return <CheckCircle2 size={12} className="mt-0.5 shrink-0 text-success" />;
 }

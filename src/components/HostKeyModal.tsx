@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import {
   ShieldCheck,
   ShieldAlert,
@@ -6,6 +6,7 @@ import {
   X,
 } from "lucide-react";
 import { ipc, onHostPrompt } from "@/lib/ipc";
+import { useDialog } from "@/hooks/useDialog";
 import type { HostDecision, HostPromptEvent } from "@/lib/types";
 
 // Mounted once at the top of the tree. Listens for `host://prompt` events
@@ -47,9 +48,24 @@ function HostKeyDialog({
   onRespond: (d: HostDecision) => void;
 }) {
   const isMismatch = event.kind === "mismatch";
+  const panelRef = useRef<HTMLDivElement>(null);
+  const rejectRef = useRef<HTMLButtonElement>(null);
+  const titleId = useId();
+  // Escape rejects (the safe choice) and the safe action takes initial focus —
+  // pressing Enter on open can never silently trust an unverified key.
+  useDialog(panelRef, {
+    onClose: () => onRespond("reject"),
+    initialFocus: rejectRef,
+  });
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="anim-modal w-[30rem] overflow-hidden rounded-xl border border-border bg-bg-panel shadow-elev-3">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="anim-modal w-[30rem] max-w-[92vw] overflow-hidden rounded-xl border border-border bg-bg-panel shadow-elev-3"
+      >
         <div
           className={`flex items-center gap-2.5 border-b px-4 py-3 ${
             isMismatch
@@ -67,7 +83,7 @@ function HostKeyDialog({
             {isMismatch ? <ShieldAlert size={15} /> : <ShieldCheck size={15} />}
           </div>
           <div className="min-w-0 flex-1">
-            <div className="text-[13px] font-semibold">
+            <div id={titleId} className="text-[13px] font-semibold">
               {isMismatch ? "Host key has changed" : "Unknown host"}
             </div>
             <div className="truncate font-mono text-[11px] text-text-dim">
@@ -118,6 +134,7 @@ function HostKeyDialog({
 
         <div className="flex items-center justify-end gap-2 border-t border-border bg-bg-subtle px-4 py-3">
           <button
+            ref={rejectRef}
             onClick={() => onRespond("reject")}
             className="rounded-md border border-border bg-bg-panel px-3 py-1.5 text-xs font-medium hover:bg-bg-hover"
           >

@@ -264,6 +264,8 @@ function MenuBar({ menus }: { menus: MenuSpec[] }) {
       {menus.map((m, i) => (
         <div key={m.label} className="relative">
           <button
+            aria-haspopup="true"
+            aria-expanded={open === i}
             onClick={() => setOpen(open === i ? -1 : i)}
             onMouseEnter={() => {
               if (open >= 0) setOpen(i);
@@ -294,17 +296,25 @@ function MenuDropdown({
   onClose: () => void;
 }) {
   return (
-    <div className="anim-modal absolute left-0 top-7 z-50 min-w-[14rem] overflow-hidden rounded-md border border-border bg-bg-panel shadow-elev-3">
+    <div
+      role="menu"
+      className="anim-modal absolute left-0 top-7 z-50 min-w-[14rem] overflow-hidden rounded-md border border-border bg-bg-panel shadow-elev-3"
+    >
       {items.map((item, i) => {
         if ("kind" in item && item.kind === "sep") {
           return (
-            <div key={`sep-${i}`} className="my-0.5 h-px bg-border-subtle" />
+            <div
+              key={`sep-${i}`}
+              role="separator"
+              className="my-0.5 h-px bg-border-subtle"
+            />
           );
         }
         const it = item as Extract<MenuItem, { label: string }>;
         return (
           <button
             key={it.label + i}
+            role="menuitem"
             onClick={() => {
               onClose();
               // Defer the action one tick so the dropdown unmounts before the

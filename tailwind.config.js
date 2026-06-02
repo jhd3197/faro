@@ -22,11 +22,24 @@ export default {
         accent: {
           DEFAULT: "rgb(var(--accent) / <alpha-value>)",
           hover: "rgb(var(--accent-hover) / <alpha-value>)",
+          strong: "rgb(var(--accent-strong) / <alpha-value>)",
           soft: "rgb(var(--accent) / 0.15)",
         },
         danger: {
           DEFAULT: "rgb(var(--danger) / <alpha-value>)",
           soft: "rgb(var(--danger) / 0.18)",
+        },
+        success: {
+          DEFAULT: "rgb(var(--success) / <alpha-value>)",
+          soft: "rgb(var(--success) / 0.15)",
+        },
+        warning: {
+          DEFAULT: "rgb(var(--warning) / <alpha-value>)",
+          soft: "rgb(var(--warning) / 0.15)",
+        },
+        info: {
+          DEFAULT: "rgb(var(--info) / <alpha-value>)",
+          soft: "rgb(var(--info) / 0.15)",
         },
       },
       fontFamily: {

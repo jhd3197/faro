@@ -209,20 +209,20 @@ function ProfileRow({
         <IconButton
           onClick={onEdit}
           title="Edit"
-          className="opacity-0 group-hover:opacity-100"
+          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
         >
           <Pencil size={12} />
         </IconButton>
         <IconButton
           onClick={onDelete}
           title="Delete"
-          className="opacity-0 group-hover:opacity-100 hover:text-danger"
+          className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 hover:text-danger"
         >
           <Trash2 size={12} />
         </IconButton>
         <div className="ml-1">
           {active ? (
-            <PlugZap size={14} className="text-emerald-400" />
+            <PlugZap size={14} className="text-success" />
           ) : (
             <Plug size={13} className="text-text-dim" />
           )}

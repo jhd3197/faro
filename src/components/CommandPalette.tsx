@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { Search } from "lucide-react";
 import { useLayout } from "@/stores/layoutStore";
 import { useCommands, type Command } from "@/lib/commands";
+import { useDialog } from "@/hooks/useDialog";
 import { fuzzyMatch } from "@/lib/fuzzy";
 import { formatCombo } from "@/lib/shortcuts";
 import { cn } from "@/lib/cn";
@@ -20,6 +21,14 @@ export function CommandPalette() {
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const listId = useId();
+  const optionId = (i: number) => `${listId}-opt-${i}`;
+  useDialog(panelRef, {
+    onClose: () => setOpen(false),
+    enabled: open,
+    initialFocus: inputRef,
+  });
 
   useEffect(() => {
     if (open) {
@@ -89,6 +98,10 @@ export function CommandPalette() {
       onClick={() => setOpen(false)}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Command palette"
         onClick={(e) => e.stopPropagation()}
         className="anim-modal flex max-h-[70vh] w-[34rem] max-w-[92vw] flex-col overflow-hidden rounded-xl border border-border bg-bg-panel shadow-elev-3"
       >
@@ -103,10 +116,23 @@ export function CommandPalette() {
             }}
             onKeyDown={onKeyDown}
             placeholder="Type a command or search…"
+            role="combobox"
+            aria-expanded={results.length > 0}
+            aria-controls={listId}
+            aria-activedescendant={
+              results.length ? optionId(active) : undefined
+            }
+            aria-label="Search commands"
             className="w-full bg-transparent text-sm outline-none placeholder:text-text-dim"
           />
         </div>
-        <div ref={listRef} className="overflow-y-auto py-1">
+        <div
+          ref={listRef}
+          id={listId}
+          role="listbox"
+          aria-label="Commands"
+          className="overflow-y-auto py-1"
+        >
           {results.length === 0 ? (
             <div className="px-4 py-8 text-center text-xs text-text-dim">
               No matching commands
@@ -116,6 +142,10 @@ export function CommandPalette() {
               <button
                 key={r.c.id}
                 data-idx={i}
+                role="option"
+                id={optionId(i)}
+                aria-selected={i === active}
+                tabIndex={-1}
                 onMouseMove={() => setActive(i)}
                 onClick={() => run(r.c)}
                 className={cn(

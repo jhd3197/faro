@@ -35,4 +35,4 @@ Thumbs.db
 *.tsbuildinfo
 .eslintcache
 *.png
-/.github/skills
+/.claude/skills

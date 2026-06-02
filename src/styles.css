@@ -14,11 +14,15 @@
   --border-subtle: 27 31 42;
   --text: 234 236 242;
   --text-muted: 153 161 178;
-  --text-dim: 110 119 138;
+  --text-dim: 128 137 156;
   --accent: 139 127 246;
   --accent-hover: 121 105 240;
+  --accent-strong: 104 90 222;
   --accent-glow: 139 127 246;
   --danger: 248 113 113;
+  --success: 52 211 153;
+  --warning: 251 191 36;
+  --info: 96 165 250;
   --shadow: 0 0 0;
   color-scheme: dark;
 }
@@ -32,11 +36,15 @@
   --border-subtle: 227 232 240;
   --text: 23 28 36;
   --text-muted: 80 90 105;
-  --text-dim: 135 144 158;
+  --text-dim: 98 107 124;
   --accent: 99 88 220;
   --accent-hover: 79 70 200;
+  --accent-strong: 79 70 200;
   --accent-glow: 139 127 246;
   --danger: 220 38 38;
+  --success: 4 120 87;
+  --warning: 180 83 9;
+  --info: 37 99 235;
   --shadow: 30 41 59;
   color-scheme: light;
 }
@@ -53,11 +61,15 @@
   --border-subtle: 42 47 69;
   --text: 192 202 245;
   --text-muted: 154 165 206;
-  --text-dim: 86 95 137;
+  --text-dim: 138 149 184;
   --accent: 122 162 247;
   --accent-hover: 106 146 231;
+  --accent-strong: 71 102 214;
   --accent-glow: 122 162 247;
   --danger: 247 118 142;
+  --success: 158 206 106;
+  --warning: 224 175 104;
+  --info: 125 207 255;
   --shadow: 0 0 0;
   color-scheme: dark;
 }
@@ -71,11 +83,15 @@
   --border-subtle: 59 66 82;
   --text: 236 239 244;
   --text-muted: 216 222 233;
-  --text-dim: 123 136 161;
+  --text-dim: 168 178 198;
   --accent: 136 192 208;
   --accent-hover: 121 176 192;
+  --accent-strong: 76 110 156;
   --accent-glow: 136 192 208;
   --danger: 191 97 106;
+  --success: 163 190 140;
+  --warning: 235 203 139;
+  --info: 140 175 205;
   --shadow: 0 0 0;
   color-scheme: dark;
 }
@@ -89,11 +105,15 @@
   --border-subtle: 52 55 70;
   --text: 248 248 242;
   --text-muted: 184 185 196;
-  --text-dim: 98 114 164;
+  --text-dim: 156 161 188;
   --accent: 189 147 249;
   --accent-hover: 168 127 228;
+  --accent-strong: 124 85 214;
   --accent-glow: 189 147 249;
   --danger: 255 85 85;
+  --success: 80 250 123;
+  --warning: 255 184 108;
+  --info: 139 233 253;
   --shadow: 0 0 0;
   color-scheme: dark;
 }
@@ -107,13 +127,29 @@
   --border-subtle: 49 50 68;
   --text: 205 214 244;
   --text-muted: 166 173 200;
-  --text-dim: 108 112 134;
+  --text-dim: 151 156 182;
   --accent: 203 166 247;
   --accent-hover: 183 146 227;
+  --accent-strong: 130 88 216;
   --accent-glow: 203 166 247;
   --danger: 243 139 168;
+  --success: 166 227 161;
+  --warning: 250 179 135;
+  --info: 137 180 250;
   --shadow: 0 0 0;
   color-scheme: dark;
+}
+
+/* Motion system. Theme-independent. Exponential ease-out curves read as
+   "confident and decisive" — they decelerate hard at the end, which suits a
+   tool that should feel instant. Durations stay in the product range (snappy,
+   never choreographed); see the prefers-reduced-motion block at the end. */
+:root {
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 220ms;
 }
 
 html,
@@ -144,14 +180,19 @@ body,
   overflow: hidden;
 }
 
-/* Smooth theme transition for the most visible surfaces. Scoped to a few
-   properties so we don't slow down every hover/click everywhere. */
-body,
-body * {
+/* Theme crossfade. The transition is applied ONLY while <html> carries the
+   `.theming` class (main.tsx adds it for ~260ms when the theme changes), so
+   during normal use nothing carries a transition: hovers and selection are
+   instant, and a directory with thousands of rows isn't styling thousands of
+   idle transition declarations. */
+html.theming,
+html.theming *,
+html.theming *::before,
+html.theming *::after {
   transition:
-    background-color 180ms ease,
-    border-color 180ms ease,
-    color 180ms ease;
+    background-color var(--dur-base) var(--ease-out-quart),
+    border-color var(--dur-base) var(--ease-out-quart),
+    color var(--dur-base) var(--ease-out-quart);
 }
 /* Exclude xterm — it has its own renderer and any transition causes flicker. */
 .xterm,
@@ -163,11 +204,12 @@ body * {
 button,
 [role="button"] {
   transition:
-    background-color 120ms ease,
-    color 120ms ease,
-    border-color 120ms ease,
-    transform 80ms ease,
-    box-shadow 120ms ease;
+    background-color var(--dur-fast) var(--ease-out-quart),
+    color var(--dur-fast) var(--ease-out-quart),
+    border-color var(--dur-fast) var(--ease-out-quart),
+    transform 80ms var(--ease-out-quart),
+    filter var(--dur-fast) var(--ease-out-quart),
+    box-shadow var(--dur-fast) var(--ease-out-quart);
 }
 button:active,
 [role="button"]:active {
@@ -274,25 +316,23 @@ textarea:focus-visible:not(.xterm-helper-textarea),
   background: rgb(var(--accent) / 0.35);
 }
 
-/* Subtle accent gradient utility for primary action buttons. */
+/* Primary-action fill. Uses --accent-strong (a deeper shade of the accent that
+   clears 4.5:1 against white text in every theme — the lighter --accent stays
+   the tint/text/ring color). The top highlight fades out by 45% height so it
+   never sits over the label and pulls contrast back down. */
 .btn-accent {
-  background:
-    linear-gradient(
-      180deg,
-      rgb(var(--accent) / 1) 0%,
-      rgb(var(--accent-hover) / 1) 100%
-    );
+  background-color: rgb(var(--accent-strong));
+  background-image: linear-gradient(
+    180deg,
+    rgb(255 255 255 / 0.12) 0%,
+    rgb(255 255 255 / 0) 45%
+  );
   box-shadow:
-    inset 0 1px 0 0 rgb(255 255 255 / 0.12),
-    0 1px 0 0 rgb(var(--shadow) / 0.2);
+    inset 0 1px 0 0 rgb(255 255 255 / 0.16),
+    0 1px 2px -1px rgb(var(--shadow) / 0.4);
 }
 .btn-accent:hover {
-  background:
-    linear-gradient(
-      180deg,
-      rgb(var(--accent-hover) / 1) 0%,
-      rgb(var(--accent-hover) / 1) 100%
-    );
+  filter: brightness(1.08);
 }
 
 /* A subtle glow used for the active connection chip / accent dot. */
@@ -300,11 +340,12 @@ textarea:focus-visible:not(.xterm-helper-textarea),
   box-shadow: 0 0 0 2px rgb(var(--bg-panel)), 0 0 12px rgb(var(--accent-glow) / 0.4);
 }
 
-/* Modal/popover entrance animation. */
+/* Modal/popover entrance. Expo ease-out: a quick rise that settles decisively,
+   so a dialog feels like it snaps into place rather than drifting in. */
 @keyframes fadeInUp {
   from {
     opacity: 0;
-    transform: translateY(4px) scale(0.98);
+    transform: translateY(6px) scale(0.985);
   }
   to {
     opacity: 1;
@@ -312,7 +353,7 @@ textarea:focus-visible:not(.xterm-helper-textarea),
   }
 }
 .anim-modal {
-  animation: fadeInUp 140ms ease-out;
+  animation: fadeInUp var(--dur-base) var(--ease-out-expo);
 }
 
 @keyframes fadeIn {
@@ -324,9 +365,10 @@ textarea:focus-visible:not(.xterm-helper-textarea),
   }
 }
 .anim-fade {
-  animation: fadeIn 160ms ease-out;
+  animation: fadeIn 160ms var(--ease-out-quart);
 }
 
+/* Toast / transfer-panel entrance — rises from the edge it's anchored to. */
 @keyframes slideInFromBottom {
   from {
     opacity: 0;
@@ -338,7 +380,7 @@ textarea:focus-visible:not(.xterm-helper-textarea),
   }
 }
 .anim-slide-up {
-  animation: slideInFromBottom 200ms ease-out;
+  animation: slideInFromBottom var(--dur-slow) var(--ease-out-expo);
 }
 
 /* Skeleton shimmer — a moving highlight band over a base block. Tints with the
@@ -360,4 +402,70 @@ textarea:focus-visible:not(.xterm-helper-textarea),
   );
   background-size: 200% 100%;
   animation: faroShimmer 1.4s ease-in-out infinite;
+}
+
+/* ---------------------------------------------------------------------------
+   Reduced motion. Honors the OS "reduce motion" preference. The strategy is not
+   to freeze everything — a frozen spinner reads as "hung" — but to strip motion
+   that TRAVELS (slides, scale pops, the expanding connection ping) while keeping
+   in-place, non-vestibular cues (a gentle opacity breathe, a slow spinner) so
+   "loading" and "active" still read.
+   --------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* No layout-jumping press feedback, no hover brightness pulse. */
+  button:active,
+  [role="button"]:active {
+    transform: none !important;
+  }
+  .btn-accent:hover {
+    filter: none !important;
+  }
+
+  /* Entrances become a soft in-place crossfade, never a slide or scale pop. */
+  .anim-modal,
+  .anim-fade,
+  .anim-slide-up {
+    animation: faroFadeReduced 140ms var(--ease-out-quart) !important;
+  }
+
+  /* Skeletons keep signalling "loading" with an in-place breathe instead of a
+     highlight that sweeps across the screen. */
+  .faro-shimmer {
+    background-image: none !important;
+    background: rgb(var(--bg-hover)) !important;
+    animation: faroBreatheReduced 1.6s ease-in-out infinite !important;
+  }
+
+  /* Spinners are small, essential, and rotate in place — keep them turning
+     (a touch slower) rather than freezing mid-load. */
+  .animate-spin {
+    animation: spin 1.4s linear infinite !important;
+  }
+}
+
+@keyframes faroFadeReduced {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes faroBreatheReduced {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.55;
+  }
 }

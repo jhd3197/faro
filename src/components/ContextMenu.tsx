@@ -29,11 +29,39 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
     };
     window.addEventListener("mousedown", onAnyClick);
     window.addEventListener("keydown", onKey);
+    // Move focus into the menu so it's keyboard-operable straight away.
+    const raf = requestAnimationFrame(() =>
+      ref.current
+        ?.querySelector<HTMLButtonElement>("button:not([disabled])")
+        ?.focus()
+    );
     return () => {
+      cancelAnimationFrame(raf);
       window.removeEventListener("mousedown", onAnyClick);
       window.removeEventListener("keydown", onKey);
     };
   }, [onClose]);
+
+  const onMenuKeyDown = (e: React.KeyboardEvent) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) return;
+    e.preventDefault();
+    const btns = Array.from(
+      ref.current?.querySelectorAll<HTMLButtonElement>(
+        "button:not([disabled])"
+      ) ?? []
+    );
+    if (btns.length === 0) return;
+    const idx = btns.indexOf(document.activeElement as HTMLButtonElement);
+    const next =
+      e.key === "Home"
+        ? 0
+        : e.key === "End"
+          ? btns.length - 1
+          : e.key === "ArrowDown"
+            ? (idx + 1) % btns.length
+            : (idx - 1 + btns.length) % btns.length;
+    btns[next]?.focus();
+  };
 
   // Clamp to viewport.
   const maxX = window.innerWidth - 220;
@@ -44,12 +72,16 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
   return (
     <div
       ref={ref}
+      role="menu"
+      aria-label="Context menu"
+      onKeyDown={onMenuKeyDown}
       style={{ left, top }}
       className="anim-modal fixed z-50 min-w-[200px] rounded-lg border border-border bg-bg-panel py-1 shadow-elev-3"
     >
       {items.map((item, i) => (
         <div key={i}>
           <button
+            role="menuitem"
             disabled={item.disabled}
             onClick={() => {
               item.onClick();

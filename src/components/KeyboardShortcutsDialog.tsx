@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 import { X, Keyboard } from "lucide-react";
 import { useLayout } from "@/stores/layoutStore";
 import { useCommands } from "@/lib/commands";
+import { useDialog } from "@/hooks/useDialog";
 import { formatCombo } from "@/lib/shortcuts";
 
 // Global shortcuts that aren't registry commands (palette + FilePane keys).
@@ -21,6 +22,9 @@ export function KeyboardShortcutsDialog() {
   const setOpen = useLayout((s) => s.setShortcutsOpen);
   const commands = useCommands();
   const [q, setQ] = useState("");
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialog(panelRef, { onClose: () => setOpen(false), enabled: open });
 
   const groups = useMemo(() => {
     const rows = [
@@ -47,12 +51,16 @@ export function KeyboardShortcutsDialog() {
       onClick={() => setOpen(false)}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         onClick={(e) => e.stopPropagation()}
-        className="anim-modal flex max-h-[80vh] w-[32rem] flex-col rounded-xl border border-border bg-bg-panel shadow-elev-3"
+        className="anim-modal flex max-h-[80vh] w-[32rem] max-w-[92vw] flex-col rounded-xl border border-border bg-bg-panel shadow-elev-3"
       >
         <div className="flex items-center gap-2 border-b border-border px-5 py-3.5">
           <Keyboard size={14} className="text-text-muted" />
-          <span className="text-[15px] font-semibold tracking-tight">
+          <span id={titleId} className="text-[15px] font-semibold tracking-tight">
             Keyboard Shortcuts
           </span>
           <div className="flex-1" />
