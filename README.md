@@ -6,7 +6,7 @@
 
 **A modern desktop client for SFTP, FTP, SSH, and S3-compatible storage.**
 
-[![Version](https://img.shields.io/badge/version-1.3.2-8b7ff6?style=flat-square)](https://github.com/jhd3197/faro/releases)
+[![Version](https://img.shields.io/badge/version-1.3.3-8b7ff6?style=flat-square)](https://github.com/jhd3197/faro/releases)
 [![License](https://img.shields.io/badge/license-MIT-8b7ff6?style=flat-square)](LICENSE)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-8b7ff6?style=flat-square)](https://tauri.app)
 
