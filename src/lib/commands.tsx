@@ -43,6 +43,7 @@ export function useCommands(): Command[] {
   const togglePanel = useTransfers((s) => s.togglePanel);
 
   const toggleTerminal = useLayout((s) => s.toggleTerminal);
+  const toggleConsole = useLayout((s) => s.toggleConsole);
   const openDialog = useLayout((s) => s.openDialog);
   const setShortcutsOpen = useLayout((s) => s.setShortcutsOpen);
 
@@ -94,11 +95,11 @@ export function useCommands(): Command[] {
     },
     {
       id: "agent-console",
-      title: "Agent console (live)…",
+      title: "Toggle Agent console (live)",
       group: "General",
       icon: <TerminalSquare size={14} />,
-      keywords: "agent console live output stream terminal bridge watch",
-      run: () => openDialog("agentConsole"),
+      keywords: "agent console live output stream terminal bridge watch dock",
+      run: () => toggleConsole(),
     },
     {
       id: "about",

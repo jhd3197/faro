@@ -33,7 +33,8 @@ import { Toaster } from "./components/ui/Toaster";
 import { CommandPalette } from "./components/CommandPalette";
 import { KeyboardShortcutsDialog } from "./components/KeyboardShortcutsDialog";
 import { AgentBridge, AgentBridgeHost } from "./components/AgentBridge";
-import { AgentConsole } from "./components/AgentConsole";
+import { AgentConsoleDock } from "./components/AgentConsole";
+import { ConnectionTabs } from "./components/ConnectionTabs";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { relTime } from "./lib/format";
 import { cn } from "./lib/cn";
@@ -47,6 +48,7 @@ export default function App() {
 
   const terminalOpen = useLayout((s) => s.terminalOpen);
   const toggleTerminal = useLayout((s) => s.toggleTerminal);
+  const consoleOpen = useLayout((s) => s.consoleOpen);
   const dialog = useLayout((s) => s.dialog);
   const closeDialog = useLayout((s) => s.closeDialog);
   const togglePanel = useTransfers((s) => s.togglePanel);
@@ -70,7 +72,6 @@ export default function App() {
       {dialog === "import" && <ImportDialog onClose={closeDialog} />}
       {dialog === "about" && <AboutDialog onClose={closeDialog} />}
       {dialog === "agentBridge" && <AgentBridge onClose={closeDialog} />}
-      {dialog === "agentConsole" && <AgentConsole onClose={closeDialog} />}
       <HostKeyModal />
       <Toaster />
       <AgentBridgeHost />
@@ -79,9 +80,15 @@ export default function App() {
       <div className="flex flex-1 overflow-hidden">
         <ConnectionManager />
         <div className="flex flex-1 flex-col">
+          <ConnectionTabs />
           <div className="flex-1 overflow-hidden">
             <DualPaneBrowser />
           </div>
+          {consoleOpen && (
+            <div className="h-64 border-t border-border">
+              <AgentConsoleDock />
+            </div>
+          )}
           {activeSessionId && terminalOpen && supportsTerminal && (
             <div className="h-72 border-t border-border">
               <TerminalDock sessionId={activeSessionId} />
@@ -142,7 +149,12 @@ function StatusBar({
   const [notifOpen, setNotifOpen] = useState(false);
 
   const bridgeRunning = useBridge((s) => s.status.running);
+  const consoleRunning = useBridge((s) =>
+    s.console.filter((e) => e.status === "running").length
+  );
   const openDialog = useLayout((s) => s.openDialog);
+  const consoleOpen = useLayout((s) => s.consoleOpen);
+  const toggleConsole = useLayout((s) => s.toggleConsole);
 
   // Dismiss the status-bar popovers on Escape or a click outside, matching how
   // every other overlay closes (the hover-leave behavior stays as a bonus).
@@ -327,9 +339,18 @@ function StatusBar({
             className={bridgeRunning ? "text-success" : undefined}
           />
         }
-        title="Agent Bridge — let a local AI agent run commands on your server"
+        title="Agent Bridge — let a local AI agent run commands on your servers"
       >
         Bridge
+      </PillButton>
+      <PillButton
+        active={consoleOpen}
+        onClick={toggleConsole}
+        icon={<TerminalSquare size={11} />}
+        badge={consoleRunning > 0 ? consoleRunning : undefined}
+        title="Agent console — live view of what the agent is doing over the bridge"
+      >
+        Console
       </PillButton>
       <PillButton
         active={terminalOpen}

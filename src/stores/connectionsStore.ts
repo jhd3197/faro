@@ -4,9 +4,20 @@ import { toast } from "./toastStore";
 import type { ConnectionProfile, SessionId } from "@/lib/types";
 import { useTerminals } from "./terminalsStore";
 
+// One live connection. The backend keeps every session alive in a map, so the
+// app can hold several at once; this is the frontend's view of them.
+export interface LiveSession {
+  sessionId: SessionId;
+  profileId: string;
+}
+
 interface ConnectionsState {
   profiles: ConnectionProfile[];
+  /** Every live connection, in the order they were opened. */
+  sessions: LiveSession[];
+  /** The focused session — drives the browser, terminal and status bar. */
   activeSessionId: SessionId | null;
+  /** Profile of the focused session; kept in sync with activeSessionId. */
   activeProfileId: string | null;
   connecting: boolean;
   error: string | null;
@@ -14,12 +25,17 @@ interface ConnectionsState {
   loadProfiles: () => Promise<void>;
   saveProfile: (p: ConnectionProfile) => Promise<void>;
   deleteProfile: (id: string) => Promise<void>;
+  /** Connect to a profile, or focus its existing session if already open. */
   connect: (profileId: string) => Promise<void>;
-  disconnect: () => Promise<void>;
+  /** Disconnect one session (defaults to the active one). */
+  disconnect: (sessionId?: SessionId) => Promise<void>;
+  /** Focus an already-open session. */
+  setActiveSession: (sessionId: SessionId) => void;
 }
 
 export const useConnections = create<ConnectionsState>((set, get) => ({
   profiles: [],
+  sessions: [],
   activeSessionId: null,
   activeProfileId: null,
   connecting: false,
@@ -41,15 +57,23 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
   },
 
   connect: async (profileId) => {
+    // Already connected to this profile? Just focus its tab.
+    const existing = get().sessions.find((s) => s.profileId === profileId);
+    if (existing) {
+      get().setActiveSession(existing.sessionId);
+      return;
+    }
+
     set({ connecting: true, error: null });
     const profile = get().profiles.find((p) => p.id === profileId);
     try {
       const sessionId = await ipc.connect(profileId);
-      set({
+      set((s) => ({
+        sessions: [...s.sessions, { sessionId, profileId }],
         activeSessionId: sessionId,
         activeProfileId: profileId,
         connecting: false,
-      });
+      }));
       toast.success(
         "Connected",
         profile
@@ -63,13 +87,35 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
     }
   },
 
-  disconnect: async () => {
-    const sid = get().activeSessionId;
+  disconnect: async (sessionId) => {
+    const sid = sessionId ?? get().activeSessionId;
     if (!sid) return;
-    const profile = get().profiles.find((p) => p.id === get().activeProfileId);
-    await ipc.disconnect(sid);
+    const target = get().sessions.find((s) => s.sessionId === sid);
+    const profile = get().profiles.find((p) => p.id === target?.profileId);
+    try {
+      await ipc.disconnect(sid);
+    } catch {
+      // best effort — drop it locally regardless
+    }
     useTerminals.getState().dropSessionTabs(sid);
-    set({ activeSessionId: null, activeProfileId: null });
+    set((s) => {
+      const sessions = s.sessions.filter((x) => x.sessionId !== sid);
+      // If we closed the focused session, fall back to the most recent one.
+      let activeSessionId = s.activeSessionId;
+      let activeProfileId = s.activeProfileId;
+      if (s.activeSessionId === sid) {
+        const next = sessions[sessions.length - 1] ?? null;
+        activeSessionId = next?.sessionId ?? null;
+        activeProfileId = next?.profileId ?? null;
+      }
+      return { sessions, activeSessionId, activeProfileId };
+    });
     toast.info("Disconnected", profile?.name);
+  },
+
+  setActiveSession: (sessionId) => {
+    const target = get().sessions.find((s) => s.sessionId === sessionId);
+    if (!target) return;
+    set({ activeSessionId: sessionId, activeProfileId: target.profileId });
   },
 }));

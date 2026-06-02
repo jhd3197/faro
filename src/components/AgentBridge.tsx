@@ -227,15 +227,22 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
   const setSessionAccess = useBridge((s) => s.setSessionAccess);
   const setPolicy = useBridge((s) => s.setPolicy);
   const refresh = useBridge((s) => s.refresh);
-  const openDialog = useLayout((s) => s.openDialog);
+  const setConsoleOpen = useLayout((s) => s.setConsoleOpen);
 
   const activeSessionId = useConnections((s) => s.activeSessionId);
-  const activeProfileId = useConnections((s) => s.activeProfileId);
+  const sessions = useConnections((s) => s.sessions);
   const profiles = useConnections((s) => s.profiles);
-  const activeProfile = profiles.find((p) => p.id === activeProfileId);
-  const isSsh = activeProfile?.protocol === "sftp";
-  const granted =
-    !!activeSessionId && status.enabledSessions.includes(activeSessionId);
+  // Every live connection, paired with its profile, for per-session toggles.
+  const liveSessions = sessions
+    .map((s) => ({ ...s, profile: profiles.find((p) => p.id === s.profileId) }))
+    .filter((s) => s.profile);
+  const anyGranted = status.enabledSessions.length > 0;
+  // The session the copy-paste setup snippet targets: prefer the focused one if
+  // it's enabled, otherwise the first enabled session.
+  const setupSessionId =
+    activeSessionId && status.enabledSessions.includes(activeSessionId)
+      ? activeSessionId
+      : status.enabledSessions[0] ?? null;
   const policy = status.policy;
   const patchPolicy = (patch: Partial<ApprovalPolicy>) =>
     setPolicy({ ...policy, ...patch });
@@ -249,7 +256,7 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
     refresh();
   }, [refresh]);
 
-  const canCopySetup = status.running && granted && !!activeSessionId;
+  const canCopySetup = status.running && anyGranted && !!setupSessionId;
 
   return (
     <div
@@ -276,7 +283,10 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
           )}
           <div className="flex-1" />
           <button
-            onClick={() => openDialog("agentConsole")}
+            onClick={() => {
+              setConsoleOpen(true);
+              onClose();
+            }}
             className="flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-text-muted hover:bg-bg-hover hover:text-text"
           >
             <TerminalIcon size={12} /> Live console
@@ -346,31 +356,54 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
 
           {/* Access */}
           <Card title="Server access">
-            {!activeSessionId ? (
+            {liveSessions.length === 0 ? (
               <div className="text-xs text-text-dim">
                 Connect to a server first, then grant the agent access to it here.
+                Each connection gets its own toggle — bridge as many at once as
+                you like.
               </div>
             ) : (
-              <div className="flex items-center gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm">
-                    Allow agent access —{" "}
-                    <span className="font-medium">{activeProfile?.name}</span>
-                  </div>
-                  <div className="truncate font-mono text-[11px] text-text-dim">
-                    {activeProfile?.username}@{activeProfile?.host}
-                  </div>
-                  {!isSsh && (
-                    <div className="mt-0.5 text-[11px] text-text-dim">
-                      File ops only (browse, read, search, transfer) — exec needs
-                      an SSH session.
+              <div className="space-y-1.5">
+                {liveSessions.map(({ sessionId, profile }) => {
+                  const p = profile!;
+                  const isSsh = p.protocol === "sftp";
+                  const isObject = p.protocol === "s3" || p.protocol === "azure";
+                  return (
+                    <div
+                      key={sessionId}
+                      className="flex items-center gap-3 rounded-md bg-bg/60 px-2.5 py-2"
+                    >
+                      <span
+                        className="h-2.5 w-2.5 shrink-0 rounded-full"
+                        style={{ background: p.color || "rgb(var(--accent))" }}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 text-sm">
+                          <span className="truncate font-medium">{p.name}</span>
+                          {sessionId === activeSessionId && (
+                            <span className="shrink-0 rounded-sm bg-accent-soft px-1 text-[9px] font-medium uppercase tracking-wider text-accent">
+                              active
+                            </span>
+                          )}
+                        </div>
+                        <div className="truncate font-mono text-[11px] text-text-dim">
+                          {isObject
+                            ? `${p.protocol}://${p.bucket ?? "?"}`
+                            : `${p.username}@${p.host}`}
+                        </div>
+                        {!isSsh && (
+                          <div className="mt-0.5 text-[11px] text-text-dim">
+                            File ops only — exec needs an SSH session.
+                          </div>
+                        )}
+                      </div>
+                      <Toggle
+                        checked={status.enabledSessions.includes(sessionId)}
+                        onChange={(v) => setSessionAccess(sessionId, v)}
+                      />
                     </div>
-                  )}
-                </div>
-                <Toggle
-                  checked={granted}
-                  onChange={(v) => setSessionAccess(activeSessionId, v)}
-                />
+                  );
+                })}
               </div>
             )}
           </Card>
@@ -447,7 +480,7 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
                     ? skillMd(
                         status.url ?? "",
                         status.token ?? "",
-                        activeSessionId ?? ""
+                        setupSessionId ?? ""
                       )
                     : ""
                 }

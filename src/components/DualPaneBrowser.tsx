@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { FilePane } from "./FilePane";
 import { SyncDialog } from "./SyncDialog";
 import { useConnections } from "@/stores/connectionsStore";
@@ -20,14 +20,19 @@ export function DualPaneBrowser() {
   const [localPath, setLocalPath] = useState(
     navigator.userAgent.includes("Windows") ? "C:\\" : "/"
   );
-  const [remotePath, setRemotePath] = useState(
-    profile?.defaultRemotePath || "."
-  );
+  // Each live session keeps its own remote location, so switching connection
+  // tabs returns you to where you left off on that server.
+  const [remotePaths, setRemotePaths] = useState<Record<string, string>>({});
   const [syncOpen, setSyncOpen] = useState(false);
 
-  useEffect(() => {
-    setRemotePath(profile?.defaultRemotePath || ".");
-  }, [profile?.id]);
+  const remotePath =
+    (activeSessionId && remotePaths[activeSessionId]) ||
+    profile?.defaultRemotePath ||
+    ".";
+  const setRemotePath = (path: string) => {
+    if (!activeSessionId) return;
+    setRemotePaths((m) => ({ ...m, [activeSessionId]: path }));
+  };
 
   const uploadAll = (entries: DirEntry[]) => {
     if (!activeSessionId) return;
@@ -65,14 +70,19 @@ export function DualPaneBrowser() {
       />
       <div className="relative w-px bg-border">
         {activeSessionId && (
-          <button
-            onClick={() => setSyncOpen(true)}
-            title="Sync this folder with the remote pane"
-            className="btn-accent absolute left-1/2 top-3 z-raised flex h-6 -translate-x-1/2 items-center gap-1 rounded-full px-2 text-[10px] font-medium uppercase tracking-wider text-white shadow-elev-2"
-          >
-            <ArrowRightLeft size={10} />
-            Sync
-          </button>
+          // Centering lives on the wrapper so the button keeps its own
+          // transform for the press-scale (button:active scale would otherwise
+          // wipe out a -translate centering and make it jump on click).
+          <div className="absolute left-1/2 top-1/2 z-raised -translate-x-1/2 -translate-y-1/2">
+            <button
+              onClick={() => setSyncOpen(true)}
+              title="Sync folders"
+              aria-label="Sync folders"
+              className="flex h-7 w-7 items-center justify-center rounded-full border border-border bg-bg-subtle text-text-muted shadow-elev-1 hover:border-accent hover:bg-accent-soft hover:text-accent hover:shadow-elev-2"
+            >
+              <ArrowRightLeft size={13} />
+            </button>
+          </div>
         )}
       </div>
       <FilePane

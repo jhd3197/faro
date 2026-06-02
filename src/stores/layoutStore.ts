@@ -8,13 +8,18 @@ export type AppDialog =
   | "newConnection"
   | "import"
   | "about"
-  | "agentBridge"
-  | "agentConsole";
+  | "agentBridge";
 
 interface LayoutState {
   terminalOpen: boolean;
   setTerminalOpen: (open: boolean) => void;
   toggleTerminal: () => void;
+
+  // The Agent console is a dockable bottom panel (not a modal) so it can sit
+  // open alongside the file browser and the Bridge control panel.
+  consoleOpen: boolean;
+  setConsoleOpen: (open: boolean) => void;
+  toggleConsole: () => void;
 
   dialog: AppDialog | null;
   openDialog: (d: AppDialog) => void;
@@ -32,6 +37,10 @@ export const useLayout = create<LayoutState>((set) => ({
   terminalOpen: false,
   setTerminalOpen: (open) => set({ terminalOpen: open }),
   toggleTerminal: () => set((s) => ({ terminalOpen: !s.terminalOpen })),
+
+  consoleOpen: false,
+  setConsoleOpen: (open) => set({ consoleOpen: open }),
+  toggleConsole: () => set((s) => ({ consoleOpen: !s.consoleOpen })),
 
   dialog: null,
   openDialog: (d) => set({ dialog: d }),

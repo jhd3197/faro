@@ -20,7 +20,6 @@ export function TerminalDock({ sessionId }: { sessionId: SessionId }) {
   const closeTab = useTerminals((s) => s.closeTab);
   const setActive = useTerminals((s) => s.setActive);
   const renameTab = useTerminals((s) => s.renameTab);
-  const dropSessionTabs = useTerminals((s) => s.dropSessionTabs);
 
   const sessionTabs = tabs.filter((t) => t.sessionId === sessionId);
 
@@ -40,15 +39,10 @@ export function TerminalDock({ sessionId }: { sessionId: SessionId }) {
     }
   }, [activeId, sessionTabs, setActive]);
 
-  // When the session disconnects (sessionId changes), drop tabs from prior
-  // sessions so they don't linger. We can't watch "disconnect" directly, so we
-  // rely on the parent unmounting this dock when there's no session.
-  useEffect(() => {
-    return () => {
-      // On unmount, drop our session's tabs.
-      dropSessionTabs(sessionId);
-    };
-  }, [sessionId, dropSessionTabs]);
+  // Disconnecting a session drops its tabs (handled in the connections store),
+  // so we must NOT drop them here on every session switch — otherwise flipping
+  // connection tabs would wipe the other server's shells. Tabs persist until
+  // the session is actually closed.
 
   const closing = (id: string) => {
     closeTab(id);
