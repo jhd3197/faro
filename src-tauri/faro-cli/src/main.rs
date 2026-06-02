@@ -48,6 +48,20 @@ enum Cmd {
         bytes: bool,
     },
 
+    /// Run a shell command on a saved SSH profile's server.
+    ///
+    /// Connects with the profile's stored credentials and runs the command
+    /// non-interactively, the same as typing it into that server's shell.
+    /// stdout/stderr are passed through and the command's exit code becomes
+    /// this process's exit code.
+    Exec {
+        /// Saved profile name or id (must be SSH/SFTP).
+        profile: String,
+        /// The command to run. Quote it, or pass it as trailing arguments.
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
+
     /// Copy a file from one location to another.
     Cp {
         source: String,
@@ -122,6 +136,7 @@ async fn run(cli: Cli) -> Result<()> {
 
     match cli.command {
         Cmd::Ls { target, bytes } => cmd_ls(&store, &target, bytes).await,
+        Cmd::Exec { profile, command } => cmd_exec(&store, &profile, &command).await,
         Cmd::Cp { source, destination } => cmd_cp(&store, &source, &destination).await,
         Cmd::Mv { source, destination } => cmd_mv(&store, &source, &destination).await,
         Cmd::Rm { target, recursive } => cmd_rm(&store, &target, recursive).await,
@@ -323,6 +338,34 @@ fn print_entry(e: &DirEntry, bytes: bool) {
         name = e.name
     );
     let _ = e.modified;
+}
+
+async fn cmd_exec(store: &ProfileStore, profile_name: &str, command: &[String]) -> Result<()> {
+    let profile = find_profile(store, profile_name).await?;
+    let session = open_session(&profile).await?;
+    let Session::Ssh(ssh) = session else {
+        bail!(
+            "`exec` needs an SSH/SFTP profile; `{}` is {}",
+            profile.name,
+            profile.protocol
+        );
+    };
+    let cmd = command.join(" ");
+    let out = ssh
+        .exec(&cmd)
+        .await
+        .with_context(|| format!("exec `{cmd}`"))?;
+
+    let mut so = io::stdout();
+    so.write_all(out.stdout.as_bytes()).ok();
+    so.flush().ok();
+    if !out.stderr.is_empty() {
+        let mut se = io::stderr();
+        se.write_all(out.stderr.as_bytes()).ok();
+        se.flush().ok();
+    }
+    // Propagate the remote command's exit code as our own.
+    std::process::exit(out.exit_code.unwrap_or(0))
 }
 
 async fn cmd_cp(store: &ProfileStore, src: &str, dst: &str) -> Result<()> {

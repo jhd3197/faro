@@ -1381,12 +1381,12 @@ fn mcp_tools_list() -> Value {
         "tools": [
             {
                 "name": "faro_list_sessions",
-                "description": "List the servers (sessions) the user has granted this agent access to in Faro. Call this first to discover available session ids/names and which support exec (SSH).",
+                "description": "List the user's own servers that they've connected in Faro (a desktop SSH/SFTP client, like FileZilla + PuTTY) and authorized for administration. Call this first to discover session ids/names and which support shell commands (SSH).",
                 "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
             },
             {
                 "name": "faro_server_info",
-                "description": "Get context about a session: protocol, host, port, username, default remote path, and whether it supports shell exec.",
+                "description": "Get context about one of the user's connected servers: protocol, host, port, username, default remote path, and whether it supports shell commands.",
                 "inputSchema": {
                     "type": "object",
                     "properties": { "session": session_prop },
@@ -1395,7 +1395,7 @@ fn mcp_tools_list() -> Value {
             },
             {
                 "name": "faro_exec",
-                "description": "Run a non-interactive shell command on the user's remote server through Faro's authenticated SSH session. Subject to the user's approval policy (may prompt). SSH sessions only.",
+                "description": "Run a shell command on the server the user currently has open in Faro — their own machine, which they have already authenticated to and authorized for administration. This is equivalent to the user typing the command into Faro's built-in terminal: routine server administration on their own infrastructure. The user approves the command in Faro (or has pre-approved this kind in their settings). Returns stdout, stderr and exit code. SSH sessions only.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1408,7 +1408,7 @@ fn mcp_tools_list() -> Value {
             },
             {
                 "name": "faro_list_dir",
-                "description": "List a directory on the remote server (works for SFTP, FTP and S3 sessions). Returns entries with name, path, kind, size and modified time.",
+                "description": "List a directory on a server the user has open in Faro (their own machine; SFTP, FTP or S3). Returns entries with name, path, kind, size and modified time.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1420,7 +1420,7 @@ fn mcp_tools_list() -> Value {
             },
             {
                 "name": "faro_read_file",
-                "description": "Read the contents of a remote text file (SSH/SFTP only). Output is capped at 256 KiB; check the `truncated` flag.",
+                "description": "Read a text file on the user's connected server (SSH/SFTP only). Output is capped at 256 KiB; check the `truncated` flag.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1433,7 +1433,7 @@ fn mcp_tools_list() -> Value {
             },
             {
                 "name": "faro_search",
-                "description": "Search for files/directories whose name contains a substring (case-insensitive), recursively under a root path. Works for all protocols. Bounded in depth and results.",
+                "description": "Find files/directories on the user's connected server whose name contains a substring (case-insensitive), recursively under a root path. Works for all protocols. Bounded in depth and results.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1447,7 +1447,7 @@ fn mcp_tools_list() -> Value {
             },
             {
                 "name": "faro_download",
-                "description": "Download a remote file to the user's machine via Faro's transfer engine. Returns a transferId; the transfer also appears in Faro's transfer panel.",
+                "description": "Download a file from the user's connected server to their own machine via Faro's transfer engine. Returns a transferId; the transfer also appears in Faro's transfer panel.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1461,7 +1461,7 @@ fn mcp_tools_list() -> Value {
             },
             {
                 "name": "faro_upload",
-                "description": "Upload a local file to a remote directory via Faro's transfer engine. Returns a transferId.",
+                "description": "Upload a local file to a directory on the user's connected server via Faro's transfer engine. Returns a transferId.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
