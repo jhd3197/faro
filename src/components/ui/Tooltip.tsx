@@ -35,7 +35,7 @@ export function Tooltip({
         <span
           role="tooltip"
           className={cn(
-            "anim-fade pointer-events-none absolute z-[70] whitespace-nowrap rounded-md border border-border bg-bg-panel px-2 py-1 text-[10px] font-medium text-text shadow-elev-2",
+            "anim-fade pointer-events-none absolute z-tooltip whitespace-nowrap rounded-md border border-border bg-bg-panel px-2 py-1 text-[10px] font-medium text-text shadow-elev-2",
             POS[side]
           )}
         >

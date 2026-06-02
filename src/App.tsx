@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ConnectionManager } from "./components/ConnectionManager";
 import { DualPaneBrowser } from "./components/DualPaneBrowser";
 import { TerminalDock } from "./components/Terminal";
@@ -144,6 +144,30 @@ function StatusBar({
   const bridgeRunning = useBridge((s) => s.status.running);
   const openDialog = useLayout((s) => s.openDialog);
 
+  // Dismiss the status-bar popovers on Escape or a click outside, matching how
+  // every other overlay closes (the hover-leave behavior stays as a bonus).
+  const editsWrapRef = useRef<HTMLDivElement>(null);
+  const notifWrapRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!notifOpen && !editsMenuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setNotifOpen(false);
+      onCloseEditsMenu();
+    };
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (notifOpen && !notifWrapRef.current?.contains(t)) setNotifOpen(false);
+      if (editsMenuOpen && !editsWrapRef.current?.contains(t)) onCloseEditsMenu();
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onDown);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onDown);
+    };
+  }, [notifOpen, editsMenuOpen, onCloseEditsMenu]);
+
   return (
     <div className="flex h-7 shrink-0 items-center gap-2 border-t border-border bg-bg-panel px-2 text-[11px]">
       {connected ? (
@@ -176,7 +200,7 @@ function StatusBar({
       )}
       <div className="flex-1" />
       {editList.length > 0 && (
-        <div className="relative">
+        <div className="relative" ref={editsWrapRef}>
           <PillButton
             active={editsMenuOpen}
             onClick={onToggleEditsMenu}
@@ -187,7 +211,7 @@ function StatusBar({
           </PillButton>
           {editsMenuOpen && (
             <div
-              className="anim-modal absolute bottom-7 right-0 z-30 w-80 overflow-hidden rounded-md border border-border bg-bg-panel shadow-elev-3"
+              className="anim-modal absolute bottom-7 right-0 z-dropdown w-80 overflow-hidden rounded-md border border-border bg-bg-panel shadow-elev-3"
               onMouseLeave={onCloseEditsMenu}
             >
               <div className="border-b border-border bg-bg-subtle px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
@@ -234,7 +258,7 @@ function StatusBar({
           )}
         </div>
       )}
-      <div className="relative">
+      <div className="relative" ref={notifWrapRef}>
         <PillButton
           active={notifOpen}
           onClick={() => {
@@ -248,7 +272,7 @@ function StatusBar({
         />
         {notifOpen && (
           <div
-            className="anim-modal absolute bottom-7 right-0 z-30 w-80 overflow-hidden rounded-md border border-border bg-bg-panel shadow-elev-3"
+            className="anim-modal absolute bottom-7 right-0 z-dropdown w-80 overflow-hidden rounded-md border border-border bg-bg-panel shadow-elev-3"
             onMouseLeave={() => setNotifOpen(false)}
           >
             <div className="flex items-center justify-between border-b border-border bg-bg-subtle px-3 py-1.5">

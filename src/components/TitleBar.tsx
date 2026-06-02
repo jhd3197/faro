@@ -298,7 +298,7 @@ function MenuDropdown({
   return (
     <div
       role="menu"
-      className="anim-modal absolute left-0 top-7 z-50 min-w-[14rem] overflow-hidden rounded-md border border-border bg-bg-panel shadow-elev-3"
+      className="anim-modal absolute left-0 top-7 z-menu min-w-[14rem] overflow-hidden rounded-md border border-border bg-bg-panel shadow-elev-3"
     >
       {items.map((item, i) => {
         if ("kind" in item && item.kind === "sep") {

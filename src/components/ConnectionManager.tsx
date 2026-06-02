@@ -198,11 +198,7 @@ function ProfileRow({
       </button>
       <div className="flex shrink-0 items-center gap-0.5">
         {p.protocol === "sftp" && (
-          <IconButton
-            onClick={onOpenShell}
-            title="Open shell"
-            activeColor="accent"
-          >
+          <IconButton onClick={onOpenShell} title="Open shell">
             <TerminalSquare size={13} />
           </IconButton>
         )}
@@ -242,7 +238,6 @@ function IconButton({
   onClick: () => void;
   title: string;
   className?: string;
-  activeColor?: "accent";
 }) {
   return (
     <button

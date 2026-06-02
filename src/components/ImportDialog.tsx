@@ -42,7 +42,7 @@ export function ImportDialog({ onClose }: Props) {
   }, []);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <div className="fixed inset-0 z-modal flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div
         ref={panelRef}
         role="dialog"
@@ -275,7 +275,7 @@ function ImporterTab({
         )}
         {previews && previews.length > 0 && (
           <>
-            <div className="sticky top-0 z-10 flex items-center gap-2 border-b border-border bg-bg-panel px-3 py-1.5 text-[11px] text-text-muted">
+            <div className="sticky top-0 z-sticky flex items-center gap-2 border-b border-border bg-bg-panel px-3 py-1.5 text-[11px] text-text-muted">
               <input
                 type="checkbox"
                 checked={allSelected}

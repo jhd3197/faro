@@ -224,7 +224,9 @@ body::after {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  z-index: 1000;
+  /* Above the tooltip layer (90) so the texture sits over every surface;
+     pointer-events:none keeps it from blocking anything. */
+  z-index: 100;
   opacity: 0.035;
   mix-blend-mode: overlay;
   background-image: url("data:image/svg+xml;utf8,<svg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");

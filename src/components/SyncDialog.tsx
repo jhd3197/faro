@@ -93,7 +93,7 @@ export function SyncDialog({ localPath, remotePath, onClose }: Props) {
     (plan?.copies.length ?? 0) + (plan?.deletes.length ?? 0);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <div className="fixed inset-0 z-modal flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div
         ref={panelRef}
         role="dialog"
@@ -387,7 +387,7 @@ function PlanSection({
 }) {
   return (
     <>
-      <div className="sticky top-0 z-10 flex items-center gap-1.5 border-b border-border bg-bg-panel px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+      <div className="sticky top-0 z-sticky flex items-center gap-1.5 border-b border-border bg-bg-panel px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-muted">
         {icon}
         {title}
       </div>

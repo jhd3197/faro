@@ -76,7 +76,7 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
       aria-label="Context menu"
       onKeyDown={onMenuKeyDown}
       style={{ left, top }}
-      className="anim-modal fixed z-50 min-w-[200px] rounded-lg border border-border bg-bg-panel py-1 shadow-elev-3"
+      className="anim-modal fixed z-menu min-w-[200px] rounded-lg border border-border bg-bg-panel py-1 shadow-elev-3"
     >
       {items.map((item, i) => (
         <div key={i}>

@@ -91,7 +91,7 @@ function ApprovalModal({
   // keypress never auto-approves an agent command.
   useDialog(panelRef, { onClose: onDeny, initialFocus: denyRef });
   return (
-    <div className="fixed inset-0 z-[85] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <div className="fixed inset-0 z-secure flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div
         ref={panelRef}
         role="dialog"
@@ -253,7 +253,7 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-modal flex items-center justify-center bg-black/60 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
@@ -425,7 +425,7 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
               your policy above):
             </div>
             <div className="flex items-center gap-2">
-              <code className="min-w-0 flex-1 truncate rounded border border-border bg-bg-panel px-2 py-1 font-mono text-[10px] text-text-muted">
+              <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1 font-mono text-[10px] text-text-muted">
                 {canCopySetup
                   ? mcpAddCmd(status.url ?? "", status.token ?? "")
                   : "claude mcp add --transport http faro …"}
@@ -512,7 +512,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   return (
     <div className="flex items-center gap-2">
       <span className="w-12 shrink-0 text-[11px] text-text-dim">{label}</span>
-      <div className="flex min-w-0 flex-1 items-center gap-2 rounded border border-border bg-bg-panel px-2 py-1">
+      <div className="flex min-w-0 flex-1 items-center gap-2 rounded bg-bg px-2 py-1">
         {children}
       </div>
     </div>

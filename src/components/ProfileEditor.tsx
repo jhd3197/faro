@@ -146,9 +146,17 @@ export function ProfileEditor({ profile, onClose }: Props) {
     : isAzure
       ? !!azureAccount && !!bucket && !!password
       : !!host && !!username;
+  // Name what's still required so a disabled Save isn't a dead end.
+  const missing = (
+    isS3
+      ? [!bucket && "bucket", !username && "access key ID", !password && "secret key"]
+      : isAzure
+        ? [!azureAccount && "account", !bucket && "container", !password && "access key"]
+        : [!host && "host", !username && "username"]
+  ).filter(Boolean);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <div className="fixed inset-0 z-modal flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div
         ref={panelRef}
         role="dialog"
@@ -328,7 +336,12 @@ export function ProfileEditor({ profile, onClose }: Props) {
           </Hint>
         )}
 
-        <div className="mt-5 flex justify-end gap-2">
+        <div className="mt-5 flex items-center justify-end gap-2">
+          {!canSave && (
+            <span className="mr-auto text-[11px] text-text-dim">
+              Needs {missing.join(", ")}
+            </span>
+          )}
           <button
             className="rounded-md border border-border px-3.5 py-1.5 text-sm hover:bg-bg-hover"
             onClick={onClose}
@@ -336,9 +349,10 @@ export function ProfileEditor({ profile, onClose }: Props) {
             Cancel
           </button>
           <button
-            className="btn-accent rounded-md px-3.5 py-1.5 text-sm font-medium text-white disabled:opacity-40"
+            className="btn-accent rounded-md px-3.5 py-1.5 text-sm font-medium text-white disabled:opacity-40 disabled:cursor-not-allowed"
             onClick={save}
             disabled={!canSave}
+            title={canSave ? undefined : `Fill in: ${missing.join(", ")}`}
           >
             Save
           </button>

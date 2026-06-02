@@ -31,7 +31,7 @@ export function Toaster() {
       role="status"
       aria-live="polite"
       aria-atomic="false"
-      className="pointer-events-none fixed bottom-10 right-3 z-[60] flex w-80 flex-col gap-2"
+      className="pointer-events-none fixed bottom-10 right-3 z-toast flex w-80 flex-col gap-2"
     >
       {toasts.map((t) => (
         <ToastCard key={t.id} toast={t} onDismiss={() => dismiss(t.id)} />

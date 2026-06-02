@@ -68,7 +68,7 @@ export function DualPaneBrowser() {
           <button
             onClick={() => setSyncOpen(true)}
             title="Sync this folder with the remote pane"
-            className="btn-accent absolute left-1/2 top-3 z-20 flex h-6 -translate-x-1/2 items-center gap-1 rounded-full px-2 text-[10px] font-medium uppercase tracking-wider text-white shadow-elev-2"
+            className="btn-accent absolute left-1/2 top-3 z-raised flex h-6 -translate-x-1/2 items-center gap-1 rounded-full px-2 text-[10px] font-medium uppercase tracking-wider text-white shadow-elev-2"
           >
             <ArrowRightLeft size={10} />
             Sync
