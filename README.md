@@ -1,6 +1,7 @@
 <div align="center">
 
-<img src="src-tauri/icons/128x128@2x.png" width="128" alt="Faro" />
+<img width="800" alt="faro" src="https://github.com/user-attachments/assets/52c5a6d3-7967-45e0-be0c-f861bd8f5b0d" />
+
 
 # Faro
 
