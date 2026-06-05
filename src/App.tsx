@@ -48,6 +48,7 @@ export default function App() {
 
   const terminalOpen = useLayout((s) => s.terminalOpen);
   const toggleTerminal = useLayout((s) => s.toggleTerminal);
+  const terminalVisible = !!activeSessionId && terminalOpen && supportsTerminal;
   const consoleOpen = useLayout((s) => s.consoleOpen);
   const dialog = useLayout((s) => s.dialog);
   const closeDialog = useLayout((s) => s.closeDialog);
@@ -89,11 +90,19 @@ export default function App() {
               <AgentConsoleDock />
             </div>
           )}
-          {activeSessionId && terminalOpen && supportsTerminal && (
-            <div className="h-72 border-t border-border">
-              <TerminalDock sessionId={activeSessionId} />
-            </div>
-          )}
+          {/* The terminal dock stays mounted even when hidden so background
+              shells survive connection-tab switches and toggling it closed;
+              visibility is CSS, not mount/unmount. */}
+          <div
+            className={cn(
+              terminalVisible ? "h-72 border-t border-border" : "h-0 overflow-hidden"
+            )}
+          >
+            <TerminalDock
+              sessionId={supportsTerminal ? activeSessionId : null}
+              visible={terminalVisible}
+            />
+          </div>
           <TransferQueue />
           <StatusBar
             terminalOpen={terminalOpen && supportsTerminal}

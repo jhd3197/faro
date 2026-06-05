@@ -9,11 +9,21 @@ import { useSettings, TERMINAL_THEMES } from "@/stores/settingsStore";
 import { useTerminals, type TerminalTab } from "@/stores/terminalsStore";
 import { cn } from "@/lib/cn";
 
-/// Tabbed terminal dock. Backend supports N PTY channels per session — we
-/// open one per tab and keep each `<TerminalPane>` mounted so switching tabs
-/// is instant and doesn't drop the shell. All panes for non-active tabs are
-/// hidden via CSS rather than unmounted.
-export function TerminalDock({ sessionId }: { sessionId: SessionId }) {
+/// Tabbed terminal dock. Backend supports N PTY channels per session — we open
+/// one per tab and keep EVERY `<TerminalPane>` mounted (across all sessions, and
+/// even while the dock is hidden) so shells survive both terminal-tab and
+/// connection-tab switches. Only the active tab's pane is visible; the rest are
+/// hidden via CSS, never unmounted. Panes only tear down when their session
+/// actually disconnects (the connections store drops its tabs) or the user
+/// closes the tab. `sessionId` is the focused connection (null when it has no
+/// terminal, e.g. an object store); `visible` is whether the dock is on screen.
+export function TerminalDock({
+  sessionId,
+  visible,
+}: {
+  sessionId: SessionId | null;
+  visible: boolean;
+}) {
   const tabs = useTerminals((s) => s.tabs);
   const activeId = useTerminals((s) => s.activeId);
   const openTab = useTerminals((s) => s.openTab);
@@ -21,36 +31,26 @@ export function TerminalDock({ sessionId }: { sessionId: SessionId }) {
   const setActive = useTerminals((s) => s.setActive);
   const renameTab = useTerminals((s) => s.renameTab);
 
-  const sessionTabs = tabs.filter((t) => t.sessionId === sessionId);
+  const sessionTabs = sessionId
+    ? tabs.filter((t) => t.sessionId === sessionId)
+    : [];
 
-  // Open a first tab when the dock first becomes visible for this session.
-  // We only run this when sessionTabs is empty; a no-op otherwise.
+  // Open a first shell when the dock is shown for a session that has none.
   useEffect(() => {
-    if (sessionTabs.length === 0) {
+    if (visible && sessionId && sessionTabs.length === 0) {
       openTab(sessionId);
     }
-  }, [sessionId, sessionTabs.length, openTab]);
+  }, [visible, sessionId, sessionTabs.length, openTab]);
 
-  // If the active tab belongs to a different session, switch to one in ours.
+  // While shown, keep the active tab pointed at one in the focused session —
+  // so switching connection tabs surfaces that server's shells.
   useEffect(() => {
-    if (activeId && !sessionTabs.some((t) => t.id === activeId)) {
+    if (!visible || !sessionId) return;
+    if (!activeId || !sessionTabs.some((t) => t.id === activeId)) {
       const first = sessionTabs[0];
       if (first) setActive(first.id);
     }
-  }, [activeId, sessionTabs, setActive]);
-
-  // Disconnecting a session drops its tabs (handled in the connections store),
-  // so we must NOT drop them here on every session switch — otherwise flipping
-  // connection tabs would wipe the other server's shells. Tabs persist until
-  // the session is actually closed.
-
-  const closing = (id: string) => {
-    closeTab(id);
-    if (tabs.length <= 1) {
-      // Last tab closed — close the dock so we don't show an empty bar.
-      // The parent watches `terminalOpen`; we don't toggle it from here.
-    }
-  };
+  }, [visible, sessionId, sessionTabs, activeId, setActive]);
 
   return (
     <div className="flex h-full flex-col">
@@ -62,25 +62,30 @@ export function TerminalDock({ sessionId }: { sessionId: SessionId }) {
               tab={tab}
               active={tab.id === activeId}
               onClick={() => setActive(tab.id)}
-              onClose={() => closing(tab.id)}
+              onClose={() => closeTab(tab.id)}
               onRename={(title) => renameTab(tab.id, title)}
             />
           ))}
-          <button
-            onClick={() => openTab(sessionId)}
-            title="New shell"
-            className="ml-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-muted hover:bg-bg-hover hover:text-text"
-          >
-            <Plus size={12} />
-          </button>
+          {sessionId && (
+            <button
+              onClick={() => openTab(sessionId)}
+              title="New shell"
+              className="ml-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-muted hover:bg-bg-hover hover:text-text"
+            >
+              <Plus size={12} />
+            </button>
+          )}
         </div>
       </div>
       <div className="relative flex-1 overflow-hidden">
-        {sessionTabs.map((tab) => (
+        {/* Every tab across all sessions stays mounted; only the focused
+            session's active tab is shown. This is what keeps background shells
+            alive when you switch connection tabs or hide the dock. */}
+        {tabs.map((tab) => (
           <TerminalPane
             key={tab.id}
             tab={tab}
-            visible={tab.id === activeId}
+            visible={visible && tab.id === activeId}
           />
         ))}
       </div>
