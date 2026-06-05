@@ -105,6 +105,7 @@ pub fn run() {
             commands::bridge_set_policy,
             commands::respond_to_bridge_approval,
             commands::bridge_activity,
+            commands::export_agent_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

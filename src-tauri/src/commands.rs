@@ -4,7 +4,7 @@ use crate::session::{HostDecision, Session};
 use crate::transfer::{OverwritePolicy, Transfer};
 use crate::AppState;
 use std::sync::Arc;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 pub const LOCAL_SESSION: &str = "local";
 
@@ -623,4 +623,44 @@ pub async fn bridge_activity(
     state: State<'_, AppState>,
 ) -> Result<Vec<ActivityEntry>, String> {
     Ok(state.bridge.recent_activity().await)
+}
+
+// ---------- Agent console export ----------
+
+/// Write the Agent console's text to the user's Downloads folder (falling back
+/// to the app data dir) and return the saved path. Kept plugin-free to match the
+/// rest of the app — a direct write, not the dialog/fs plugins. `name` is the
+/// caller-suggested filename; path separators are stripped and a name collision
+/// gets a " (n)" suffix so an export never clobbers an existing file.
+#[tauri::command]
+pub async fn export_agent_log(
+    content: String,
+    name: String,
+    app: AppHandle,
+) -> Result<String, String> {
+    let dir = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().app_data_dir())
+        .map_err(err)?;
+    std::fs::create_dir_all(&dir).map_err(err)?;
+
+    let safe: String = name.chars().filter(|c| !matches!(c, '/' | '\\')).collect();
+    let safe = if safe.trim().is_empty() {
+        "faro-agent-console.txt".to_string()
+    } else {
+        safe
+    };
+    let (stem, ext) = match safe.rsplit_once('.') {
+        Some((s, e)) => (s.to_string(), format!(".{e}")),
+        None => (safe.clone(), String::new()),
+    };
+    let mut path = dir.join(&safe);
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(format!("{stem} ({n}){ext}"));
+        n += 1;
+    }
+    std::fs::write(&path, content).map_err(err)?;
+    Ok(path.to_string_lossy().into_owned())
 }

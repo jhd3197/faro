@@ -16,13 +16,53 @@ import {
   ChevronDown,
   ChevronsDownUp,
   Filter,
+  FileDown,
 } from "lucide-react";
 import { useBridge } from "@/stores/bridgeStore";
 import { useConnections } from "@/stores/connectionsStore";
 import { useLayout } from "@/stores/layoutStore";
+import { ipc } from "@/lib/ipc";
+import { toast } from "@/stores/toastStore";
 import { cn } from "@/lib/cn";
 import { relTime } from "@/lib/format";
 import type { AgentConsoleEntry } from "@/lib/types";
+
+// Build a plain-text transcript of the console for export — readable and
+// paste-friendly for a bug report or feature request.
+function buildExportText(
+  entries: AgentConsoleEntry[],
+  meta: Map<string, { name: string; color?: string }>
+): string {
+  const out: string[] = [
+    "Faro Agent Console export",
+    `Generated: ${new Date().toISOString()}`,
+    `Entries: ${entries.length}`,
+    "",
+  ];
+  for (const e of entries) {
+    const who = meta.get(e.sessionId)?.name || e.sessionName || e.sessionId;
+    const stat =
+      e.status === "running"
+        ? "running"
+        : e.kind === "denied"
+          ? "denied"
+          : e.kind === "error" || e.ok === false
+            ? "FAILED"
+            : "ok";
+    out.push(
+      `[${new Date(e.at).toISOString()}] ${e.kind.toUpperCase()} · ${who} · ${stat}`
+    );
+    out.push(`  ${e.command}`);
+    const body = e.output.replace(/\s+$/, "");
+    if (body.length > 0) {
+      out.push("  ----- output -----");
+      for (const line of body.split("\n")) out.push(`  ${line}`);
+      out.push("  ------------------");
+    }
+    out.push("");
+  }
+  return out.join("\n");
+}
 
 // A live, read-only view of everything the agent does through the bridge,
 // docked at the bottom of the window so it stays visible while you work. Exec
@@ -88,6 +128,26 @@ export function AgentConsoleDock() {
     setOverrides(next);
   };
 
+  // Export what's currently shown (so the session filter doubles as a scope
+  // selector) to a timestamped text file in the user's Downloads folder.
+  const exportLogs = async () => {
+    if (shown.length === 0) return;
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, "0");
+    const name = `faro-agent-console-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(
+      d.getDate()
+    )}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}.txt`;
+    try {
+      const path = await ipc.exportAgentLog(
+        buildExportText(shown, sessionMeta),
+        name
+      );
+      toast.success("Console exported", path);
+    } catch (e) {
+      toast.error("Couldn't export console", String(e));
+    }
+  };
+
   // Clear the active filter if its session disappears from the feed.
   useEffect(() => {
     if (filter !== "all" && !feedSessions.some((s) => s.id === filter)) {
@@ -116,6 +176,13 @@ export function AgentConsoleDock() {
         )}
         <ToolButton onClick={collapseAll} disabled={shown.length === 0} title="Collapse all output">
           <ChevronsDownUp size={12} />
+        </ToolButton>
+        <ToolButton
+          onClick={exportLogs}
+          disabled={shown.length === 0}
+          title="Export console to a file (Downloads)"
+        >
+          <FileDown size={12} />
         </ToolButton>
         <ToolButton onClick={clear} disabled={entries.length === 0} title="Clear console">
           <Trash2 size={12} />

@@ -184,6 +184,9 @@ export const ipc = {
   respondToBridgeApproval: (requestId: string, decision: ApprovalDecision) =>
     invoke<void>("respond_to_bridge_approval", { requestId, decision }),
   bridgeActivity: () => invoke<BridgeActivity[]>("bridge_activity"),
+  // Write the agent console text to disk (Downloads) and return the saved path.
+  exportAgentLog: (content: string, name: string) =>
+    invoke<string>("export_agent_log", { content, name }),
 };
 
 export async function onEditSaved(
