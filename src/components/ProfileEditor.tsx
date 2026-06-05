@@ -63,6 +63,7 @@ export function ProfileEditor({ profile, onClose }: Props) {
   const [defaultRemotePath, setDefaultRemotePath] = useState(
     profile?.defaultRemotePath ?? "."
   );
+  const [autoConnect, setAutoConnect] = useState(profile?.autoConnect ?? false);
 
   // S3-only state.
   const [bucket, setBucket] = useState(profile?.bucket ?? "");
@@ -132,6 +133,7 @@ export function ProfileEditor({ profile, onClose }: Props) {
       auth,
       defaultRemotePath: defaultRemotePath || undefined,
       color: profile?.color,
+      autoConnect: autoConnect || undefined,
       bucket: isObject ? bucket : undefined,
       region: isS3 ? region : undefined,
       endpoint: isObject ? endpoint || undefined : undefined,
@@ -324,6 +326,23 @@ export function ProfileEditor({ profile, onClose }: Props) {
             className={inputCls}
           />
         </Field>
+
+        <label className="mb-3 flex cursor-pointer items-center gap-2.5 rounded-md border border-border bg-bg-subtle px-2.5 py-2">
+          <input
+            type="checkbox"
+            checked={autoConnect}
+            onChange={(e) => setAutoConnect(e.target.checked)}
+            className="h-3.5 w-3.5 shrink-0 accent-[rgb(var(--accent))]"
+          />
+          <span className="min-w-0">
+            <span className="block text-xs font-medium text-text">
+              Auto-connect on startup
+            </span>
+            <span className="block text-[11px] text-text-dim">
+              Open this server automatically when Faro launches.
+            </span>
+          </span>
+        </label>
 
         {isFtp && (
           <Hint tone="warn">

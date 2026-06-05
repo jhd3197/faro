@@ -18,6 +18,8 @@ export interface ConnectionProfile {
   auth: AuthMethod;
   defaultRemotePath?: string;
   color?: string;
+  /** Connect automatically on app launch (and on a single click in the rail). */
+  autoConnect?: boolean;
   // Object-store fields (used when protocol === "s3" or "azure").
   bucket?: string; // bucket (S3) or container (Azure)
   region?: string;
@@ -209,6 +211,8 @@ export interface ApprovalPolicy {
 
 export interface BridgeStatus {
   running: boolean;
+  /** Master on/off switch (persisted, default off). When false nothing listens. */
+  enabled: boolean;
   url: string | null;
   port: number | null;
   token: string | null;

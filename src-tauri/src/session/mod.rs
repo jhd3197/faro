@@ -7,15 +7,16 @@ use crate::known_hosts;
 use crate::profiles::{AuthMethod, ConnectionProfile};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use russh::{client, ChannelMsg};
+use russh::{client, Channel, ChannelMsg};
 use russh_keys::key;
 use russh_sftp::client::SftpSession;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{oneshot, Mutex, OnceCell};
+use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
 // ---- Host-key verification plumbing ----
@@ -144,6 +145,44 @@ impl HostKeyVerifier for TauriHostKeyVerifier {
     }
 }
 
+/// A non-interactive host-key verifier used for transparent reconnects. On a
+/// reconnect the server key is already in `known_hosts`, so `check_server_key`
+/// short-circuits on `Match` *before* `decide()` is ever called; `decide()`
+/// therefore only runs for an unknown or **changed** key — which a silent
+/// background reconnect must refuse rather than auto-trust behind the user's
+/// back. `reject_unknown` (the safe default) makes that explicit.
+pub struct AutoTrustVerifier {
+    reject_unknown: bool,
+}
+
+impl AutoTrustVerifier {
+    /// Refuse any key not already trusted in `known_hosts`. Safe for silent
+    /// reconnects: a matching key never reaches `decide()`; an unknown/changed
+    /// one is rejected loudly instead of being trusted without the user.
+    pub fn reject_unknown() -> Self {
+        Self { reject_unknown: true }
+    }
+}
+
+#[async_trait]
+impl HostKeyVerifier for AutoTrustVerifier {
+    async fn decide(
+        &self,
+        _host: &str,
+        _port: u16,
+        _key_type: &str,
+        _fingerprint: &str,
+        _stored_fingerprint: Option<&str>,
+        _kind: HostPromptKind,
+    ) -> Result<HostDecision, russh::Error> {
+        Ok(if self.reject_unknown {
+            HostDecision::Reject
+        } else {
+            HostDecision::Accept
+        })
+    }
+}
+
 pub struct ClientHandler {
     host: String,
     port: u16,
@@ -203,7 +242,32 @@ pub struct SshSession {
     pub id: String,
     pub profile: ConnectionProfile,
     pub handle: Mutex<client::Handle<ClientHandler>>,
-    sftp: OnceCell<Mutex<SftpSession>>,
+    /// Lazily-opened SFTP subsystem. Behind an `Option` so a reconnect can drop
+    /// the stale channel and force the next caller to reopen it; handed out as
+    /// an `Arc` so callers never borrow the session across an `.await`.
+    sftp: Mutex<Option<Arc<Mutex<SftpSession>>>>,
+    /// Serializes reconnects so a burst of failed ops triggers exactly one.
+    reconnect_lock: Mutex<()>,
+    /// Bumped on every successful reconnect; lets a waiter that lost the race
+    /// notice another task already reconnected and skip doing it again.
+    generation: AtomicU64,
+}
+
+/// True only when an error means the SSH transport itself is gone (the run-loop
+/// task ended) rather than a normal command/SFTP failure. We reconnect *only*
+/// on these — a spurious reconnect would swap the handle out from under live
+/// PTY terminals and in-flight transfers.
+fn is_transport_dead(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<russh::Error>(),
+        Some(
+            russh::Error::SendError
+                | russh::Error::Disconnect
+                | russh::Error::HUP
+                | russh::Error::KeepaliveTimeout
+                | russh::Error::InactivityTimeout
+        )
+    )
 }
 
 impl SshSession {
@@ -216,24 +280,108 @@ impl SshSession {
             id: Uuid::new_v4().to_string(),
             profile,
             handle: Mutex::new(handle),
-            sftp: OnceCell::new(),
+            sftp: Mutex::new(None),
+            reconnect_lock: Mutex::new(()),
+            generation: AtomicU64::new(0),
         }
     }
 
-    /// Lazily open the SFTP subsystem on first use; the channel sticks around
-    /// for the life of the session.
-    pub async fn ensure_sftp(&self) -> Result<&Mutex<SftpSession>> {
-        self.sftp
-            .get_or_try_init(|| async {
-                let channel = {
-                    let h = self.handle.lock().await;
-                    h.channel_open_session().await?
-                };
-                channel.request_subsystem(true, "sftp").await?;
-                let sftp = SftpSession::new(channel.into_stream()).await?;
-                Ok::<Mutex<SftpSession>, anyhow::Error>(Mutex::new(sftp))
-            })
+    /// Lazily open the SFTP subsystem on first use, returning a shared handle to
+    /// it. If the transport has died (e.g. the session sat idle past the
+    /// keepalive budget, or the server rebooted), the stale channel is dropped
+    /// and the connection re-established first — this is what keeps the file
+    /// browser and transfers working after a long idle period instead of
+    /// failing until the user manually toggles the connection off and on.
+    pub async fn ensure_sftp(&self) -> Result<Arc<Mutex<SftpSession>>> {
+        let dead = self.handle.lock().await.is_closed();
+        if dead {
+            *self.sftp.lock().await = None;
+            let generation = self.generation.load(Ordering::Acquire);
+            self.reconnect(generation).await?;
+        }
+        if let Some(existing) = self.sftp.lock().await.clone() {
+            return Ok(existing);
+        }
+        // Reopen on a fresh channel, reconnecting once if the open itself trips
+        // a dead transport (a race against the keepalive detector).
+        self.with_reconnect(|| async move { self.open_sftp_channel().await })
             .await
+    }
+
+    /// Open a new SFTP channel and cache it. Done outside the cache lock so
+    /// concurrent first-time callers don't serialize on the handshake; the
+    /// double-open race is benign — the first writer to re-acquire the lock
+    /// wins and later openers reuse its handle.
+    async fn open_sftp_channel(&self) -> Result<Arc<Mutex<SftpSession>>> {
+        let channel = {
+            let h = self.handle.lock().await;
+            h.channel_open_session().await?
+        };
+        channel.request_subsystem(true, "sftp").await?;
+        let sftp = Arc::new(Mutex::new(SftpSession::new(channel.into_stream()).await?));
+        let mut slot = self.sftp.lock().await;
+        Ok(slot.get_or_insert(sftp).clone())
+    }
+
+    /// Open a fresh exec channel for `command`, reconnecting once if the
+    /// transport is dead. Used by `exec_bounded` so the agent's first command
+    /// after an idle hour transparently re-establishes the session.
+    async fn open_exec_channel(&self, command: &str) -> Result<Channel<client::Msg>> {
+        self.with_reconnect(|| async move {
+            let channel = {
+                let h = self.handle.lock().await;
+                h.channel_open_session().await?
+            };
+            channel.exec(true, command.as_bytes()).await?;
+            Ok(channel)
+        })
+        .await
+    }
+
+    /// Re-establish the SSH connection in place. Single-flight: callers
+    /// serialize on `reconnect_lock`, and the `seen_generation` check means only
+    /// the first one through actually reconnects — a task that lost the race
+    /// sees the bumped generation and returns, then retries its op on the fresh
+    /// handle. The session id never changes, so bridge grants and UI tabs keyed
+    /// by it survive untouched.
+    async fn reconnect(&self, seen_generation: u64) -> Result<()> {
+        let _guard = self.reconnect_lock.lock().await;
+        if self.generation.load(Ordering::Acquire) != seen_generation {
+            return Ok(()); // someone else already reconnected while we waited
+        }
+        tracing::warn!(session = %self.id, host = %self.profile.host, "SSH transport dead — reconnecting");
+        let verifier: Arc<dyn HostKeyVerifier> = Arc::new(AutoTrustVerifier::reject_unknown());
+        let handle = ssh_connect(&self.profile, verifier)
+            .await
+            .context("reconnecting SSH session")?;
+        *self.handle.lock().await = handle;
+        *self.sftp.lock().await = None; // stale channel — force reopen
+        self.generation.fetch_add(1, Ordering::Release);
+        tracing::info!(session = %self.id, "SSH reconnected");
+        Ok(())
+    }
+
+    /// Run `op`; if it fails because the transport is dead, reconnect once and
+    /// run it again. `op` may run twice, so it must be re-runnable — capture by
+    /// shared/`Copy` reference (or clone per attempt), not move-once.
+    async fn with_reconnect<T, F, Fut>(&self, op: F) -> Result<T>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let generation = self.generation.load(Ordering::Acquire);
+        match op().await {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                let dead = is_transport_dead(&e) || self.handle.lock().await.is_closed();
+                if dead {
+                    self.reconnect(generation).await?;
+                    op().await
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     /// Run a single non-interactive command on a fresh exec channel and collect
@@ -258,11 +406,7 @@ impl SshSession {
         timeout: Duration,
         stream: Option<&ExecStream>,
     ) -> Result<ExecOutput> {
-        let mut channel = {
-            let h = self.handle.lock().await;
-            h.channel_open_session().await?
-        };
-        channel.exec(true, command.as_bytes()).await?;
+        let mut channel = self.open_exec_channel(command).await?;
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
@@ -474,7 +618,17 @@ pub async fn ssh_connect(
     verifier: Arc<dyn HostKeyVerifier>,
 ) -> Result<client::Handle<ClientHandler>> {
     let config = Arc::new(client::Config {
-        inactivity_timeout: Some(std::time::Duration::from_secs(60 * 30)),
+        // Keep idle sessions alive and detect a genuinely dead peer (laptop
+        // slept, NAT/firewall dropped the socket, server rebooted) in ~60s:
+        // russh sends a keepalive after `keepalive_interval` of server silence
+        // and tears the connection down after `keepalive_max` unanswered ones.
+        keepalive_interval: Some(Duration::from_secs(15)),
+        keepalive_max: 3,
+        // MUST stay None. A finite inactivity_timeout makes russh drop a session
+        // that has merely been idle that long even when it's perfectly alive —
+        // that was the "after an hour, every command fails" bug. Liveness is the
+        // keepalive's job now, not a wall-clock cap.
+        inactivity_timeout: None,
         ..Default::default()
     });
     let addr = (profile.host.as_str(), profile.port);
@@ -582,7 +736,9 @@ impl SessionManager {
                     id: id.clone(),
                     profile,
                     handle: Mutex::new(handle),
-                    sftp: OnceCell::new(),
+                    sftp: Mutex::new(None),
+                    reconnect_lock: Mutex::new(()),
+                    generation: AtomicU64::new(0),
                 });
                 (id, Session::Ssh(ssh))
             }

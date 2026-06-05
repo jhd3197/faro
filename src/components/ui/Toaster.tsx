@@ -31,7 +31,7 @@ export function Toaster() {
       role="status"
       aria-live="polite"
       aria-atomic="false"
-      className="pointer-events-none fixed bottom-10 right-3 z-toast flex w-80 flex-col gap-2"
+      className="pointer-events-none fixed bottom-10 right-3 z-toast flex w-80 max-w-[calc(100vw-1.5rem)] flex-col gap-2"
     >
       {toasts.map((t) => (
         <ToastCard key={t.id} toast={t} onDismiss={() => dismiss(t.id)} />
@@ -57,7 +57,7 @@ function ToastCard({
       <div className="min-w-0 flex-1">
         <div className="text-xs font-medium">{toast.title}</div>
         {toast.message && (
-          <div className="mt-0.5 break-words text-[11px] text-text-muted">
+          <div className="mt-0.5 break-words [overflow-wrap:anywhere] text-[11px] text-text-muted">
             {toast.message}
           </div>
         )}

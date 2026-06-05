@@ -35,6 +35,11 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 indicatif = "0.17"
 
+# HTTP client for the `agent` subcommands, which POST to Faro's running Agent
+# Bridge over localhost http (no TLS needed). default-features=false drops the
+# rustls/native-tls stack; `json` re-enables send_json/into_json (serde_json).
+ureq = { version = "2", default-features = false, features = ["json"] }
+
 # Misc
 anyhow = "1"
 serde_json = "1"

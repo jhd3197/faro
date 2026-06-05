@@ -22,6 +22,7 @@ const MAX_ENTRY_OUTPUT = 256 * 1024;
 
 const EMPTY: BridgeStatus = {
   running: false,
+  enabled: false,
   url: null,
   port: null,
   token: null,
@@ -40,6 +41,7 @@ interface BridgeStoreState {
   refresh: () => Promise<void>;
   start: () => Promise<void>;
   stop: () => Promise<void>;
+  setEnabled: (enabled: boolean) => Promise<void>;
   setSessionAccess: (sessionId: string, enabled: boolean) => Promise<void>;
   setPolicy: (policy: ApprovalPolicy) => Promise<void>;
   respond: (requestId: string, decision: ApprovalDecision) => Promise<void>;
@@ -161,6 +163,20 @@ export const useBridge = create<BridgeStoreState>((set, get) => ({
       toast.info("Agent Bridge stopped");
     } catch (e) {
       toast.error("Couldn't stop Agent Bridge", String(e));
+    }
+  },
+
+  setEnabled: async (enabled) => {
+    // Optimistic: reflect the master switch immediately.
+    set((s) => ({ status: { ...s.status, enabled } }));
+    try {
+      const status = await ipc.bridgeSetEnabled(enabled);
+      set({ status });
+      toast.info(enabled ? "Agent Bridge enabled" : "Agent Bridge disabled");
+    } catch (e) {
+      toast.error("Couldn't update Agent Bridge", String(e));
+      // The bridge may have failed to bind a port; reconcile with the backend.
+      void get().refresh();
     }
   },
 

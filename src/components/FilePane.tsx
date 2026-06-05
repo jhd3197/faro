@@ -659,7 +659,7 @@ export function FilePane({
       onDrop={onPaneDrop}
       onContextMenu={openPaneMenu}
       className={cn(
-        "flex h-full flex-1 flex-col bg-bg-panel outline-none transition-colors",
+        "flex h-full min-w-0 flex-1 flex-col bg-bg-panel outline-none transition-colors",
         "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/40",
         isDropTarget && "ring-2 ring-inset ring-accent/60 bg-accent/5"
       )}

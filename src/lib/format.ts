@@ -43,3 +43,17 @@ export function baseName(p: string): string {
   const parts = p.split(/[/\\]/).filter(Boolean);
   return parts.length ? parts[parts.length - 1] : p;
 }
+
+// A 1-2 letter monogram for a server name, e.g. "prod-db" -> "PD",
+// "web 01" -> "W0", "x" -> "X". Splits on whitespace/-/_ and is code-point safe
+// (Array.from) so emoji and non-ASCII names never render a broken half-glyph.
+// Falls back to "?" so a bubble is never blank.
+export function monogram(name: string): string {
+  const words = name.trim().split(/[\s\-_]+/).filter(Boolean);
+  if (words.length === 0) return "?";
+  const first = Array.from(words[0]);
+  if (words.length >= 2) {
+    return (first[0] + Array.from(words[1])[0]).toUpperCase();
+  }
+  return first.slice(0, 2).join("").toUpperCase() || "?";
+}

@@ -174,6 +174,8 @@ export const ipc = {
   // Agent Bridge
   bridgeStart: () => invoke<BridgeStatus>("bridge_start"),
   bridgeStop: () => invoke<BridgeStatus>("bridge_stop"),
+  bridgeSetEnabled: (enabled: boolean) =>
+    invoke<BridgeStatus>("bridge_set_enabled", { enabled }),
   bridgeStatus: () => invoke<BridgeStatus>("bridge_status"),
   bridgeSetSessionAccess: (sessionId: SessionId, enabled: boolean) =>
     invoke<BridgeStatus>("bridge_set_session_access", { sessionId, enabled }),

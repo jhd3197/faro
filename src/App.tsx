@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ConnectionManager } from "./components/ConnectionManager";
+import { ServerRail } from "./components/ServerRail";
 import { DualPaneBrowser } from "./components/DualPaneBrowser";
 import { TerminalDock } from "./components/Terminal";
 import { TransferQueue } from "./components/TransferQueue";
@@ -34,7 +34,6 @@ import { CommandPalette } from "./components/CommandPalette";
 import { KeyboardShortcutsDialog } from "./components/KeyboardShortcutsDialog";
 import { AgentBridge, AgentBridgeHost } from "./components/AgentBridge";
 import { AgentConsoleDock } from "./components/AgentConsole";
-import { ConnectionTabs } from "./components/ConnectionTabs";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { relTime } from "./lib/format";
 import { cn } from "./lib/cn";
@@ -79,9 +78,8 @@ export default function App() {
       <CommandPalette />
       <KeyboardShortcutsDialog />
       <div className="flex flex-1 overflow-hidden">
-        <ConnectionManager />
-        <div className="flex flex-1 flex-col">
-          <ConnectionTabs />
+        <ServerRail />
+        <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex-1 overflow-hidden">
             <DualPaneBrowser />
           </div>
@@ -190,9 +188,9 @@ function StatusBar({
   }, [notifOpen, editsMenuOpen, onCloseEditsMenu]);
 
   return (
-    <div className="flex h-7 shrink-0 items-center gap-2 border-t border-border bg-bg-panel px-2 text-[11px]">
+    <div className="flex h-7 min-w-0 shrink-0 items-center gap-2 overflow-hidden border-t border-border bg-bg-panel px-2 text-[11px]">
       {connected ? (
-        <div className="flex items-center gap-1.5 pl-1">
+        <div className="flex min-w-0 items-center gap-1.5 pl-1">
           <div className="relative">
             <div
               className="h-1.5 w-1.5 rounded-full"
@@ -203,13 +201,13 @@ function StatusBar({
               style={{ background: profile.color || "rgb(var(--accent))" }}
             />
           </div>
-          <span className="max-w-[18rem] truncate font-medium" title={profile.name}>
+          <span className="max-w-[18rem] shrink-0 truncate font-medium" title={profile.name}>
             {profile.name}
           </span>
-          <span className="font-mono text-text-dim">
+          <span className="min-w-0 truncate font-mono text-text-dim">
             {profile.username}@{profile.host}:{profile.port}
           </span>
-          <span className="rounded-sm bg-bg-subtle px-1 text-[9px] font-medium uppercase tracking-wider text-text-dim">
+          <span className="shrink-0 rounded-sm bg-bg-subtle px-1 text-[9px] font-medium uppercase tracking-wider text-text-dim">
             {profile.protocol}
           </span>
         </div>

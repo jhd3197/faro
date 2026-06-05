@@ -104,6 +104,18 @@ enum Cmd {
         #[command(subcommand)]
         action: ProfileCmd,
     },
+
+    /// Operate a server through Faro's running Agent Bridge.
+    ///
+    /// Unlike the other subcommands (which open their own connection), `agent`
+    /// talks to the Bridge you already have open in the Faro app — so commands
+    /// go through Faro's per-command approval and show up in its live console.
+    /// The bridge URL + token are read from Faro's local discovery file, so you
+    /// only pass a server name; you never handle a URL or token.
+    Agent {
+        #[command(subcommand)]
+        action: AgentCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -112,6 +124,61 @@ enum ProfileCmd {
     List,
     /// Show details for one profile by name or id.
     Show { name: String },
+}
+
+#[derive(Subcommand)]
+enum AgentCmd {
+    /// List the servers the Agent Bridge can currently reach.
+    Sessions,
+    /// Run a shell command on a server (SSH only). Exits with its exit code.
+    Exec {
+        /// Saved server name (as shown in Faro) or its session id.
+        server: String,
+        /// The command to run. Quote it, or pass it as trailing arguments.
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
+    },
+    /// List a remote directory.
+    Ls {
+        server: String,
+        /// Remote directory (default: ".").
+        path: Option<String>,
+    },
+    /// Read a remote text file (SSH/SFTP, capped at 256 KiB).
+    Read { server: String, path: String },
+    /// Find entries whose name contains a substring, recursively.
+    Search {
+        server: String,
+        /// Case-insensitive substring to match against entry names.
+        query: String,
+        /// Root directory to search under (default: ".").
+        path: Option<String>,
+    },
+    /// Download a remote file to a local dir (default: your Downloads).
+    Download {
+        server: String,
+        remote_path: String,
+        local_dir: Option<String>,
+    },
+    /// Upload a local file into a remote directory.
+    Upload {
+        server: String,
+        local_path: String,
+        remote_dir: String,
+    },
+    /// Check a transfer started via `agent download` / `agent upload`.
+    Transfer { transfer_id: String },
+    /// Show context about a server (protocol, host, port, …).
+    Info { server: String },
+    /// Recent Agent Bridge activity (what's already run), newest first.
+    History {
+        /// Limit to one server (name or session id).
+        #[arg(long)]
+        server: Option<String>,
+        /// Max entries (default 50, max 200).
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+    },
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -152,6 +219,9 @@ async fn run(cli: Cli) -> Result<()> {
             ProfileCmd::List => cmd_profiles_list(&store).await,
             ProfileCmd::Show { name } => cmd_profiles_show(&store, &name).await,
         },
+        // The agent subcommands talk to the running bridge over HTTP (blocking
+        // ureq); they need no profile store and don't await.
+        Cmd::Agent { action } => cmd_agent(action),
     }
 }
 
@@ -600,6 +670,313 @@ async fn cmd_profiles_show(store: &ProfileStore, name: &str) -> Result<()> {
     }
     println!("{}", serde_json::to_string_pretty(&json)?);
     Ok(())
+}
+
+// ---- Agent Bridge client -----------------------------------------------
+//
+// `faro-cli agent …` talks to Faro's RUNNING Agent Bridge over localhost HTTP
+// rather than opening its own connection. It reads the bridge URL + bearer
+// token from the discovery file Faro writes while the bridge is on, so neither
+// the user nor an AI agent ever handles a URL or token — and every call still
+// goes through Faro's per-command approval and live console.
+
+struct Endpoint {
+    url: String,
+    token: String,
+}
+
+/// Read the bridge URL + token from Faro's discovery file (same data dir the
+/// GUI uses). A missing file means the bridge isn't running.
+fn read_endpoint() -> Result<Endpoint> {
+    let path = default_data_dir()?.join("agent-endpoint.json");
+    let bytes = std::fs::read(&path).map_err(|_| {
+        anyhow!(
+            "Faro's Agent Bridge isn't running. Open Faro and turn on the Agent \
+             Bridge (the master switch at the top of the Bridge panel)."
+        )
+    })?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes)
+        .context("agent-endpoint.json is corrupt; toggle the Agent Bridge off and on in Faro")?;
+    let url = v
+        .get("url")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| anyhow!("agent-endpoint.json is missing `url`"))?
+        .to_string();
+    let token = v
+        .get("token")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| anyhow!("agent-endpoint.json is missing `token`"))?
+        .to_string();
+    Ok(Endpoint { url, token })
+}
+
+/// POST a JSON body to a bridge route. The 180s timeout comfortably exceeds the
+/// bridge's 120s approval window, so a call that's blocked waiting for the user
+/// to click Approve in Faro doesn't time out on our side first.
+fn http_post(ep: &Endpoint, route: &str, body: serde_json::Value) -> Result<serde_json::Value> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(180))
+        .build();
+    match agent
+        .post(&format!("{}{}", ep.url, route))
+        .set("Authorization", &format!("Bearer {}", ep.token))
+        .set("Content-Type", "application/json")
+        .send_json(body)
+    {
+        Ok(r) => Ok(r.into_json::<serde_json::Value>()?),
+        Err(ureq::Error::Status(code, r)) => bail!("Agent Bridge error ({code}): {}", err_text(r, code)),
+        Err(e) => bail!(
+            "couldn't reach Faro's Agent Bridge at {} ({e}). Is Faro still running with the bridge on?",
+            ep.url
+        ),
+    }
+}
+
+fn http_get(ep: &Endpoint, route: &str) -> Result<serde_json::Value> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(15))
+        .build();
+    match agent
+        .get(&format!("{}{}", ep.url, route))
+        .set("Authorization", &format!("Bearer {}", ep.token))
+        .call()
+    {
+        Ok(r) => Ok(r.into_json::<serde_json::Value>()?),
+        Err(ureq::Error::Status(code, r)) => bail!("Agent Bridge error ({code}): {}", err_text(r, code)),
+        Err(e) => bail!(
+            "couldn't reach Faro's Agent Bridge at {} ({e}). Is Faro still running with the bridge on?",
+            ep.url
+        ),
+    }
+}
+
+/// Pull the bridge's `{error}` text out of a non-2xx response (falls back to the
+/// status code).
+fn err_text(r: ureq::Response, code: u16) -> String {
+    r.into_json::<serde_json::Value>()
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+        .unwrap_or_else(|| format!("HTTP {code}"))
+}
+
+/// Map a friendly server name to a bridge session id (the REST routes need the
+/// exact id). Mirrors the bridge's own MCP name resolution: exact id wins, then
+/// a unique case-insensitive name; an ambiguous name errors rather than guesses.
+fn resolve_server(ep: &Endpoint, name: &str) -> Result<String> {
+    let body = http_get(ep, "/sessions")?;
+    let sessions = body
+        .get("sessions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if sessions.is_empty() {
+        bail!("no server has granted agent access yet — enable one in Faro's Agent Bridge panel");
+    }
+    if sessions
+        .iter()
+        .any(|s| s.get("id").and_then(|v| v.as_str()) == Some(name))
+    {
+        return Ok(name.to_string());
+    }
+    let matches: Vec<&serde_json::Value> = sessions
+        .iter()
+        .filter(|s| {
+            s.get("name")
+                .and_then(|v| v.as_str())
+                .map(|n| n.eq_ignore_ascii_case(name))
+                .unwrap_or(false)
+        })
+        .collect();
+    match matches.len() {
+        1 => Ok(matches[0]
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()),
+        0 => {
+            let names: Vec<&str> = sessions
+                .iter()
+                .filter_map(|s| s.get("name").and_then(|v| v.as_str()))
+                .collect();
+            bail!("no enabled server matches \"{name}\". Available: {}", names.join(", "))
+        }
+        _ => bail!(
+            "\"{name}\" matches more than one connected server; pass the exact session id (see `faro-cli agent sessions`)"
+        ),
+    }
+}
+
+fn cmd_agent(action: AgentCmd) -> Result<()> {
+    let ep = read_endpoint()?;
+    match action {
+        AgentCmd::Sessions => {
+            let body = http_get(&ep, "/sessions")?;
+            let sessions = body
+                .get("sessions")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if sessions.is_empty() {
+                eprintln!(
+                    "No servers have granted agent access. Enable one in Faro's Agent Bridge panel."
+                );
+            }
+            for s in &sessions {
+                let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                let proto = s.get("protocol").and_then(|v| v.as_str()).unwrap_or("?");
+                let host = s.get("host").and_then(|v| v.as_str()).unwrap_or("");
+                let can_exec = s.get("canExec").and_then(|v| v.as_bool()).unwrap_or(false);
+                println!("{name:<24} {proto:<6} {host:<28} exec={can_exec}");
+            }
+            Ok(())
+        }
+        AgentCmd::Exec { server, command } => {
+            let id = resolve_server(&ep, &server)?;
+            let body = http_post(
+                &ep,
+                "/exec",
+                serde_json::json!({ "sessionId": id, "command": command.join(" ") }),
+            )?;
+            if let Some(out) = body.get("stdout").and_then(|v| v.as_str()) {
+                let mut so = io::stdout();
+                so.write_all(out.as_bytes()).ok();
+                so.flush().ok();
+            }
+            if let Some(e) = body.get("stderr").and_then(|v| v.as_str()) {
+                if !e.is_empty() {
+                    let mut se = io::stderr();
+                    se.write_all(e.as_bytes()).ok();
+                    se.flush().ok();
+                }
+            }
+            if body.get("timedOut").and_then(|v| v.as_bool()).unwrap_or(false) {
+                eprintln!("{}", warn("command timed out before finishing"));
+            }
+            // exitCode is a number or null on the wire; null => 0, like cmd_exec.
+            let code = body.get("exitCode").and_then(|v| v.as_i64()).unwrap_or(0);
+            std::process::exit(code as i32)
+        }
+        AgentCmd::Ls { server, path } => {
+            let id = resolve_server(&ep, &server)?;
+            let mut req = serde_json::json!({ "sessionId": id });
+            if let Some(p) = path {
+                req["path"] = serde_json::Value::String(p);
+            }
+            let body = http_post(&ep, "/list", req)?;
+            print_agent_entries(&body);
+            Ok(())
+        }
+        AgentCmd::Read { server, path } => {
+            let id = resolve_server(&ep, &server)?;
+            let body = http_post(&ep, "/read", serde_json::json!({ "sessionId": id, "path": path }))?;
+            if let Some(content) = body.get("content").and_then(|v| v.as_str()) {
+                let mut so = io::stdout();
+                so.write_all(content.as_bytes()).ok();
+                so.flush().ok();
+            }
+            if body.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false) {
+                eprintln!("\n{}", warn("output truncated at 256 KiB"));
+            }
+            Ok(())
+        }
+        AgentCmd::Search { server, query, path } => {
+            let id = resolve_server(&ep, &server)?;
+            let mut req = serde_json::json!({ "sessionId": id, "query": query });
+            if let Some(p) = path {
+                req["path"] = serde_json::Value::String(p);
+            }
+            let body = http_post(&ep, "/search", req)?;
+            if let Some(matches) = body.get("matches").and_then(|v| v.as_array()) {
+                for m in matches {
+                    if let Some(p) = m.get("path").and_then(|v| v.as_str()) {
+                        println!("{p}");
+                    }
+                }
+            }
+            if body.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false) {
+                eprintln!("{}", warn("results truncated"));
+            }
+            Ok(())
+        }
+        AgentCmd::Download { server, remote_path, local_dir } => {
+            let id = resolve_server(&ep, &server)?;
+            let mut req = serde_json::json!({ "sessionId": id, "path": remote_path });
+            if let Some(d) = local_dir {
+                req["localDir"] = serde_json::Value::String(d);
+            }
+            let body = http_post(&ep, "/download", req)?;
+            print_transfer_started(&body);
+            Ok(())
+        }
+        AgentCmd::Upload { server, local_path, remote_dir } => {
+            let id = resolve_server(&ep, &server)?;
+            let body = http_post(
+                &ep,
+                "/upload",
+                serde_json::json!({ "sessionId": id, "localPath": local_path, "remoteDir": remote_dir }),
+            )?;
+            print_transfer_started(&body);
+            Ok(())
+        }
+        AgentCmd::Transfer { transfer_id } => {
+            let body = http_post(&ep, "/transfer", serde_json::json!({ "transferId": transfer_id }))?;
+            println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+            Ok(())
+        }
+        AgentCmd::Info { server } => {
+            let id = resolve_server(&ep, &server)?;
+            let body = http_post(&ep, "/info", serde_json::json!({ "sessionId": id }))?;
+            println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+            Ok(())
+        }
+        AgentCmd::History { server, limit } => {
+            let mut req = serde_json::json!({ "limit": limit });
+            if let Some(s) = server {
+                let id = resolve_server(&ep, &s)?;
+                req["sessionId"] = serde_json::Value::String(id);
+            }
+            let body = http_post(&ep, "/history", req)?;
+            if let Some(arr) = body.get("history").and_then(|v| v.as_array()) {
+                for h in arr {
+                    let kind = h.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                    let ok = h.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let detail = h.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+                    let mark = if ok { "ok " } else { "ERR" };
+                    println!("[{mark}] {kind:<8} {detail}");
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn print_agent_entries(body: &serde_json::Value) {
+    let Some(entries) = body.get("entries").and_then(|v| v.as_array()) else {
+        return;
+    };
+    for e in entries {
+        let name = e.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        let kind = e
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if kind.contains("dir") {
+            println!("{name}/");
+        } else {
+            let size = e.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+            println!("{name}\t{}", fmt_bytes(size));
+        }
+    }
+}
+
+fn print_transfer_started(body: &serde_json::Value) {
+    let id = body.get("transferId").and_then(|v| v.as_str()).unwrap_or("?");
+    println!("transfer started: {id}");
+    if let Some(dir) = body.get("localDir").and_then(|v| v.as_str()) {
+        println!("  → {dir}");
+    }
+    println!("poll with: faro-cli agent transfer {id}");
 }
 
 // ---- Transfer helpers --------------------------------------------------

@@ -48,6 +48,11 @@ const SEARCH_MAX_RESULTS: usize = 200;
 const SEARCH_MAX_DEPTH: usize = 6;
 const SEARCH_MAX_DIRS: usize = 4000; // hard ceiling on directories visited
 
+/// Filename of the endpoint discovery file written next to `bridge.json` while
+/// the bridge is running. `faro-cli agent …` reads the URL + token from it, so
+/// the AI never has to handle either. Deleted when the bridge stops.
+const DISCOVERY_FILE: &str = "agent-endpoint.json";
+
 /// How much approval friction the user has opted to remove. Every field
 /// defaults to `false` — i.e. the original "approve everything" behaviour.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,6 +72,9 @@ pub struct ApprovalPolicy {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct PersistedConfig {
+    /// Master on/off switch. Default false (serde `default` => old configs
+    /// without the key stay off), so local work exposes nothing until opted in.
+    enabled: bool,
     enabled_profiles: Vec<String>,
     policy: ApprovalPolicy,
 }
@@ -75,6 +83,8 @@ struct PersistedConfig {
 #[serde(rename_all = "camelCase")]
 pub struct BridgeStatus {
     pub running: bool,
+    /// Master switch state (persisted). When false nothing listens at all.
+    pub enabled: bool,
     pub url: Option<String>,
     pub port: Option<u16>,
     pub token: Option<String>,
@@ -124,12 +134,17 @@ enum OpClass {
 struct Running {
     port: u16,
     token: String,
+    /// Path of the discovery file written on start, removed on stop.
+    endpoint_path: PathBuf,
     shutdown: Option<oneshot::Sender<()>>,
 }
 
 #[derive(Default)]
 pub struct BridgeState {
     running: Mutex<Option<Running>>,
+    /// Master on/off switch (the persisted `enabled` key). Default false:
+    /// while off the bridge never starts and no token/discovery file exists.
+    enabled_master: Mutex<bool>,
     /// Runtime allow-list, keyed by session id (per-connect UUID).
     enabled: Mutex<HashSet<String>>,
     /// Persistent allow-list, keyed by profile id; re-applied on connect.
@@ -155,6 +170,31 @@ fn activity(kind: &str, session_id: &str, detail: String, ok: bool) -> ActivityE
         detail,
         ok,
         at: now_millis(),
+    }
+}
+
+/// Publish the live endpoint (`{url, port, token, pid, version}`) so the CLI can
+/// reach the bridge without the user or the agent ever copying a URL or token.
+/// On Unix the file is locked down to the owner (0600); on Windows it inherits
+/// the per-user `%APPDATA%` ACL — the same trust boundary `profiles.json`
+/// already relies on (any process running as this user can read it).
+fn write_discovery_file(path: &PathBuf, port: u16, token: &str) {
+    let body = json!({
+        "url": format!("http://127.0.0.1:{port}"),
+        "port": port,
+        "token": token,
+        "pid": std::process::id(),
+        "version": env!("CARGO_PKG_VERSION"),
+    });
+    let Ok(bytes) = serde_json::to_vec_pretty(&body) else {
+        return;
+    };
+    if std::fs::write(path, &bytes).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
     }
 }
 
@@ -234,6 +274,7 @@ impl BridgeState {
             PersistedConfig::default()
         };
         Ok(Self {
+            enabled_master: Mutex::new(cfg.enabled),
             enabled_profiles: Mutex::new(cfg.enabled_profiles.into_iter().collect()),
             policy: Mutex::new(cfg.policy),
             config_path: Some(path),
@@ -246,6 +287,7 @@ impl BridgeState {
             return;
         };
         let cfg = PersistedConfig {
+            enabled: *self.enabled_master.lock().await,
             enabled_profiles: self.enabled_profiles.lock().await.iter().cloned().collect(),
             policy: *self.policy.lock().await,
         };
@@ -256,11 +298,13 @@ impl BridgeState {
 
     pub async fn status(&self) -> BridgeStatus {
         let running = self.running.lock().await;
+        let enabled = *self.enabled_master.lock().await;
         let enabled_sessions = self.enabled.lock().await.iter().cloned().collect();
         let policy = *self.policy.lock().await;
         match running.as_ref() {
             Some(r) => BridgeStatus {
                 running: true,
+                enabled,
                 url: Some(format!("http://127.0.0.1:{}", r.port)),
                 port: Some(r.port),
                 token: Some(r.token.clone()),
@@ -269,6 +313,7 @@ impl BridgeState {
             },
             None => BridgeStatus {
                 running: false,
+                enabled,
                 url: None,
                 port: None,
                 token: None,
@@ -285,6 +330,19 @@ impl BridgeState {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let port = listener.local_addr()?.port();
         let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+
+        // Publish the live endpoint so `faro-cli agent …` can find it with no
+        // URL/token handling by the user or the agent. Re-resolve the data dir
+        // from `app` here (not from config_path) so it works even on the
+        // load_or_create default-fallback path where config_path is None.
+        let dir = app
+            .path()
+            .app_data_dir()
+            .unwrap_or_else(|_| PathBuf::from("."));
+        std::fs::create_dir_all(&dir).ok();
+        let endpoint_path = dir.join(DISCOVERY_FILE);
+        write_discovery_file(&endpoint_path, port, &token);
+
         let (tx, rx) = oneshot::channel();
 
         let state = self.clone();
@@ -297,6 +355,7 @@ impl BridgeState {
         *self.running.lock().await = Some(Running {
             port,
             token,
+            endpoint_path,
             shutdown: Some(tx),
         });
         Ok(self.status().await)
@@ -304,8 +363,37 @@ impl BridgeState {
 
     pub async fn stop(&self) {
         if let Some(mut r) = self.running.lock().await.take() {
+            // Pull the published endpoint so the CLI immediately sees "not
+            // running" instead of a stale URL/token.
+            let _ = std::fs::remove_file(&r.endpoint_path);
             if let Some(tx) = r.shutdown.take() {
                 let _ = tx.send(());
+            }
+        }
+    }
+
+    /// The master on/off switch the UI exposes (persisted, default off). Turning
+    /// it on starts the bridge (binding a port, minting a token, publishing the
+    /// discovery file) and makes it auto-start on the next launch; turning it
+    /// off stops the bridge and removes the token/discovery file, so local work
+    /// exposes nothing. Per-session grants are left intact across a toggle.
+    pub async fn set_enabled(self: &Arc<Self>, app: AppHandle, on: bool) -> Result<BridgeStatus> {
+        *self.enabled_master.lock().await = on;
+        self.persist().await;
+        if on {
+            self.start(app).await?;
+        } else {
+            self.stop().await;
+        }
+        Ok(self.status().await)
+    }
+
+    /// Called once on launch: bring the bridge up only if the user left the
+    /// master switch on, so the AI path survives app restarts.
+    pub async fn auto_start_if_enabled(self: &Arc<Self>, app: AppHandle) {
+        if *self.enabled_master.lock().await {
+            if let Err(e) = self.start(app).await {
+                tracing::warn!(?e, "agent bridge auto-start failed");
             }
         }
     }
@@ -629,6 +717,7 @@ async fn route(app: &AppHandle, state: &Arc<BridgeState>, req: &Request) -> (u16
         ("POST", "/search") => handle_search(app, state, &req.body).await,
         ("POST", "/info") => handle_info(app, state, &req.body).await,
         ("POST", "/transfer") => handle_transfer_status(app, &req.body).await,
+        ("POST", "/history") => handle_history(app, state, &req.body).await,
         _ => (404, json!({"error": "not found"})),
     }
 }
@@ -776,6 +865,24 @@ async fn handle_transfer_status(app: &AppHandle, body: &[u8]) -> (u16, Value) {
         return (400, json!({"error": "transferId is required"}));
     }
     op_transfer_status(app, &transfer_id).await
+}
+
+async fn handle_history(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    // An empty body (or `{}`) returns the whole recent log.
+    let parsed = if body.is_empty() {
+        json!({})
+    } else {
+        match parse_body(body) {
+            Ok(v) => v,
+            Err(e) => return e,
+        }
+    };
+    let session = parsed
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let limit = parsed.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    op_history(app, state, session, limit).await
 }
 
 // ---- Operation cores (shared by REST routes and MCP tools) ----
@@ -1285,6 +1392,51 @@ async fn op_transfer_status(app: &AppHandle, transfer_id: &str) -> (u16, Value) 
     }
 }
 
+/// Newest-first view of the agent's own activity log — the commands, reads,
+/// transfers and denials that already ran through Faro. The whole log is
+/// readable without per-op approval (it's the agent's own audit trail, already
+/// scoped by the bearer token); when a `session` filter is given we require
+/// that session to be opted-in, mirroring `op_server_info`.
+async fn op_history(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_filter: Option<&str>,
+    limit: usize,
+) -> (u16, Value) {
+    let limit = limit.clamp(1, MAX_ACTIVITY);
+    let filter_id = if let Some(arg) = session_filter {
+        match resolve_session(app, state, Some(arg), false).await {
+            Ok(id) => {
+                if !state.is_enabled(&id).await {
+                    return (403, json!({"error": "session has not granted agent access"}));
+                }
+                Some(id)
+            }
+            Err(msg) => return (400, json!({ "error": msg })),
+        }
+    } else {
+        None
+    };
+
+    let mut entries = state.recent_activity().await; // oldest-first
+    entries.reverse(); // newest-first
+    let out: Vec<Value> = entries
+        .into_iter()
+        .filter(|e| filter_id.as_deref().map_or(true, |id| e.session_id == id))
+        .take(limit)
+        .map(|e| {
+            json!({
+                "kind": e.kind,
+                "detail": e.detail,
+                "ok": e.ok,
+                "at": e.at,
+                "sessionId": e.session_id,
+            })
+        })
+        .collect();
+    (200, json!({ "history": out }))
+}
+
 /// Context about a session — Faro-local metadata only, so no remote round-trip
 /// and no interactive approval. Still gated on the per-session opt-in: we must
 /// not leak host/username/port for sessions the user hasn't granted access to.
@@ -1484,6 +1636,18 @@ fn mcp_tools_list() -> Value {
                     "required": ["transferId"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "faro_history",
+                "description": "Review the recent Agent Bridge activity log — the commands, reads, transfers and denials that have already run through Faro on the user's servers, newest first. Use it to recall what you did earlier in this session or to confirm an action was approved. Optionally filter by `session`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session": session_prop,
+                        "limit": { "type": "integer", "description": "Max entries to return (default 50, max 200)." }
+                    },
+                    "additionalProperties": false
+                }
             }
         ]
     })
@@ -1589,6 +1753,11 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 return tool_error("`transferId` is required");
             };
             mcp_wrap(op_transfer_status(app, &transfer_id).await)
+        }
+        "faro_history" => {
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+            // session_arg is resolved + gated inside op_history only when present.
+            mcp_wrap(op_history(app, state, session_arg, limit).await)
         }
         other => tool_error(&format!("unknown tool: {other}")),
     }

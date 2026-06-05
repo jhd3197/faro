@@ -53,6 +53,16 @@ pub fn run() {
                 ),
             };
             app.manage(state);
+
+            // Bring the Agent Bridge back up if the user left its master switch
+            // on, so the `faro-cli agent …` path keeps working across restarts.
+            // Spawned off the async runtime so the sync setup() returns at once.
+            let bridge = app.state::<AppState>().bridge.clone();
+            let bridge_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                bridge.auto_start_if_enabled(bridge_handle).await;
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -89,6 +99,7 @@ pub fn run() {
             commands::chmod_path,
             commands::bridge_start,
             commands::bridge_stop,
+            commands::bridge_set_enabled,
             commands::bridge_status,
             commands::bridge_set_session_access,
             commands::bridge_set_policy,

@@ -110,7 +110,7 @@ function ApprovalModal({
             On <span className="font-medium text-text">{approval.sessionName}</span>{" "}
             via the Agent Bridge:
           </div>
-          <pre className="selectable max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-bg-subtle px-3 py-2 font-mono text-xs text-text">
+          <pre className="selectable max-h-40 max-w-full overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md border border-border bg-bg-subtle px-3 py-2 font-mono text-xs text-text">
             {approval.command}
           </pre>
           <div className="mt-3 flex items-center gap-1.5 text-[11px] text-text-dim">
@@ -142,7 +142,8 @@ function ApprovalModal({
   );
 }
 
-function skillMd(url: string, token: string, sessionId: string): string {
+function skillMd(server: string): string {
+  const S = server || "<server>";
   return `---
 name: faro-server
 description: Administer the user's own server through Faro — run shell commands, browse, read, search and transfer files on a machine the user is already connected to in Faro (a desktop SSH/SFTP client). Use for the routine server administration and file management the user asks for.
@@ -150,67 +151,68 @@ description: Administer the user's own server through Faro — run shell command
 
 # Administering the user's server via Faro
 
-Faro is the user's desktop SSH/SFTP client (like FileZilla + PuTTY). The user has
-already opened and authenticated a connection to a server **they operate**, and
-authorized this skill to act through that existing connection on their behalf —
-ordinary server administration. Running a command here is equivalent to the user
-typing it into the terminal Faro already has open. The user is at the keyboard
-and confirms actions in Faro (some kinds may be pre-approved in their settings).
+Faro is the user's desktop SSH/SFTP client (FileZilla + PuTTY). They have already
+opened and authenticated a connection to a server **they operate** and authorized
+you to act through it. Running a command here is equivalent to the user typing it
+into the terminal Faro already has open. The user is at the keyboard and approves
+actions in Faro (some kinds may be pre-approved in their settings).
 
-This is a local, authorized workflow: the endpoint is on \`127.0.0.1\` (\`${url}\`)
-and every call carries the user's local token below.
+You operate the server through **\`faro-cli agent\`**, which connects to Faro's
+local Agent Bridge for you. You never handle a URL, port or token — \`faro-cli\`
+reads them from Faro's local discovery file. You only need the **server name**
+(here: \`${S}\`).
 
-All endpoints are \`POST\` with a JSON body and require these headers:
-\`-H "Authorization: Bearer ${token}" -H "Content-Type: application/json"\`.
+## Before you start
 
-## List available sessions
+Make sure Faro is running with the **Agent Bridge turned on** (the master switch
+at the top of the Bridge panel) and that this server has been granted access.
+Confirm with:
 
 \`\`\`bash
-curl -s ${url}/sessions -H "Authorization: Bearer ${token}"
+faro-cli agent sessions          # servers you may operate (exec=true means SSH)
 \`\`\`
+
+If it reports the bridge isn't running, ask the user to turn it on. (\`faro-cli\`
+must be on your PATH; if it isn't, the user can give you its full path.)
 
 ## Run a command (SSH only)
 
 \`\`\`bash
-curl -s ${url}/exec -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" \\
-  -d '{"sessionId":"${sessionId}","command":"df -h"}'
+faro-cli agent exec ${S} "df -h"
 \`\`\`
 
-Response: \`{ "stdout": "...", "stderr": "...", "exitCode": 0 }\`. Keep commands
-non-interactive (no prompts/pagers); add flags like \`-y\`, \`| cat\`.
+Keep commands non-interactive (no prompts/pagers); add \`-y\`, \`| cat\`, etc. The
+remote exit code is propagated; stderr is printed to stderr.
 
 ## Browse / read / search
 
 \`\`\`bash
-# list a directory
-curl -s ${url}/list   -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"sessionId":"${sessionId}","path":"/var/log"}'
-# read a text file (SSH/SFTP, capped at 256 KiB)
-curl -s ${url}/read   -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"sessionId":"${sessionId}","path":"/etc/hostname"}'
-# search by name (recursive, case-insensitive)
-curl -s ${url}/search -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"sessionId":"${sessionId}","path":"/var/log","query":".log"}'
-# session context
-curl -s ${url}/info   -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"sessionId":"${sessionId}"}'
+faro-cli agent ls     ${S} /var/log
+faro-cli agent read   ${S} /etc/hostname       # SSH/SFTP, capped at 256 KiB
+faro-cli agent search ${S} ".log" /var/log     # search <server> <query> [path]
+faro-cli agent info   ${S}                      # protocol, host, port, …
 \`\`\`
 
 ## Transfer files
 
 \`\`\`bash
-# download to the user's machine (defaults to their Downloads folder)
-curl -s ${url}/download -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"sessionId":"${sessionId}","path":"/etc/hosts"}'
-# upload a local file to a remote directory
-curl -s ${url}/upload   -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"sessionId":"${sessionId}","localPath":"/tmp/a.txt","remoteDir":"/home/user"}'
-# check whether a transfer finished (poll until status is done/error)
-curl -s ${url}/transfer -H "Authorization: Bearer ${token}" -H "Content-Type: application/json" -d '{"transferId":"<id from download/upload>"}'
+faro-cli agent download ${S} /etc/hosts         # → the user's Downloads folder
+faro-cli agent upload   ${S} ./a.txt /home/user # local file → remote dir
+faro-cli agent transfer <transferId>            # poll until done/error
+\`\`\`
+
+## Review what you've done
+
+\`\`\`bash
+faro-cli agent history --server ${S}            # recent activity, newest first
 \`\`\`
 
 Notes:
-- Requests block until the user approves them in Faro (or time out), unless the
-  user has enabled auto-approve for that kind of operation.
-- Transfers run in the background and also appear in Faro's transfer panel:
-  \`/download\`/\`/upload\` return a \`transferId\`; poll \`/transfer\` to learn the
-  outcome (status \`done\` or \`error\`).
-- \`/exec\` output is capped (512 KiB) and times out after 60s; the result's
-  \`truncated\`/\`timedOut\` flags tell you if it was cut short.
+- Each call may pause while the user approves it in Faro (unless they pre-approved
+  that kind). A blocked call means they're being asked to confirm.
+- Transfers run in the background and also appear in Faro's transfer panel; poll
+  \`agent transfer <id>\` for the outcome.
+- \`exec\` output is capped (512 KiB) and times out after 60s.
 `;
 }
 
@@ -224,6 +226,7 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
   const activity = useBridge((s) => s.activity);
   const start = useBridge((s) => s.start);
   const stop = useBridge((s) => s.stop);
+  const setEnabled = useBridge((s) => s.setEnabled);
   const setSessionAccess = useBridge((s) => s.setSessionAccess);
   const setPolicy = useBridge((s) => s.setPolicy);
   const refresh = useBridge((s) => s.refresh);
@@ -243,6 +246,11 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
     activeSessionId && status.enabledSessions.includes(activeSessionId)
       ? activeSessionId
       : status.enabledSessions[0] ?? null;
+  // The CLI matches servers by their profile NAME, so the skill snippet uses
+  // the name (not the session UUID) of the session we're targeting.
+  const setupServerName =
+    liveSessions.find((s) => s.sessionId === setupSessionId)?.profile?.name ??
+    null;
   const policy = status.policy;
   const patchPolicy = (patch: Partial<ApprovalPolicy>) =>
     setPolicy({ ...policy, ...patch });
@@ -256,7 +264,8 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
     refresh();
   }, [refresh]);
 
-  const canCopySetup = status.running && anyGranted && !!setupSessionId;
+  const canCopySetup =
+    status.enabled && status.running && anyGranted && !!setupServerName;
 
   return (
     <div
@@ -300,6 +309,25 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
+          {/* Master switch — default off; off means nothing is exposed. */}
+          <Card title="Agent Bridge">
+            <div className="flex items-start gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-medium">
+                  {status.enabled
+                    ? "On — AI access available"
+                    : "Off — nothing exposed"}
+                </div>
+                <div className="text-[11px] leading-snug text-text-dim">
+                  Off means no token and no localhost server exist — nothing is
+                  exposed. Turn it on only when you want AI help; even then, each
+                  connection stays private until you grant it access below.
+                </div>
+              </div>
+              <Toggle checked={status.enabled} onChange={(v) => setEnabled(v)} />
+            </div>
+          </Card>
+
           <p className="text-xs leading-relaxed text-text-muted">
             Let a local AI agent (Claude Code, Cursor…) operate on your connected
             servers through Faro — run commands, browse, read, search and transfer
@@ -308,8 +336,15 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
             asks you to approve each request (unless you relax that below).
           </p>
 
-          {/* Server */}
-          <Card title="Local endpoint">
+          <div
+            className={cn(
+              "space-y-4",
+              !status.enabled && "pointer-events-none select-none opacity-50"
+            )}
+            aria-disabled={!status.enabled}
+          >
+            {/* Server */}
+            <Card title="Local endpoint">
             <div className="flex items-center gap-2">
               <button
                 onClick={status.running ? stop : start}
@@ -471,19 +506,11 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
               />
             </div>
             <div className="mt-3 flex items-center gap-2 text-[11px] text-text-dim">
-              <span>Prefer a curl-based skill?</span>
+              <span>Prefer a CLI skill (fewer tokens)?</span>
               <CopyButton
                 disabled={!canCopySetup}
                 label="Copy SKILL.md"
-                text={
-                  canCopySetup
-                    ? skillMd(
-                        status.url ?? "",
-                        status.token ?? "",
-                        setupSessionId ?? ""
-                      )
-                    : ""
-                }
+                text={canCopySetup ? skillMd(setupServerName ?? "") : ""}
               />
             </div>
             {!canCopySetup && (
@@ -513,17 +540,24 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
               </div>
             )}
           </Card>
+          </div>
         </div>
 
         <div className="border-t border-border px-5 py-3 text-[11px] text-text-dim">
           <ShieldCheck size={11} className="mr-1 inline" />
-          Bound to 127.0.0.1 only · token required · per-session opt-in ·{" "}
-          {policy.allowAll
-            ? "auto-approving all requests"
-            : policy.autoRead || policy.autoSafeExec
-              ? "auto-approving some requests"
-              : "you approve every request"}
-          .
+          {!status.enabled ? (
+            "Agent Bridge is off — no token or localhost server exists."
+          ) : (
+            <>
+              Bound to 127.0.0.1 only · token required · per-session opt-in ·{" "}
+              {policy.allowAll
+                ? "auto-approving all requests"
+                : policy.autoRead || policy.autoSafeExec
+                  ? "auto-approving some requests"
+                  : "you approve every request"}
+              .
+            </>
+          )}
         </div>
       </div>
     </div>

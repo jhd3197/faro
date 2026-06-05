@@ -70,6 +70,7 @@ impl ProfilePreview {
             auth,
             default_remote_path: None,
             color: None,
+            auto_connect: None,
             bucket: None,
             region: None,
             endpoint: None,

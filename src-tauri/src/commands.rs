@@ -569,6 +569,17 @@ pub async fn bridge_stop(state: State<'_, AppState>) -> Result<BridgeStatus, Str
     Ok(state.bridge.status().await)
 }
 
+/// The master on/off switch (persisted, default off). On => start + publish the
+/// discovery file + auto-start next launch; off => stop + remove the token/file.
+#[tauri::command]
+pub async fn bridge_set_enabled(
+    enabled: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<BridgeStatus, String> {
+    state.bridge.set_enabled(app, enabled).await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn bridge_status(state: State<'_, AppState>) -> Result<BridgeStatus, String> {
     Ok(state.bridge.status().await)

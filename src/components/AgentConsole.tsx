@@ -128,7 +128,7 @@ export function AgentConsoleDock() {
       <div
         ref={scrollRef}
         onScroll={onScroll}
-        className="flex-1 space-y-1.5 overflow-y-auto px-3 py-2.5"
+        className="min-w-0 flex-1 space-y-1.5 overflow-y-auto px-3 py-2.5"
       >
         {shown.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-xs text-text-dim">
@@ -359,7 +359,7 @@ function ConsoleEntry({
         <span className="shrink-0 text-[10px] text-text-dim">{relTime(entry.at)}</span>
       </button>
       {hasOutput && open && (
-        <pre className="selectable max-h-72 overflow-auto whitespace-pre-wrap break-words border-t border-border-subtle bg-bg-panel px-2.5 py-1.5 font-mono text-[11px] leading-relaxed text-text-muted">
+        <pre className="selectable max-h-72 max-w-full overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] border-t border-border-subtle bg-bg-panel px-2.5 py-1.5 font-mono text-[11px] leading-relaxed text-text-muted">
           {entry.output}
         </pre>
       )}
