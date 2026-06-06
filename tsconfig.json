@@ -17,9 +17,10 @@
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@faro/file-ui": ["./packages/file-ui/src/index.ts"]
     }
   },
-  "include": ["src"],
+  "include": ["src", "packages/file-ui/src"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

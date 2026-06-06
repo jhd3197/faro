@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { ServerRail } from "./components/ServerRail";
 import { DualPaneBrowser } from "./components/DualPaneBrowser";
+import { FileBrowser } from "./components/FileBrowser";
+import { FileUiBridge } from "./components/FileUiBridge";
 import { TerminalDock } from "./components/Terminal";
 import { TransferQueue } from "./components/TransferQueue";
 import { Settings } from "./components/Settings";
@@ -25,10 +27,12 @@ import {
   Info,
   AlertTriangle,
   Radio,
+  Columns2,
 } from "lucide-react";
 import { useEditor } from "./stores/editorStore";
 import { useToasts, type ToastVariant } from "./stores/toastStore";
 import { useBridge } from "./stores/bridgeStore";
+import { useSettings } from "./stores/settingsStore";
 import { Toaster } from "./components/ui/Toaster";
 import { CommandPalette } from "./components/CommandPalette";
 import { KeyboardShortcutsDialog } from "./components/KeyboardShortcutsDialog";
@@ -49,6 +53,7 @@ export default function App() {
   const toggleTerminal = useLayout((s) => s.toggleTerminal);
   const terminalVisible = !!activeSessionId && terminalOpen && supportsTerminal;
   const consoleOpen = useLayout((s) => s.consoleOpen);
+  const browserLayout = useSettings((s) => s.browserLayout);
   const dialog = useLayout((s) => s.dialog);
   const closeDialog = useLayout((s) => s.closeDialog);
   const togglePanel = useTransfers((s) => s.togglePanel);
@@ -81,7 +86,9 @@ export default function App() {
         <ServerRail />
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex-1 overflow-hidden">
-            <DualPaneBrowser />
+            <FileUiBridge>
+              {browserLayout === "dual" ? <DualPaneBrowser /> : <FileBrowser />}
+            </FileUiBridge>
           </div>
           {consoleOpen && (
             <div className="h-64 border-t border-border">
@@ -162,6 +169,8 @@ function StatusBar({
   const openDialog = useLayout((s) => s.openDialog);
   const consoleOpen = useLayout((s) => s.consoleOpen);
   const toggleConsole = useLayout((s) => s.toggleConsole);
+  const browserLayout = useSettings((s) => s.browserLayout);
+  const setBrowserLayout = useSettings((s) => s.setBrowserLayout);
 
   // Dismiss the status-bar popovers on Escape or a click outside, matching how
   // every other overlay closes (the hover-leave behavior stays as a bonus).
@@ -358,6 +367,16 @@ function StatusBar({
         title="Agent console — live view of what the agent is doing over the bridge"
       >
         Console
+      </PillButton>
+      <PillButton
+        active={browserLayout === "dual"}
+        onClick={() =>
+          setBrowserLayout(browserLayout === "dual" ? "single" : "dual")
+        }
+        icon={<Columns2 size={11} />}
+        title="Split view — show local files next to the server"
+      >
+        Split
       </PillButton>
       <PillButton
         active={terminalOpen}

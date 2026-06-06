@@ -71,6 +71,7 @@ impl EditManager {
         session: Arc<Session>,
         session_id: String,
         remote_path: String,
+        editor: Option<String>,
         app: AppHandle,
     ) -> Result<EditStartedEvent> {
         let edit_id = Uuid::new_v4().to_string();
@@ -196,9 +197,10 @@ impl EditManager {
             }
         });
 
-        // Spawn the system editor — non-blocking; we keep watching regardless
-        // of whether the editor process exits.
-        spawn_editor(&local_path)?;
+        // Spawn the editor — non-blocking; we keep watching regardless of
+        // whether the editor process exits. Uses the configured editor command
+        // when set, else the OS default app.
+        spawn_editor(&local_path, editor.as_deref())?;
 
         let started = EditStartedEvent {
             edit_id: edit_id.clone(),
@@ -242,7 +244,17 @@ fn is_write_event(event: &Event) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn spawn_editor(path: &std::path::Path) -> Result<()> {
+fn spawn_editor(path: &std::path::Path, editor: Option<&str>) -> Result<()> {
+    if let Some(cmd) = editor.map(str::trim).filter(|c| !c.is_empty()) {
+        // Route through `cmd /c` so PATH shims like `code` (code.cmd) resolve;
+        // a bare CreateProcess won't find a .cmd by name.
+        std::process::Command::new("cmd")
+            .args(["/c", cmd])
+            .arg(path)
+            .spawn()
+            .with_context(|| format!("spawn editor `{cmd}` for {}", path.display()))?;
+        return Ok(());
+    }
     // `cmd /c start "" <path>` opens the file with its associated app.
     // The empty `""` is the window title — required because `start` interprets
     // a single quoted arg as the title, not the target.
@@ -255,7 +267,14 @@ fn spawn_editor(path: &std::path::Path) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn spawn_editor(path: &std::path::Path) -> Result<()> {
+fn spawn_editor(path: &std::path::Path, editor: Option<&str>) -> Result<()> {
+    if let Some(cmd) = editor.map(str::trim).filter(|c| !c.is_empty()) {
+        std::process::Command::new(cmd)
+            .arg(path)
+            .spawn()
+            .with_context(|| format!("spawn editor `{cmd}` for {}", path.display()))?;
+        return Ok(());
+    }
     std::process::Command::new("open")
         .arg(path)
         .spawn()
@@ -264,16 +283,19 @@ fn spawn_editor(path: &std::path::Path) -> Result<()> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn spawn_editor(path: &std::path::Path) -> Result<()> {
-    // Prefer $EDITOR for terminals, else xdg-open for the desktop.
-    if let Ok(editor) = std::env::var("EDITOR") {
-        if !editor.is_empty() {
-            std::process::Command::new(editor)
-                .arg(path)
-                .spawn()
-                .with_context(|| format!("spawn $EDITOR for {}", path.display()))?;
-            return Ok(());
-        }
+fn spawn_editor(path: &std::path::Path, editor: Option<&str>) -> Result<()> {
+    // Explicit setting wins, then $EDITOR, else xdg-open for the desktop.
+    let chosen = editor
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .map(str::to_owned)
+        .or_else(|| std::env::var("EDITOR").ok().filter(|e| !e.is_empty()));
+    if let Some(cmd) = chosen {
+        std::process::Command::new(&cmd)
+            .arg(path)
+            .spawn()
+            .with_context(|| format!("spawn editor `{cmd}` for {}", path.display()))?;
+        return Ok(());
     }
     std::process::Command::new("xdg-open")
         .arg(path)

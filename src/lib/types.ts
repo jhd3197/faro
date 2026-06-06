@@ -150,27 +150,20 @@ export const S3_PROVIDER_PRESETS: Record<S3Provider, S3ProviderPreset> = {
   },
 };
 
-export type FileKind = "file" | "directory" | "symlink" | "other";
+// File-system types live in the @faro/file-ui package (the open-source UI owns
+// them) and are re-exported here so the rest of the app keeps importing from
+// "@/lib/types" unchanged. Single source of truth, no duplication.
+export {
+  LOCAL_SESSION,
+  type FileKind,
+  type DirEntry,
+  type Capabilities,
+  type SessionId,
+} from "@faro/file-ui";
 
-export interface DirEntry {
-  name: string;
-  path: string;
-  kind: FileKind;
-  size: number;
-  modified?: number; // unix seconds
-  mode?: number; // posix mode bits when applicable
-}
-
-export interface Capabilities {
-  canChmod: boolean;
-  canSymlink: boolean;
-  canRename: boolean;
-  hasDirectories: boolean; // false for object stores once we add them
-}
-
-// A SessionId can be either a real SSH session UUID or the sentinel "local".
-export type SessionId = string;
-export const LOCAL_SESSION: SessionId = "local";
+// Local re-import so types defined in THIS file (e.g. SyncDelete) can still
+// reference FileKind below.
+import type { FileKind } from "@faro/file-ui";
 
 export interface TerminalDataEvent {
   terminalId: string;
@@ -240,6 +233,17 @@ export interface BridgeApproval {
 }
 
 export type ApprovalDecision = "approve" | "deny";
+
+/** A user-defined, pre-approved command the agent can run by name. The agent
+ *  only supplies the name; the exact `command` was vetted by the user, so it
+ *  runs with no approval prompt. Managed only in Faro's UI (never over the
+ *  bridge), so the agent can't author one. */
+export interface SavedCommand {
+  id: string;
+  name: string;
+  command: string;
+  description: string;
+}
 
 // Live agent console (streamed exec output + op feed).
 export interface AgentExecStart {

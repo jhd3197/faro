@@ -10,9 +10,11 @@ import {
   type SortDirection,
   type PaneViewMode,
   type PaneDensity,
+  type BrowserLayout,
   type TerminalTheme,
 } from "@/stores/settingsStore";
 import { useBridge } from "@/stores/bridgeStore";
+import { open } from "@tauri-apps/plugin-dialog";
 import { cn } from "@/lib/cn";
 
 interface Props {
@@ -95,6 +97,41 @@ export function Settings({ onClose }: Props) {
               checked={s.autoOpenTransferPanel}
               onChange={s.setAutoOpenTransferPanel}
             />
+            <Field
+              label="Download folder"
+              help="Where downloads land. Leave blank to use your system Downloads folder."
+            >
+              <div className="flex items-center gap-1.5">
+                <input
+                  value={s.defaultDownloadFolder}
+                  onChange={(e) => s.setDefaultDownloadFolder(e.target.value)}
+                  placeholder="System Downloads"
+                  className="min-w-0 flex-1 rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-sm outline-none focus:border-accent"
+                />
+                <button
+                  onClick={async () => {
+                    const picked = await open({
+                      directory: true,
+                      title: "Choose a download folder",
+                    });
+                    if (typeof picked === "string")
+                      s.setDefaultDownloadFolder(picked);
+                  }}
+                  className="shrink-0 rounded-md border border-border px-2.5 py-1.5 text-sm text-text-muted hover:bg-bg-hover hover:text-text"
+                >
+                  Browse…
+                </button>
+                {s.defaultDownloadFolder && (
+                  <button
+                    onClick={() => s.setDefaultDownloadFolder("")}
+                    className="shrink-0 rounded-md border border-border px-2 py-1.5 text-xs text-text-dim hover:text-text"
+                    title="Reset to system Downloads"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
+            </Field>
           </Section>
 
           <Section title="File panes" icon={<FolderTree size={13} />}>
@@ -123,13 +160,14 @@ export function Settings({ onClose }: Props) {
                 ]}
               />
             </Field>
-            <Field label="View" help="Switchable per pane from the toolbar too.">
+            <Field label="View" help="Switchable from the toolbar too.">
               <Segmented<PaneViewMode>
                 value={s.paneViewMode}
                 onChange={s.setPaneViewMode}
                 options={[
                   { value: "details", label: "Details" },
                   { value: "list", label: "List" },
+                  { value: "grid", label: "Grid" },
                 ]}
               />
               <Segmented<PaneDensity>
@@ -140,6 +178,48 @@ export function Settings({ onClose }: Props) {
                   { value: "compact", label: "Compact" },
                 ]}
               />
+            </Field>
+            <Field
+              label="Browser layout"
+              help="Single = one server-focused pane (Upload button). Split = local and remote side by side."
+            >
+              <Segmented<BrowserLayout>
+                value={s.browserLayout}
+                onChange={s.setBrowserLayout}
+                options={[
+                  { value: "single", label: "Single" },
+                  { value: "dual", label: "Split" },
+                ]}
+              />
+            </Field>
+            <Field
+              label="Default editor"
+              help="Command used to open files for edit-in-place (e.g. code). Blank = your OS default app."
+            >
+              <div className="flex items-center gap-1.5">
+                <input
+                  value={s.defaultEditor}
+                  onChange={(e) => s.setDefaultEditor(e.target.value)}
+                  placeholder="OS default app"
+                  className="min-w-0 flex-1 rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-sm outline-none focus:border-accent"
+                />
+                <button
+                  onClick={() => s.setDefaultEditor("code")}
+                  className="shrink-0 rounded-md border border-border px-2.5 py-1.5 text-sm text-text-muted hover:bg-bg-hover hover:text-text"
+                  title="Use VS Code (the `code` command)"
+                >
+                  VS Code
+                </button>
+                {s.defaultEditor && (
+                  <button
+                    onClick={() => s.setDefaultEditor("")}
+                    className="shrink-0 rounded-md border border-border px-2 py-1.5 text-xs text-text-dim hover:text-text"
+                    title="Reset to OS default"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
             </Field>
           </Section>
 

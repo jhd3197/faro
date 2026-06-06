@@ -14,6 +14,7 @@ import type {
   ApprovalDecision,
   ApprovalPolicy,
   AgentConsoleEntry,
+  SavedCommand,
 } from "@/lib/types";
 
 const MAX_CONSOLE = 200;
@@ -35,6 +36,7 @@ interface BridgeStoreState {
   activity: BridgeActivity[];
   approvals: BridgeApproval[];
   console: AgentConsoleEntry[];
+  savedCommands: SavedCommand[];
   loaded: boolean;
 
   init: () => Promise<() => void>;
@@ -46,6 +48,13 @@ interface BridgeStoreState {
   setPolicy: (policy: ApprovalPolicy) => Promise<void>;
   respond: (requestId: string, decision: ApprovalDecision) => Promise<void>;
   clearConsole: () => void;
+  // History (in-memory activity log, last 200).
+  refreshActivity: () => Promise<void>;
+  clearActivity: () => Promise<void>;
+  // Saved commands (pre-approved; managed only in the UI).
+  loadCommands: () => Promise<void>;
+  saveCommand: (command: SavedCommand) => Promise<void>;
+  deleteCommand: (id: string) => Promise<void>;
 }
 
 export const useBridge = create<BridgeStoreState>((set, get) => ({
@@ -53,17 +62,19 @@ export const useBridge = create<BridgeStoreState>((set, get) => ({
   activity: [],
   approvals: [],
   console: [],
+  savedCommands: [],
   loaded: false,
 
   init: async () => {
     if (!get().loaded) {
       set({ loaded: true });
       try {
-        const [status, activity] = await Promise.all([
+        const [status, activity, savedCommands] = await Promise.all([
           ipc.bridgeStatus(),
           ipc.bridgeActivity(),
+          ipc.bridgeListCommands(),
         ]);
-        set({ status, activity: activity.slice().reverse() });
+        set({ status, activity: activity.slice().reverse(), savedCommands });
       } catch {
         // backend not ready yet — listeners below still attach
       }
@@ -214,4 +225,45 @@ export const useBridge = create<BridgeStoreState>((set, get) => ({
   },
 
   clearConsole: () => set({ console: [] }),
+
+  refreshActivity: async () => {
+    try {
+      set({ activity: (await ipc.bridgeActivity()).slice().reverse() });
+    } catch {
+      // ignore
+    }
+  },
+
+  clearActivity: async () => {
+    set({ activity: [] });
+    try {
+      await ipc.bridgeClearActivity();
+    } catch {
+      // best effort — the view is already cleared
+    }
+  },
+
+  loadCommands: async () => {
+    try {
+      set({ savedCommands: await ipc.bridgeListCommands() });
+    } catch {
+      // ignore
+    }
+  },
+
+  saveCommand: async (command) => {
+    try {
+      set({ savedCommands: await ipc.bridgeSaveCommand(command) });
+    } catch (e) {
+      toast.error("Couldn't save command", String(e));
+    }
+  },
+
+  deleteCommand: async (id) => {
+    try {
+      set({ savedCommands: await ipc.bridgeDeleteCommand(id) });
+    } catch (e) {
+      toast.error("Couldn't delete command", String(e));
+    }
+  },
 }));

@@ -384,6 +384,39 @@ impl SshSession {
         }
     }
 
+    /// Run an SFTP operation, transparently reconnecting + reopening the
+    /// subsystem once if the transport died (e.g. the session sat idle past the
+    /// keepalive budget). The closure receives a fresh handle to the SFTP session
+    /// and MUST do its open + IO inside, because it can run twice. Reuses the
+    /// single-flight `with_reconnect`/`ensure_sftp` machinery: on a retry,
+    /// `reconnect()` has nulled the cached channel so `ensure_sftp()` reopens a
+    /// fresh one. This is what makes the bridge's list/read/transfer paths (which
+    /// operate on the cached SFTP handle, not just open it) survive a long idle.
+    pub async fn with_sftp<T, F, Fut>(&self, op: F) -> Result<T>
+    where
+        F: Fn(Arc<Mutex<SftpSession>>) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let op = &op;
+        self.with_reconnect(move || async move {
+            let cell = self.ensure_sftp().await?;
+            op(cell).await
+        })
+        .await
+    }
+
+    /// Cheap proactive liveness probe: if the SSH transport is already dead,
+    /// reconnect it now so the next op doesn't eat the first failure. Does NOT
+    /// open SFTP (keeps exec-only sessions cheap; the `with_sftp` retry covers
+    /// the subsystem). Best-effort — callers ignore the result.
+    pub async fn ensure_alive(&self) -> Result<()> {
+        if self.handle.lock().await.is_closed() {
+            let generation = self.generation.load(Ordering::Acquire);
+            self.reconnect(generation).await?;
+        }
+        Ok(())
+    }
+
     /// Run a single non-interactive command on a fresh exec channel and collect
     /// its full stdout/stderr + exit code, unbounded. Thin wrapper over
     /// `exec_bounded` with no caps.

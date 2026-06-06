@@ -3,6 +3,7 @@ use crate::remotefs::{Capabilities, DirEntry, RemoteFs};
 use crate::session::{HostDecision, Session};
 use crate::transfer::{OverwritePolicy, Transfer};
 use crate::AppState;
+use base64::Engine as _;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
 
@@ -104,6 +105,39 @@ pub async fn capabilities(
 ) -> Result<Capabilities, String> {
     let fs = fs_for(&session_id, &state).await?;
     Ok(fs.capabilities())
+}
+
+/// Largest local file we'll slurp for an image thumbnail. Beyond this the grid
+/// falls back to a type icon rather than reading a huge file into memory.
+const MAX_PREVIEW_BYTES: u64 = 4 * 1024 * 1024; // 4 MiB
+
+/// Read a small **local** file and return it base64-encoded, so the grid view
+/// can render a real image preview instead of a generic icon. Local-only and
+/// size-capped: remote previews would need a per-protocol read primitive, which
+/// the `RemoteFs` trait doesn't expose yet — the frontend treats an error here
+/// as "no preview" and shows the icon.
+#[tauri::command]
+pub async fn read_file_preview(
+    session_id: String,
+    path: String,
+) -> Result<String, String> {
+    if session_id != LOCAL_SESSION {
+        return Err("preview is only supported for local files".into());
+    }
+    let data = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
+        let meta = std::fs::metadata(&path)?;
+        if meta.len() > MAX_PREVIEW_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "file too large for preview",
+            ));
+        }
+        std::fs::read(&path)
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(data))
 }
 
 // ---------- Terminal ----------
@@ -528,6 +562,7 @@ fn parent_of(p: &str) -> String {
 pub async fn start_edit(
     session_id: String,
     remote_path: String,
+    editor: Option<String>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<crate::editor::EditStartedEvent, String> {
@@ -538,7 +573,7 @@ pub async fn start_edit(
         .ok_or_else(|| format!("session {session_id} not found"))?;
     state
         .editors
-        .start(session, session_id, remote_path, app)
+        .start(session, session_id, remote_path, editor, app)
         .await
         .map_err(err)
 }
@@ -553,7 +588,7 @@ pub async fn stop_edit(
 
 // ---------- Agent Bridge ----------
 
-use crate::bridge::{ActivityEntry, ApprovalDecision, ApprovalPolicy, BridgeStatus};
+use crate::bridge::{ActivityEntry, ApprovalDecision, ApprovalPolicy, BridgeStatus, SavedCommand};
 
 #[tauri::command]
 pub async fn bridge_start(
@@ -623,6 +658,37 @@ pub async fn bridge_activity(
     state: State<'_, AppState>,
 ) -> Result<Vec<ActivityEntry>, String> {
     Ok(state.bridge.recent_activity().await)
+}
+
+#[tauri::command]
+pub async fn bridge_clear_activity(state: State<'_, AppState>) -> Result<(), String> {
+    state.bridge.clear_activity().await;
+    Ok(())
+}
+
+// ---------- Saved commands (pre-approved; local-UI managed only) ----------
+
+#[tauri::command]
+pub async fn bridge_list_commands(
+    state: State<'_, AppState>,
+) -> Result<Vec<SavedCommand>, String> {
+    Ok(state.bridge.list_commands().await)
+}
+
+#[tauri::command]
+pub async fn bridge_save_command(
+    command: SavedCommand,
+    state: State<'_, AppState>,
+) -> Result<Vec<SavedCommand>, String> {
+    Ok(state.bridge.upsert_command(command).await)
+}
+
+#[tauri::command]
+pub async fn bridge_delete_command(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<SavedCommand>, String> {
+    Ok(state.bridge.delete_command(&id).await)
 }
 
 // ---------- Agent console export ----------

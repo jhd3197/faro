@@ -12,14 +12,25 @@ import {
   CheckCircle2,
   Ban,
   Power,
+  Plus,
+  Pencil,
+  Trash2,
+  RefreshCw,
+  Play,
 } from "lucide-react";
 import { useBridge } from "@/stores/bridgeStore";
 import { useConnections } from "@/stores/connectionsStore";
 import { useLayout } from "@/stores/layoutStore";
 import { useDialog } from "@/hooks/useDialog";
+import { ConfirmModal } from "./ConfirmModal";
 import { cn } from "@/lib/cn";
 import { relTime } from "@/lib/format";
-import type { BridgeApproval, ApprovalPolicy } from "@/lib/types";
+import type {
+  BridgeApproval,
+  ApprovalPolicy,
+  BridgeActivity,
+  SavedCommand,
+} from "@/lib/types";
 
 // Phrase the approval prompt per operation kind.
 const APPROVAL_COPY: Record<string, { title: string; foot: string }> = {
@@ -142,8 +153,37 @@ function ApprovalModal({
   );
 }
 
-function skillMd(server: string): string {
+function skillMd(server: string, commands: SavedCommand[]): string {
   const S = server || "<server>";
+  const savedBlock =
+    commands.length > 0
+      ? `## Saved commands (prefer these)
+
+The user has saved these named, **pre-approved** commands. Prefer running one by
+name over composing a raw command — it runs immediately (no approval prompt) and
+exactly as the user vetted it. You only supply the name and the server:
+
+\`\`\`bash
+faro-cli agent commands                          # list saved commands
+faro-cli agent run "<name>" ${S}                 # run one by name
+\`\`\`
+
+Available:
+${commands
+  .map(
+    (c) =>
+      `- \`${c.name}\` — \`${c.command}\`${c.description ? `  (${c.description})` : ""}`
+  )
+  .join("\n")}
+
+`
+      : `## Saved commands
+
+The user can save named, pre-approved commands in Faro's Agent Bridge panel; once
+they do, run them with \`faro-cli agent run "<name>" ${S}\` (no approval prompt).
+Check what's available any time with \`faro-cli agent commands\`.
+
+`;
   return `---
 name: faro-server
 description: Administer the user's own server through Faro — run shell commands, browse, read, search and transfer files on a machine the user is already connected to in Faro (a desktop SSH/SFTP client). Use for the routine server administration and file management the user asks for.
@@ -175,7 +215,7 @@ faro-cli agent sessions          # servers you may operate (exec=true means SSH)
 If it reports the bridge isn't running, ask the user to turn it on. (\`faro-cli\`
 must be on your PATH; if it isn't, the user can give you its full path.)
 
-## Run a command (SSH only)
+${savedBlock}## Run a command (SSH only)
 
 \`\`\`bash
 faro-cli agent exec ${S} "df -h"
@@ -230,6 +270,12 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
   const setSessionAccess = useBridge((s) => s.setSessionAccess);
   const setPolicy = useBridge((s) => s.setPolicy);
   const refresh = useBridge((s) => s.refresh);
+  const savedCommands = useBridge((s) => s.savedCommands);
+  const saveCommand = useBridge((s) => s.saveCommand);
+  const deleteCommand = useBridge((s) => s.deleteCommand);
+  const loadCommands = useBridge((s) => s.loadCommands);
+  const refreshActivity = useBridge((s) => s.refreshActivity);
+  const clearActivity = useBridge((s) => s.clearActivity);
   const setConsoleOpen = useLayout((s) => s.setConsoleOpen);
 
   const activeSessionId = useConnections((s) => s.activeSessionId);
@@ -262,7 +308,16 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     refresh();
-  }, [refresh]);
+    loadCommands();
+  }, [refresh, loadCommands]);
+
+  // Resolve a session id -> profile name + color for the history rows.
+  const sessionMeta = new Map(
+    liveSessions.map((s) => [
+      s.sessionId,
+      { name: s.profile?.name ?? "", color: s.profile?.color },
+    ])
+  );
 
   const canCopySetup =
     status.enabled && status.running && anyGranted && !!setupServerName;
@@ -480,39 +535,43 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
             )}
           </Card>
 
-          {/* Setup */}
-          <Card title="Connect Claude Code">
+          {/* Setup — CLI-first (lightweight); MCP is the advanced option. */}
+          <Card title="Connect your AI agent">
             <div className="mb-2 text-xs text-text-muted">
-              Native MCP — run this in your project and Claude Code gains{" "}
-              <span className="font-mono">faro_exec</span>,{" "}
-              <span className="font-mono">faro_list_dir</span>,{" "}
-              <span className="font-mono">faro_read_file</span>,{" "}
-              <span className="font-mono">faro_search</span>,{" "}
-              <span className="font-mono">faro_download</span>/
-              <span className="font-mono">upload</span> + more (approval follows
-              your policy above):
+              <span className="font-medium text-text">Recommended.</span> Paste this
+              skill into your agent (Claude Code, Cursor…). It teaches it the
+              lightweight <span className="font-mono">faro-cli agent</span> commands
+              — server name pre-filled, your saved commands listed — so it spends far
+              fewer tokens than the raw API.
             </div>
-            <div className="flex items-center gap-2">
-              <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1 font-mono text-[10px] text-text-muted">
-                {canCopySetup
-                  ? mcpAddCmd(status.url ?? "", status.token ?? "")
-                  : "claude mcp add --transport http faro …"}
-              </code>
-              <CopyButton
-                disabled={!canCopySetup}
-                text={
-                  canCopySetup ? mcpAddCmd(status.url ?? "", status.token ?? "") : ""
-                }
-              />
-            </div>
-            <div className="mt-3 flex items-center gap-2 text-[11px] text-text-dim">
-              <span>Prefer a CLI skill (fewer tokens)?</span>
-              <CopyButton
-                disabled={!canCopySetup}
-                label="Copy SKILL.md"
-                text={canCopySetup ? skillMd(setupServerName ?? "") : ""}
-              />
-            </div>
+            <CopyButton
+              wide
+              disabled={!canCopySetup}
+              label="Copy SKILL.md"
+              text={
+                canCopySetup ? skillMd(setupServerName ?? "", savedCommands) : ""
+              }
+            />
+            <details className="mt-3 text-[11px] text-text-dim">
+              <summary className="cursor-pointer select-none hover:text-text">
+                Advanced: native MCP (more tokens)
+              </summary>
+              <div className="mt-2 flex items-center gap-2">
+                <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1 font-mono text-[10px] text-text-muted">
+                  {canCopySetup
+                    ? mcpAddCmd(status.url ?? "", status.token ?? "")
+                    : "claude mcp add --transport http faro …"}
+                </code>
+                <CopyButton
+                  disabled={!canCopySetup}
+                  text={
+                    canCopySetup
+                      ? mcpAddCmd(status.url ?? "", status.token ?? "")
+                      : ""
+                  }
+                />
+              </div>
+            </details>
             {!canCopySetup && (
               <div className="mt-1.5 text-[11px] text-text-dim">
                 Start the bridge and grant access to a session to enable this.
@@ -520,26 +579,20 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
             )}
           </Card>
 
-          {/* Activity */}
-          <Card title="Activity">
-            {activity.length === 0 ? (
-              <div className="text-xs text-text-dim">
-                No agent activity yet. Approved commands and denials show up here.
-              </div>
-            ) : (
-              <div className="max-h-48 space-y-1 overflow-y-auto">
-                {activity.slice(0, 60).map((a) => (
-                  <div key={a.id} className="flex items-start gap-2 text-[11px]">
-                    <ActivityIcon kind={a.kind} ok={a.ok} />
-                    <span className="min-w-0 flex-1 truncate font-mono text-text-muted">
-                      {a.detail}
-                    </span>
-                    <span className="shrink-0 text-text-dim">{relTime(a.at)}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </Card>
+          {/* Saved commands — pre-approved, run by name. */}
+          <SavedCommandsCard
+            commands={savedCommands}
+            onSave={saveCommand}
+            onDelete={deleteCommand}
+          />
+
+          {/* History — what the agent has done (in-memory, last 200). */}
+          <HistoryCard
+            activity={activity}
+            sessionMeta={sessionMeta}
+            onRefresh={refreshActivity}
+            onClear={clearActivity}
+          />
           </div>
         </div>
 
@@ -685,4 +738,262 @@ function ActivityIcon({ kind, ok }: { kind: string; ok: boolean }) {
   if (kind === "error" || !ok)
     return <CircleAlert size={12} className="mt-0.5 shrink-0 text-danger" />;
   return <CheckCircle2 size={12} className="mt-0.5 shrink-0 text-success" />;
+}
+
+function SavedCommandsCard({
+  commands,
+  onSave,
+  onDelete,
+}: {
+  commands: SavedCommand[];
+  onSave: (c: SavedCommand) => void;
+  onDelete: (id: string) => void;
+}) {
+  const [editing, setEditing] = useState<SavedCommand | "new" | null>(null);
+  const [deleting, setDeleting] = useState<SavedCommand | null>(null);
+  return (
+    <Card title="Saved commands">
+      <div className="mb-2 flex items-start gap-2">
+        <div className="min-w-0 flex-1 text-[11px] leading-snug text-text-dim">
+          Named, <span className="text-warning">pre-approved</span> commands the
+          agent runs by name with no prompt — it can't change the command, only run
+          it. (<span className="font-mono">faro-cli agent run "&lt;name&gt;"</span>)
+        </div>
+        <button
+          onClick={() => setEditing("new")}
+          className="flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] text-text-muted hover:bg-bg-hover hover:text-text"
+        >
+          <Plus size={12} /> Add
+        </button>
+      </div>
+      {commands.length === 0 ? (
+        <div className="text-xs text-text-dim">
+          No saved commands yet. Add one the agent can run by name.
+        </div>
+      ) : (
+        <div className="space-y-1">
+          {commands.map((c) => (
+            <div
+              key={c.id}
+              className="group flex items-center gap-2 rounded-md bg-bg px-2 py-1.5"
+            >
+              <Play size={12} className="shrink-0 text-success" />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="truncate text-[12px] font-medium">{c.name}</span>
+                  {c.description && (
+                    <span className="truncate text-[10px] text-text-dim">
+                      {c.description}
+                    </span>
+                  )}
+                </div>
+                <div className="truncate font-mono text-[10px] text-text-muted">
+                  {c.command}
+                </div>
+              </div>
+              <button
+                onClick={() => setEditing(c)}
+                title="Edit"
+                className="shrink-0 rounded p-1 text-text-dim opacity-0 hover:bg-bg-hover hover:text-text group-hover:opacity-100"
+              >
+                <Pencil size={12} />
+              </button>
+              <button
+                onClick={() => setDeleting(c)}
+                title="Delete"
+                className="shrink-0 rounded p-1 text-text-dim opacity-0 hover:bg-bg-hover hover:text-danger group-hover:opacity-100"
+              >
+                <Trash2 size={12} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {editing && (
+        <SavedCommandEditor
+          command={editing === "new" ? null : editing}
+          onClose={() => setEditing(null)}
+          onSave={(c) => {
+            onSave(c);
+            setEditing(null);
+          }}
+        />
+      )}
+      {deleting && (
+        <ConfirmModal
+          title={`Delete "${deleting.name}"?`}
+          message="The agent will no longer be able to run this command by name."
+          destructive
+          confirmLabel="Delete"
+          onClose={() => setDeleting(null)}
+          onConfirm={() => {
+            onDelete(deleting.id);
+            setDeleting(null);
+          }}
+        />
+      )}
+    </Card>
+  );
+}
+
+function SavedCommandEditor({
+  command,
+  onClose,
+  onSave,
+}: {
+  command: SavedCommand | null;
+  onClose: () => void;
+  onSave: (c: SavedCommand) => void;
+}) {
+  const [name, setName] = useState(command?.name ?? "");
+  const [cmd, setCmd] = useState(command?.command ?? "");
+  const [description, setDescription] = useState(command?.description ?? "");
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  useDialog(panelRef, { onClose });
+  const canSave = name.trim() !== "" && cmd.trim() !== "";
+  const submit = () => {
+    if (!canSave) return;
+    onSave({
+      id: command?.id ?? "",
+      name: name.trim(),
+      command: cmd.trim(),
+      description: description.trim(),
+    });
+  };
+  const inputCls =
+    "w-full rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-sm outline-none focus:border-accent";
+  return (
+    <div
+      className="fixed inset-0 z-palette flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onClick={(e) => e.stopPropagation()}
+        className="anim-modal w-[30rem] max-w-[92vw] rounded-xl border border-border bg-bg-panel p-5 shadow-elev-3"
+      >
+        <div id={titleId} className="mb-3 text-sm font-semibold">
+          {command ? "Edit saved command" : "New saved command"}
+        </div>
+        <label className="mb-3 block">
+          <div className="mb-1 text-xs text-text-muted">Name</div>
+          <input
+            autoFocus
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="restart-web"
+            className={inputCls}
+          />
+        </label>
+        <label className="mb-3 block">
+          <div className="mb-1 text-xs text-text-muted">Command</div>
+          <textarea
+            value={cmd}
+            onChange={(e) => setCmd(e.target.value)}
+            placeholder="sudo systemctl restart nginx"
+            rows={3}
+            className={cn(inputCls, "resize-y font-mono text-[13px]")}
+          />
+        </label>
+        <label className="mb-2 block">
+          <div className="mb-1 text-xs text-text-muted">Description (optional)</div>
+          <input
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder="Restart the web server"
+            className={inputCls}
+          />
+        </label>
+        <div className="mb-4 flex items-start gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2.5 py-1.5 text-[11px] text-warning">
+          <CircleAlert size={12} className="mt-0.5 shrink-0" />
+          The agent runs this exact command with no approval prompt.
+        </div>
+        <div className="flex items-center justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="rounded-md border border-border px-3.5 py-1.5 text-sm hover:bg-bg-hover"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={submit}
+            disabled={!canSave}
+            className="btn-accent rounded-md px-3.5 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Save
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HistoryCard({
+  activity,
+  sessionMeta,
+  onRefresh,
+  onClear,
+}: {
+  activity: BridgeActivity[];
+  sessionMeta: Map<string, { name: string; color?: string }>;
+  onRefresh: () => void;
+  onClear: () => void;
+}) {
+  return (
+    <Card title="History">
+      <div className="mb-2 flex items-center gap-2">
+        <div className="min-w-0 flex-1 text-[11px] text-text-dim">
+          What the agent has done — newest first (kept in memory, last 200).
+        </div>
+        <button
+          onClick={onRefresh}
+          title="Refresh"
+          className="shrink-0 rounded p-1 text-text-dim hover:bg-bg-hover hover:text-text"
+        >
+          <RefreshCw size={12} />
+        </button>
+        <button
+          onClick={onClear}
+          disabled={activity.length === 0}
+          title="Clear history"
+          className="shrink-0 rounded p-1 text-text-dim hover:bg-bg-hover hover:text-danger disabled:opacity-40"
+        >
+          <Trash2 size={12} />
+        </button>
+      </div>
+      {activity.length === 0 ? (
+        <div className="text-xs text-text-dim">
+          Nothing yet. Approved commands, reads, transfers and denials show up here.
+        </div>
+      ) : (
+        <div className="max-h-48 space-y-1 overflow-y-auto">
+          {activity.slice(0, 100).map((a) => {
+            const meta = sessionMeta.get(a.sessionId);
+            return (
+              <div key={a.id} className="flex items-start gap-2 text-[11px]">
+                <ActivityIcon kind={a.kind} ok={a.ok} />
+                {meta && meta.name && (
+                  <span className="flex shrink-0 items-center gap-1 text-text-dim">
+                    <span
+                      className="h-1.5 w-1.5 rounded-full"
+                      style={{ background: meta.color || "rgb(var(--accent))" }}
+                    />
+                    <span className="max-w-[6rem] truncate">{meta.name}</span>
+                  </span>
+                )}
+                <span className="min-w-0 flex-1 truncate font-mono text-text-muted">
+                  {a.detail}
+                </span>
+                <span className="shrink-0 text-text-dim">{relTime(a.at)}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Card>
+  );
 }

@@ -18,47 +18,53 @@ impl SftpFs {
 #[async_trait]
 impl RemoteFs for SftpFs {
     async fn list_dir(&self, path: &str) -> Result<Vec<DirEntry>> {
-        let sftp_cell = self.session.ensure_sftp().await?;
-        let sftp = sftp_cell.lock().await;
+        // Routed through with_sftp so a directory listing transparently
+        // reconnects + reopens the subsystem after a long idle (read-only, so
+        // re-running it on a reconnect is always safe).
+        self.session
+            .with_sftp(|sftp_cell| async move {
+                let sftp = sftp_cell.lock().await;
 
-        let entries = sftp
-            .read_dir(path)
+                let entries = sftp
+                    .read_dir(path)
+                    .await
+                    .with_context(|| format!("sftp read_dir {path}"))?;
+
+                let base = if path == "/" {
+                    String::new()
+                } else {
+                    path.trim_end_matches('/').to_string()
+                };
+
+                let mut out = Vec::new();
+                for entry in entries {
+                    let name = entry.file_name();
+                    if name == "." || name == ".." {
+                        continue;
+                    }
+                    let attrs = entry.metadata();
+                    let kind = if attrs.is_dir() {
+                        FileKind::Directory
+                    } else if attrs.is_symlink() {
+                        FileKind::Symlink
+                    } else if attrs.is_regular() {
+                        FileKind::File
+                    } else {
+                        FileKind::Other
+                    };
+                    let full_path = format!("{base}/{name}");
+                    out.push(DirEntry {
+                        name,
+                        path: full_path,
+                        kind,
+                        size: attrs.size.unwrap_or(0),
+                        modified: attrs.mtime.map(|t| t as i64),
+                        mode: attrs.permissions,
+                    });
+                }
+                Ok(out)
+            })
             .await
-            .with_context(|| format!("sftp read_dir {path}"))?;
-
-        let base = if path == "/" {
-            String::new()
-        } else {
-            path.trim_end_matches('/').to_string()
-        };
-
-        let mut out = Vec::new();
-        for entry in entries {
-            let name = entry.file_name();
-            if name == "." || name == ".." {
-                continue;
-            }
-            let attrs = entry.metadata();
-            let kind = if attrs.is_dir() {
-                FileKind::Directory
-            } else if attrs.is_symlink() {
-                FileKind::Symlink
-            } else if attrs.is_regular() {
-                FileKind::File
-            } else {
-                FileKind::Other
-            };
-            let full_path = format!("{base}/{name}");
-            out.push(DirEntry {
-                name,
-                path: full_path,
-                kind,
-                size: attrs.size.unwrap_or(0),
-                modified: attrs.mtime.map(|t| t as i64),
-                mode: attrs.permissions,
-            });
-        }
-        Ok(out)
     }
 
     async fn rename(&self, from: &str, to: &str) -> Result<()> {

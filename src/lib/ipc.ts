@@ -26,6 +26,7 @@ import type {
   ApprovalPolicy,
   AgentExecStart,
   AgentOutput,
+  SavedCommand,
 } from "./types";
 
 // Typed wrappers around the Tauri command surface. The string names must match
@@ -50,6 +51,10 @@ export const ipc = {
 
   capabilities: (sessionId: SessionId) =>
     invoke<Capabilities>("capabilities", { sessionId }),
+
+  // Base64 of a small local file, for image thumbnails in the grid view.
+  readFilePreview: (sessionId: SessionId, path: string) =>
+    invoke<string>("read_file_preview", { sessionId, path }),
 
   openTerminal: (sessionId: SessionId, cols: number, rows: number) =>
     invoke<string>("open_terminal", { sessionId, cols, rows }),
@@ -166,8 +171,8 @@ export const ipc = {
   syncExecute: (sessionId: SessionId, plan: SyncPlan) =>
     invoke<string[]>("sync_execute", { sessionId, plan }),
 
-  startEdit: (sessionId: SessionId, remotePath: string) =>
-    invoke<EditStartedEvent>("start_edit", { sessionId, remotePath }),
+  startEdit: (sessionId: SessionId, remotePath: string, editor?: string) =>
+    invoke<EditStartedEvent>("start_edit", { sessionId, remotePath, editor }),
 
   stopEdit: (editId: string) => invoke<void>("stop_edit", { editId }),
 
@@ -184,6 +189,13 @@ export const ipc = {
   respondToBridgeApproval: (requestId: string, decision: ApprovalDecision) =>
     invoke<void>("respond_to_bridge_approval", { requestId, decision }),
   bridgeActivity: () => invoke<BridgeActivity[]>("bridge_activity"),
+  bridgeClearActivity: () => invoke<void>("bridge_clear_activity"),
+  // Saved commands (pre-approved; managed only here, never over the bridge).
+  bridgeListCommands: () => invoke<SavedCommand[]>("bridge_list_commands"),
+  bridgeSaveCommand: (command: SavedCommand) =>
+    invoke<SavedCommand[]>("bridge_save_command", { command }),
+  bridgeDeleteCommand: (id: string) =>
+    invoke<SavedCommand[]>("bridge_delete_command", { id }),
   // Write the agent console text to disk (Downloads) and return the saved path.
   exportAgentLog: (content: string, name: string) =>
     invoke<string>("export_agent_log", { content, name }),

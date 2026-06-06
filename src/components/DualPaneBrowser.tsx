@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { FilePane } from "./FilePane";
+import { FilePane } from "@faro/file-ui";
 import { SyncDialog } from "./SyncDialog";
 import { useConnections } from "@/stores/connectionsStore";
 import { useTransfers } from "@/stores/transfersStore";

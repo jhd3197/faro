@@ -67,6 +67,23 @@ pub struct ApprovalPolicy {
     pub auto_safe_exec: bool,
 }
 
+/// A user-defined, pre-approved command the agent can run by NAME. The agent
+/// only ever supplies the name; the exact `command` string was written and
+/// vetted by the user when they saved it, so running one skips the approval
+/// prompt (it still requires the target session to be opted in). Global — a
+/// `name -> command` entry runnable on any bridge-enabled SSH server. The agent
+/// can list and run these over the bridge but can never create/edit/delete them
+/// (that is local-UI-only), so it cannot self-author a "pre-approved" command.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedCommand {
+    pub id: String,
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub description: String,
+}
+
 /// On-disk shape of `bridge.json`. Session ids are per-connect UUIDs, so the
 /// allow-list is keyed by *profile* id and re-applied when a session connects.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -77,6 +94,9 @@ struct PersistedConfig {
     enabled: bool,
     enabled_profiles: Vec<String>,
     policy: ApprovalPolicy,
+    /// User-defined pre-approved commands the agent can run by name.
+    #[serde(default)]
+    saved_commands: Vec<SavedCommand>,
 }
 
 #[derive(Clone, Serialize)]
@@ -150,6 +170,8 @@ pub struct BridgeState {
     /// Persistent allow-list, keyed by profile id; re-applied on connect.
     enabled_profiles: Mutex<HashSet<String>>,
     policy: Mutex<ApprovalPolicy>,
+    /// User-defined pre-approved commands (global name -> command list).
+    saved_commands: Mutex<Vec<SavedCommand>>,
     approvals: Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>,
     activity: Mutex<Vec<ActivityEntry>>,
     config_path: Option<PathBuf>,
@@ -277,6 +299,7 @@ impl BridgeState {
             enabled_master: Mutex::new(cfg.enabled),
             enabled_profiles: Mutex::new(cfg.enabled_profiles.into_iter().collect()),
             policy: Mutex::new(cfg.policy),
+            saved_commands: Mutex::new(cfg.saved_commands),
             config_path: Some(path),
             ..Default::default()
         })
@@ -290,6 +313,7 @@ impl BridgeState {
             enabled: *self.enabled_master.lock().await,
             enabled_profiles: self.enabled_profiles.lock().await.iter().cloned().collect(),
             policy: *self.policy.lock().await,
+            saved_commands: self.saved_commands.lock().await.clone(),
         };
         if let Ok(bytes) = serde_json::to_vec_pretty(&cfg) {
             let _ = std::fs::write(path, bytes);
@@ -516,6 +540,54 @@ impl BridgeState {
     pub async fn recent_activity(&self) -> Vec<ActivityEntry> {
         self.activity.lock().await.clone()
     }
+
+    /// Clear the in-memory activity log (the History panel's Clear button).
+    pub async fn clear_activity(&self) {
+        self.activity.lock().await.clear();
+    }
+
+    // ---- Saved commands (pre-approved, local-UI-managed) ----
+
+    pub async fn list_commands(&self) -> Vec<SavedCommand> {
+        self.saved_commands.lock().await.clone()
+    }
+
+    /// Insert or update a saved command (keyed by id; a blank id mints a fresh
+    /// uuid). Returns the full updated list. Reachable only from the local Faro
+    /// UI (a Tauri command), never over the bridge — so the agent can't author a
+    /// "pre-approved" command.
+    pub async fn upsert_command(&self, mut cmd: SavedCommand) -> Vec<SavedCommand> {
+        if cmd.id.trim().is_empty() {
+            cmd.id = Uuid::new_v4().to_string();
+        }
+        {
+            let mut list = self.saved_commands.lock().await;
+            if let Some(existing) = list.iter_mut().find(|c| c.id == cmd.id) {
+                *existing = cmd;
+            } else {
+                list.push(cmd);
+            }
+        }
+        self.persist().await;
+        self.saved_commands.lock().await.clone()
+    }
+
+    pub async fn delete_command(&self, id: &str) -> Vec<SavedCommand> {
+        self.saved_commands.lock().await.retain(|c| c.id != id);
+        self.persist().await;
+        self.saved_commands.lock().await.clone()
+    }
+
+    /// Find a saved command by name (case-insensitive, first match).
+    async fn find_command(&self, name: &str) -> Option<SavedCommand> {
+        let want = name.trim().to_lowercase();
+        self.saved_commands
+            .lock()
+            .await
+            .iter()
+            .find(|c| c.name.trim().to_lowercase() == want)
+            .cloned()
+    }
 }
 
 /// Opt-in check → policy/approval gate. On success the caller proceeds; on
@@ -533,6 +605,12 @@ async fn gate(
 ) -> Result<(), (u16, Value)> {
     if !state.is_enabled(session_id).await {
         return Err((403, json!({"error": "session has not granted agent access"})));
+    }
+    // Proactively heal a transport that died while the session sat idle, so the
+    // op below runs on a live connection instead of eating the first failure.
+    // SSH-only, best-effort — a reconnect failure surfaces as the op's own error.
+    if let Some(ssh) = app.state::<AppState>().sessions.get_ssh(session_id).await {
+        let _ = ssh.ensure_alive().await;
     }
     if state.auto_approved(class, exec_cmd).await {
         return Ok(());
@@ -718,6 +796,8 @@ async fn route(app: &AppHandle, state: &Arc<BridgeState>, req: &Request) -> (u16
         ("POST", "/info") => handle_info(app, state, &req.body).await,
         ("POST", "/transfer") => handle_transfer_status(app, &req.body).await,
         ("POST", "/history") => handle_history(app, state, &req.body).await,
+        ("GET", "/commands") => (200, json!({ "commands": state.list_commands().await })),
+        ("POST", "/run") => handle_run(app, state, &req.body).await,
         _ => (404, json!({"error": "not found"})),
     }
 }
@@ -760,6 +840,19 @@ async fn handle_exec(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> 
         return (400, json!({"error": "sessionId and command are required"}));
     }
     exec_on(app, state, &session_id, &command).await
+}
+
+async fn handle_run(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    let name = body_str(&parsed, "name");
+    if session_id.is_empty() || name.is_empty() {
+        return (400, json!({"error": "sessionId and name are required"}));
+    }
+    op_run_command(app, state, &session_id, &name).await
 }
 
 async fn handle_list(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
@@ -918,8 +1011,53 @@ async fn exec_on(
         return resp;
     }
 
-    // Tag this run so streamed output + the final audit line correlate in the
-    // live agent console.
+    exec_core(app, state, &ssh, session_id, &session_name, command, command).await
+}
+
+/// Run a user-defined saved command by name. Pre-approved: it still requires the
+/// session to be opted in, but it deliberately BYPASSES the approval gate
+/// because the user wrote and vetted the exact string when they saved it (the
+/// agent supplies only the name and can't author the command). Always SSH-only.
+async fn op_run_command(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    name: &str,
+) -> (u16, Value) {
+    let manager = app.state::<AppState>().sessions.clone();
+    let Some(ssh) = manager.get_ssh(session_id).await else {
+        return (
+            400,
+            json!({"error": "session not found or is not an SSH session"}),
+        );
+    };
+    let Some(cmd) = state.find_command(name).await else {
+        return (404, json!({"error": format!("no saved command named '{name}'")}));
+    };
+    // Opt-in is still required (a saved command is pre-approved, not un-gated):
+    if !state.is_enabled(session_id).await {
+        return (403, json!({"error": "session has not granted agent access"}));
+    }
+    let session_name = ssh.profile.name.clone();
+    let label = format!("[{}] {}", cmd.name, cmd.command);
+    exec_core(app, state, &ssh, session_id, &session_name, &cmd.command, &label).await
+}
+
+/// Shared exec body used by `exec_on` (after the approval gate) and
+/// `op_run_command` (after the opt-in check only). Tags the run so streamed
+/// output + the final audit line correlate in the live agent console, runs it
+/// bounded/streamed, and logs the activity. `label` is what shows in the
+/// console + audit log (the raw command for `exec`, "[name] command" for a
+/// saved command); `command` is what actually executes.
+async fn exec_core(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    ssh: &crate::session::SshSession,
+    session_id: &str,
+    session_name: &str,
+    command: &str,
+    label: &str,
+) -> (u16, Value) {
     let op_id = Uuid::new_v4().to_string();
     let _ = app.emit(
         "agent://exec-start",
@@ -927,7 +1065,7 @@ async fn exec_on(
             "opId": op_id,
             "sessionId": session_id,
             "sessionName": session_name,
-            "command": command,
+            "command": label,
         }),
     );
     let stream = ExecStream {
@@ -941,7 +1079,7 @@ async fn exec_on(
     {
         Ok(out) => {
             let ok = !out.timed_out && out.exit_code.unwrap_or(0) == 0;
-            let mut detail = command.to_string();
+            let mut detail = label.to_string();
             if out.truncated {
                 detail.push_str("  [output truncated]");
             }
@@ -983,7 +1121,7 @@ async fn exec_on(
                         id: op_id,
                         session_id: session_id.to_string(),
                         kind: "error".into(),
-                        detail: format!("{command} — {e}"),
+                        detail: format!("{label} — {e}"),
                         ok: false,
                         at: now_millis(),
                     },
@@ -1076,8 +1214,51 @@ async fn op_read_file(
         return resp;
     }
 
-    let sftp_cell = match ssh.ensure_sftp().await {
-        Ok(c) => c,
+    // The whole open + capped read runs inside with_sftp so that, after a long
+    // idle, a dead transport transparently reconnects + reopens the subsystem and
+    // the read replays once (read-only — always safe to re-run).
+    let read = ssh
+        .with_sftp(|sftp_cell| async move {
+            // Open under the lock, then read without holding it (the file handle
+            // is independent of the SFTP guard — see transfer.rs).
+            let mut file = {
+                let sftp = sftp_cell.lock().await;
+                sftp.open(path).await.with_context(|| format!("open {path}"))?
+            };
+            let mut buf: Vec<u8> = Vec::new();
+            let mut chunk = vec![0u8; 64 * 1024];
+            let mut truncated = false;
+            loop {
+                let n = file.read(&mut chunk).await?;
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                if buf.len() >= MAX_READ_FILE {
+                    buf.truncate(MAX_READ_FILE);
+                    truncated = true;
+                    break;
+                }
+            }
+            let bytes = buf.len();
+            let content = String::from_utf8_lossy(&buf).to_string();
+            Ok((bytes, content, truncated))
+        })
+        .await;
+
+    match read {
+        Ok((bytes, content, truncated)) => {
+            state
+                .log(
+                    app,
+                    activity("read", session_id, format!("read {path} ({bytes} bytes)"), true),
+                )
+                .await;
+            (
+                200,
+                json!({ "content": content, "bytes": bytes, "truncated": truncated }),
+            )
+        }
         Err(e) => {
             state
                 .log(
@@ -1085,66 +1266,9 @@ async fn op_read_file(
                     activity("error", session_id, format!("read {path} — {e}"), false),
                 )
                 .await;
-            return (500, json!({"error": e.to_string()}));
-        }
-    };
-    // Open under the lock, then read without holding it (the file handle is
-    // independent of the SFTP guard — see transfer.rs).
-    let mut file = {
-        let sftp = sftp_cell.lock().await;
-        match sftp.open(path).await {
-            Ok(f) => f,
-            Err(e) => {
-                state
-                    .log(
-                        app,
-                        activity("error", session_id, format!("read {path} — {e}"), false),
-                    )
-                    .await;
-                return (500, json!({"error": format!("open {path}: {e}")}));
-            }
-        }
-    };
-
-    let mut buf: Vec<u8> = Vec::new();
-    let mut chunk = vec![0u8; 64 * 1024];
-    let mut truncated = false;
-    loop {
-        let n = match file.read(&mut chunk).await {
-            Ok(n) => n,
-            Err(e) => {
-                state
-                    .log(
-                        app,
-                        activity("error", session_id, format!("read {path} — {e}"), false),
-                    )
-                    .await;
-                return (500, json!({"error": e.to_string()}));
-            }
-        };
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&chunk[..n]);
-        if buf.len() >= MAX_READ_FILE {
-            buf.truncate(MAX_READ_FILE);
-            truncated = true;
-            break;
+            (500, json!({"error": e.to_string()}))
         }
     }
-
-    let bytes = buf.len();
-    let content = String::from_utf8_lossy(&buf).to_string();
-    state
-        .log(
-            app,
-            activity("read", session_id, format!("read {path} ({bytes} bytes)"), true),
-        )
-        .await;
-    (
-        200,
-        json!({ "content": content, "bytes": bytes, "truncated": truncated }),
-    )
 }
 
 fn default_download_dir(app: &AppHandle) -> String {
@@ -1648,6 +1772,24 @@ fn mcp_tools_list() -> Value {
                     },
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "faro_list_commands",
+                "description": "List the user's SAVED commands — named, pre-approved shell commands the user defined in Faro. Prefer running one of these by name (faro_run_command) over composing a raw command: it runs with no approval prompt and exactly as the user vetted it. Returns each command's name, the exact command it runs, and a description.",
+                "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+            },
+            {
+                "name": "faro_run_command",
+                "description": "Run one of the user's SAVED commands (see faro_list_commands) by name on a connected SSH server. The exact command string was written and pre-approved by the user, so this runs immediately with NO approval prompt. You supply only the name and the target server — never the command text. Prefer this over faro_exec whenever a saved command fits the task.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "The saved command's name (see faro_list_commands)." },
+                        "session": session_prop
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }
             }
         ]
     })
@@ -1680,8 +1822,29 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
         let (_, body) = handle_sessions(app, state).await;
         return tool_text(serde_json::to_string_pretty(&body).unwrap_or_default());
     }
+    if name == "faro_list_commands" {
+        return tool_text(
+            serde_json::to_string_pretty(&json!({ "commands": state.list_commands().await }))
+                .unwrap_or_default(),
+        );
+    }
 
     match name {
+        "faro_run_command" => {
+            let Some(cmd_name) = arg_str(&args, "name") else {
+                return tool_error("`name` is required");
+            };
+            let session_id = match resolve_session(app, state, session_arg, true).await {
+                Ok(id) => id,
+                Err(msg) => return tool_error(&msg),
+            };
+            let (status, body) = op_run_command(app, state, &session_id, &cmd_name).await;
+            if status == 200 {
+                tool_text(format_exec_result(&body))
+            } else {
+                tool_error(body.get("error").and_then(|v| v.as_str()).unwrap_or("error"))
+            }
+        }
         "faro_exec" => {
             let Some(command) = arg_str(&args, "command") else {
                 return tool_error("`command` is required");

@@ -9,6 +9,12 @@ export default defineConfig(async () => ({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "src"),
+      // Consume the workspace package straight from its TS source during dev —
+      // edit a component once and both the app and the package see it instantly.
+      "@faro/file-ui": path.resolve(
+        __dirname,
+        "packages/file-ui/src/index.ts"
+      ),
     },
   },
   clearScreen: false,

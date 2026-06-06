@@ -14,10 +14,12 @@ import {
   X,
   Cloud,
   Server,
+  HardDrive,
 } from "lucide-react";
 import { useConnections } from "@/stores/connectionsStore";
 import { useBridge } from "@/stores/bridgeStore";
 import { useLayout } from "@/stores/layoutStore";
+import { useSettings } from "@/stores/settingsStore";
 import { ProfileEditor } from "./ProfileEditor";
 import { ImportDialog } from "./ImportDialog";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
@@ -68,6 +70,9 @@ export function ServerRail() {
   } = useConnections();
   const setTerminalOpen = useLayout((s) => s.setTerminalOpen);
   const openDialog = useLayout((s) => s.openDialog);
+  const browseLocal = useLayout((s) => s.browseLocal);
+  const setBrowseLocal = useLayout((s) => s.setBrowseLocal);
+  const browserLayout = useSettings((s) => s.browserLayout);
 
   const enabledSessions = useBridge((s) => s.status.enabledSessions);
   const bridgeRunning = useBridge((s) => s.status.running);
@@ -246,6 +251,7 @@ export function ServerRail() {
   // The reconciled click rule: connected → switch; auto-connect → connect;
   // otherwise open the bubble menu (Connect is the first item).
   const onBubbleClick = (e: React.MouseEvent, p: ConnectionProfile) => {
+    setBrowseLocal(false);
     const sid = sidFor(p.id);
     if (sid) {
       setActiveSession(sid);
@@ -324,10 +330,42 @@ export function ServerRail() {
   return (
     <div className="relative flex h-full w-[68px] shrink-0 flex-col border-r border-border bg-bg">
       <div className="flex-1 overflow-y-auto overflow-x-hidden py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {/* Local files (single-pane layout only) */}
+        {browserLayout === "single" && (
+          <div className="mb-2 flex flex-col items-center gap-1.5">
+            <div className="group relative flex w-full items-center justify-center">
+              <span
+                aria-hidden
+                className={cn(
+                  "absolute left-0 top-1/2 w-1 -translate-y-1/2 rounded-r-full transition-all duration-150 motion-reduce:transition-none",
+                  browseLocal
+                    ? "h-7 bg-accent"
+                    : "h-0 bg-text group-hover:h-3"
+                )}
+              />
+              <Tooltip portal side="right" label="Local files">
+                <button
+                  onClick={() => setBrowseLocal(true)}
+                  aria-label="Local files"
+                  className={cn(
+                    "flex h-11 w-11 items-center justify-center rounded-2xl transition-colors",
+                    browseLocal
+                      ? "glow-accent bg-accent-soft text-accent"
+                      : "bg-bg-subtle text-text-muted hover:bg-bg-hover hover:text-text"
+                  )}
+                >
+                  <HardDrive size={19} />
+                </button>
+              </Tooltip>
+            </div>
+            <span className="h-px w-7 rounded-full bg-border" />
+          </div>
+        )}
         {/* Connections */}
         <div className="flex flex-col items-center gap-1.5">
           {ordered.length === 0 ? (
-            <Tooltip side="right" label="Add your first server">
+            <Tooltip portal
+          side="right" label="Add your first server">
               <button
                 onClick={() => setEditing("new")}
                 className="flex h-11 w-11 items-center justify-center rounded-2xl border border-dashed border-border text-text-dim transition-colors hover:border-accent hover:text-accent"
@@ -357,7 +395,8 @@ export function ServerRail() {
         <div className="mt-3 flex flex-col items-center gap-1.5">
           <span className="mb-1 h-px w-7 rounded-full bg-border" />
           <Tooltip
-            side="right"
+            portal
+          side="right"
             label={`Agent Bridge — ${bridgeRunning ? "running" : "stopped"}`}
           >
             <button
@@ -472,7 +511,8 @@ function RailBubble({
         )}
       />
       <Tooltip
-        side="right"
+        portal
+          side="right"
         label={
           <span className="flex flex-col gap-0.5 text-left">
             <span className="font-semibold text-text">{p.name}</span>
@@ -544,7 +584,8 @@ function BridgeBubble({
         )}
       />
       <Tooltip
-        side="right"
+        portal
+          side="right"
         label={
           <span className="flex flex-col gap-0.5 text-left">
             <span className="font-semibold text-text">{p.name}</span>
@@ -605,7 +646,8 @@ function RailIconButton({
   onClick: () => void;
 }) {
   return (
-    <Tooltip side="right" label={label}>
+    <Tooltip portal
+          side="right" label={label}>
       <button
         onClick={onClick}
         aria-label={label}

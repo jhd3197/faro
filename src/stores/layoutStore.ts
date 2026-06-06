@@ -25,6 +25,12 @@ interface LayoutState {
   openDialog: (d: AppDialog) => void;
   closeDialog: () => void;
 
+  // When true, the file browser shows the LOCAL filesystem instead of the
+  // active server. Toggled by the rail's "Local" home bubble; cleared when a
+  // server bubble is selected.
+  browseLocal: boolean;
+  setBrowseLocal: (v: boolean) => void;
+
   paletteOpen: boolean;
   setPaletteOpen: (v: boolean) => void;
   togglePalette: () => void;
@@ -45,6 +51,9 @@ export const useLayout = create<LayoutState>((set) => ({
   dialog: null,
   openDialog: (d) => set({ dialog: d }),
   closeDialog: () => set({ dialog: null }),
+
+  browseLocal: false,
+  setBrowseLocal: (v) => set({ browseLocal: v }),
 
   paletteOpen: false,
   setPaletteOpen: (v) => set({ paletteOpen: v }),

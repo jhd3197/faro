@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { ipc, onEditSaved, onEditError } from "@/lib/ipc";
+import { useSettings } from "./settingsStore";
 import type { SessionId } from "@/lib/types";
 
 // Tracks active edit sessions so the UI can show a "Editing N files" pill
@@ -69,7 +70,8 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   startEditing: async (sessionId, remotePath) => {
     await get().ensureListeners();
-    const ev = await ipc.startEdit(sessionId, remotePath);
+    const editor = useSettings.getState().defaultEditor || undefined;
+    const ev = await ipc.startEdit(sessionId, remotePath, editor);
     set((s) => ({
       edits: {
         ...s.edits,

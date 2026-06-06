@@ -179,6 +179,16 @@ enum AgentCmd {
         #[arg(long, default_value_t = 50)]
         limit: usize,
     },
+    /// Run one of your SAVED, pre-approved commands by name (SSH only). These run
+    /// with no approval prompt because you wrote and vetted them in Faro.
+    Run {
+        /// Saved server name (as shown in Faro) or its session id.
+        server: String,
+        /// The saved command's name (see `agent commands`).
+        name: String,
+    },
+    /// List your saved, pre-approved commands.
+    Commands,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -943,6 +953,50 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
                     let detail = h.get("detail").and_then(|v| v.as_str()).unwrap_or("");
                     let mark = if ok { "ok " } else { "ERR" };
                     println!("[{mark}] {kind:<8} {detail}");
+                }
+            }
+            Ok(())
+        }
+        AgentCmd::Run { server, name } => {
+            let id = resolve_server(&ep, &server)?;
+            let body = http_post(&ep, "/run", serde_json::json!({ "sessionId": id, "name": name }))?;
+            if let Some(out) = body.get("stdout").and_then(|v| v.as_str()) {
+                let mut so = io::stdout();
+                so.write_all(out.as_bytes()).ok();
+                so.flush().ok();
+            }
+            if let Some(e) = body.get("stderr").and_then(|v| v.as_str()) {
+                if !e.is_empty() {
+                    let mut se = io::stderr();
+                    se.write_all(e.as_bytes()).ok();
+                    se.flush().ok();
+                }
+            }
+            if body.get("timedOut").and_then(|v| v.as_bool()).unwrap_or(false) {
+                eprintln!("{}", warn("command timed out before finishing"));
+            }
+            let code = body.get("exitCode").and_then(|v| v.as_i64()).unwrap_or(0);
+            std::process::exit(code as i32)
+        }
+        AgentCmd::Commands => {
+            let body = http_get(&ep, "/commands")?;
+            let cmds = body
+                .get("commands")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if cmds.is_empty() {
+                eprintln!("No saved commands yet. Add some in Faro's Agent Bridge panel.");
+            }
+            for c in &cmds {
+                let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                let command = c.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                let desc = c.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                if desc.is_empty() {
+                    println!("{name:<20} {command}");
+                } else {
+                    println!("{name:<20} {command}");
+                    println!("{:<20} — {desc}", "");
                 }
             }
             Ok(())

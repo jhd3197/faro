@@ -4,10 +4,6 @@ import {
   ArrowLeft,
   ArrowRight,
   RefreshCw,
-  Folder,
-  FileText,
-  Link2,
-  ArrowRightLeft,
   FolderPlus,
   Edit3,
   Trash2,
@@ -25,25 +21,30 @@ import {
   List,
   Table2,
   AlignJustify,
+  LayoutGrid,
+  Upload,
+  Download,
 } from "lucide-react";
-import { ipc } from "@/lib/ipc";
-import type { Capabilities, DirEntry, SessionId } from "@/lib/types";
-import { LOCAL_SESSION } from "@/lib/types";
-import {
-  useSettings,
-  type SortField,
-  type PaneViewMode,
-  type PaneDensity,
-} from "@/stores/settingsStore";
-import { useEditor } from "@/stores/editorStore";
-import { usePathHistory } from "@/hooks/usePathHistory";
-import { cn } from "@/lib/cn";
-import { fmtSize, fmtMtime, formatMode } from "@/lib/format";
+import type {
+  Capabilities,
+  DirEntry,
+  PaneDensity,
+  PaneViewMode,
+  SessionId,
+  SortField,
+} from "../types";
+import { LOCAL_SESSION } from "../types";
+import { useFileUi } from "../context";
+import { usePathHistory } from "../hooks/usePathHistory";
+import { cn } from "../lib/cn";
+import { fmtSize, fmtMtime, formatMode } from "../lib/format";
+import { isImage, type FileIconSpec } from "../lib/fileIcons";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { PromptModal } from "./PromptModal";
 import { ConfirmModal } from "./ConfirmModal";
-import { FileListSkeleton } from "./ui/Skeleton";
-import { EmptyState } from "./ui/EmptyState";
+import { FileListSkeleton } from "./Skeleton";
+import { EmptyState } from "./EmptyState";
+import { Thumbnail } from "./Thumbnail";
 
 interface Segment {
   label: string;
@@ -90,8 +91,12 @@ interface Props {
   path: string;
   onPathChange: (path: string) => void;
   onTransfer?: (entries: DirEntry[]) => void;
+  /** Optional toolbar Upload action (server view) — opens a native file picker. */
+  onUpload?: (e: React.MouseEvent) => void;
   onDrop?: (entries: DirEntry[]) => void;
   transferLabel?: string;
+  /** Bump to force a re-listing of the current directory (e.g. after an upload). */
+  reloadToken?: number;
 }
 
 type ModalState =
@@ -108,9 +113,15 @@ export function FilePane({
   path,
   onPathChange,
   onTransfer,
+  onUpload,
   onDrop,
   transferLabel = "Transfer",
+  reloadToken,
 }: Props) {
+  // Everything that used to be a direct Tauri call or a zustand read now comes
+  // through the injected adapter + settings. The component is otherwise the
+  // same presentational/interaction logic it always was.
+  const { fs, settings, iconFor } = useFileUi();
   const {
     showHiddenFiles,
     sortField,
@@ -121,7 +132,8 @@ export function FilePane({
     paneDensity,
     setPaneViewMode,
     setPaneDensity,
-  } = useSettings();
+    editorLabel,
+  } = settings;
 
   const [entries, setEntries] = useState<DirEntry[]>([]);
   const [draftPath, setDraftPath] = useState(path);
@@ -173,7 +185,7 @@ export function FilePane({
       setLoading(true);
       setError(null);
       try {
-        const list = await ipc.listDirectory(sessionId, p);
+        const list = await fs.listDirectory(sessionId, p);
         setEntries(list);
         setSelected(new Set());
         setAnchor(null);
@@ -183,12 +195,12 @@ export function FilePane({
         setLoading(false);
       }
     },
-    [sessionId]
+    [sessionId, fs]
   );
 
   useEffect(() => {
     load(path);
-  }, [sessionId, path, load]);
+  }, [sessionId, path, load, reloadToken]);
 
   // Pull capabilities once per session so chmod / mkdir / etc. can be hidden
   // for backends that don't support them (notably S3).
@@ -198,7 +210,7 @@ export function FilePane({
       return;
     }
     let cancelled = false;
-    ipc.capabilities(sessionId).then(
+    fs.capabilities(sessionId).then(
       (c) => {
         if (!cancelled) setCaps(c);
       },
@@ -209,7 +221,7 @@ export function FilePane({
     return () => {
       cancelled = true;
     };
-  }, [sessionId]);
+  }, [sessionId, fs]);
 
   // Apply hidden-file rule + in-pane name filter + sort from settings. Memoized
   // so a big directory isn't re-filtered and re-sorted on every unrelated render
@@ -471,7 +483,7 @@ export function FilePane({
     const items: MenuItem[] = [];
     if (single) {
       items.push({
-        label: single.kind === "directory" ? "Open" : "Transfer to other pane",
+        label: single.kind === "directory" ? "Open" : transferLabel,
         onClick: () => onRowActivate(single),
       });
       items.push({
@@ -482,7 +494,7 @@ export function FilePane({
       });
     } else {
       items.push({
-        label: `Transfer ${selectedItems.length} items to other pane`,
+        label: `${transferLabel} ${selectedItems.length} items`,
         onClick: () => onTransfer?.(selectedItems),
         separatorAfter: true,
       });
@@ -515,15 +527,17 @@ export function FilePane({
         onClick: () => setModal({ type: "chmod", entry: single }),
       });
     }
-    if (single?.kind === "file" && sessionId && sessionId !== LOCAL_SESSION) {
+    if (
+      single?.kind === "file" &&
+      sessionId &&
+      sessionId !== LOCAL_SESSION &&
+      fs.editFile
+    ) {
       items.push({
-        label: "Edit in default app…",
+        label: editorLabel ? `Edit with ${editorLabel}…` : "Edit in default app…",
         icon: <ExternalLink size={12} />,
         onClick: () => {
-          useEditor
-            .getState()
-            .startEditing(sessionId, single.path)
-            .catch((e) => setError(String(e)));
+          fs.editFile!(sessionId, single.path).catch((e) => setError(String(e)));
         },
       });
     }
@@ -561,7 +575,7 @@ export function FilePane({
     const parent = entry.path.slice(0, parentEnd);
     const to = joinPath(parent, newName);
     try {
-      await ipc.renamePath(sessionId, entry.path, to);
+      await fs.rename(sessionId, entry.path, to);
       await load(path);
     } catch (e) {
       setError(String(e));
@@ -572,7 +586,7 @@ export function FilePane({
     if (!sessionId) return;
     try {
       for (const it of items) {
-        await ipc.deletePath(sessionId, it.path, it.kind === "directory");
+        await fs.remove(sessionId, it.path, it.kind === "directory");
       }
       await load(path);
     } catch (e) {
@@ -583,7 +597,7 @@ export function FilePane({
   const doMkdir = async (name: string) => {
     if (!sessionId) return;
     try {
-      await ipc.createDirectory(sessionId, joinPath(path, name));
+      await fs.mkdir(sessionId, joinPath(path, name));
       await load(path);
     } catch (e) {
       setError(String(e));
@@ -598,7 +612,7 @@ export function FilePane({
       return;
     }
     try {
-      await ipc.chmodPath(sessionId, entry.path, mode);
+      await fs.chmod(sessionId, entry.path, mode);
       await load(path);
     } catch (e) {
       setError(String(e));
@@ -686,10 +700,24 @@ export function FilePane({
           <button
             onClick={transferSelection}
             className="flex items-center gap-1 rounded bg-accent-strong px-2 py-0.5 text-[11px] font-medium text-white hover:brightness-110"
-            title={`${transferLabel} ${selectionCount} item(s) to the other pane`}
+            title={`${transferLabel} ${selectionCount} item(s)`}
           >
-            <ArrowRightLeft size={11} />
+            {transferLabel === "Upload" ? (
+              <Upload size={11} />
+            ) : (
+              <Download size={11} />
+            )}
             {transferLabel} {selectionCount}
+          </button>
+        )}
+        {onUpload && (
+          <button
+            onClick={onUpload}
+            disabled={!sessionId}
+            className="flex items-center gap-1 rounded border border-accent/40 bg-accent-soft px-2 py-0.5 text-[11px] font-medium text-accent hover:bg-accent/20 disabled:opacity-40"
+            title="Upload files or a folder to this directory"
+          >
+            <Upload size={11} /> Upload
           </button>
         )}
         {caps?.hasDirectories !== false && (
@@ -802,6 +830,18 @@ export function FilePane({
             <Table2 size={13} />
           </button>
           <button
+            onClick={() => setPaneViewMode("grid")}
+            className={cn(
+              "rounded p-1 hover:bg-bg-hover",
+              paneViewMode === "grid"
+                ? "text-accent"
+                : "text-text-dim hover:text-text"
+            )}
+            title="Grid view"
+          >
+            <LayoutGrid size={13} />
+          </button>
+          <button
             onClick={() =>
               setPaneDensity(paneDensity === "compact" ? "comfortable" : "compact")
             }
@@ -895,7 +935,7 @@ export function FilePane({
           <EmptyState
             icon={<ServerOff size={20} />}
             title="No connection"
-            hint="Click a profile in the sidebar to connect."
+            hint="Pick a server in the left rail to connect."
           />
         ) : error ? (
           <div className="px-3 py-2 text-xs text-danger">
@@ -927,12 +967,37 @@ export function FilePane({
           ) : (
             <EmptyState icon={<Inbox size={20} />} title="Empty folder" />
           )
+        ) : paneViewMode === "grid" ? (
+          <div className="grid [grid-template-columns:repeat(auto-fill,minmax(108px,1fr))] gap-1 p-2">
+            {visible.map((entry, i) => (
+              <Row
+                key={entry.path}
+                paneId={paneId}
+                entry={entry}
+                icon={iconFor(entry)}
+                index={i}
+                viewMode={paneViewMode}
+                density={paneDensity}
+                selected={selected.has(entry.path)}
+                cols={cols}
+                showModified={showModified}
+                showPermsCol={showPermsCol}
+                sessionId={sessionId}
+                loadThumb={fs.thumbnail}
+                onClick={(e) => onRowClick(entry, e)}
+                onActivate={() => onRowActivate(entry)}
+                onDragStart={(e) => onRowDragStart(e, entry)}
+                onContextMenu={(e) => openRowMenu(e, entry)}
+              />
+            ))}
+          </div>
         ) : (
           visible.map((entry, i) => (
             <Row
               key={entry.path}
               paneId={paneId}
               entry={entry}
+              icon={iconFor(entry)}
               index={i}
               viewMode={paneViewMode}
               density={paneDensity}
@@ -940,6 +1005,8 @@ export function FilePane({
               cols={cols}
               showModified={showModified}
               showPermsCol={showPermsCol}
+              sessionId={sessionId}
+              loadThumb={fs.thumbnail}
               onClick={(e) => onRowClick(entry, e)}
               onActivate={() => onRowActivate(entry)}
               onDragStart={(e) => onRowDragStart(e, entry)}
@@ -1048,6 +1115,7 @@ export function FilePane({
 function Row({
   paneId,
   entry,
+  icon,
   index,
   viewMode,
   density,
@@ -1055,6 +1123,8 @@ function Row({
   cols,
   showModified,
   showPermsCol,
+  sessionId,
+  loadThumb,
   onClick,
   onActivate,
   onDragStart,
@@ -1062,6 +1132,7 @@ function Row({
 }: {
   paneId: string;
   entry: DirEntry;
+  icon: FileIconSpec;
   index: number;
   viewMode: PaneViewMode;
   density: PaneDensity;
@@ -1069,34 +1140,65 @@ function Row({
   cols: string;
   showModified: boolean;
   showPermsCol: boolean;
+  sessionId: SessionId | null;
+  loadThumb?: (sessionId: SessionId, entry: DirEntry) => Promise<Blob | null>;
   onClick: (e: React.MouseEvent) => void;
   onActivate: () => void;
   onDragStart: (e: React.DragEvent) => void;
   onContextMenu: (e: React.MouseEvent) => void;
 }) {
-  const Icon =
-    entry.kind === "directory"
-      ? Folder
-      : entry.kind === "symlink"
-        ? Link2
-        : FileText;
+  const { Icon, className: iconColor } = icon;
   const pad = density === "compact" ? "py-0.5 text-xs" : "py-1 text-sm";
   const sel = selected
     ? "bg-accent/15 hover:bg-accent/20"
     : "hover:bg-bg-hover";
   const title =
     entry.kind === "file"
-      ? "Drag to other pane • Double-click to transfer • Right-click for more"
-      : "Drag, double-click to open, right-click for more";
-  const iconEl = (
-    <Icon
-      size={13}
-      className={cn(
-        "shrink-0",
-        entry.kind === "directory" ? "text-accent" : "text-text-muted"
-      )}
-    />
-  );
+      ? "Double-click to transfer • Right-click for more"
+      : "Double-click to open • Right-click for more";
+  const iconEl = <Icon size={13} className={cn("shrink-0", iconColor)} />;
+  // Show a real image preview in the grid when the adapter can supply bytes.
+  const canThumb = !!loadThumb && !!sessionId && isImage(entry);
+
+  if (viewMode === "grid") {
+    const bigIcon = <Icon size={30} className={cn("shrink-0", iconColor)} />;
+    return (
+      <div
+        data-idx={index}
+        role="option"
+        id={`${paneId}-row-${index}`}
+        aria-selected={selected}
+        onClick={onClick}
+        onDoubleClick={onActivate}
+        onContextMenu={onContextMenu}
+        draggable
+        onDragStart={onDragStart}
+        title={title}
+        className={cn(
+          "flex cursor-default select-none flex-col items-center gap-1.5 rounded-lg border p-2.5 text-center",
+          "[content-visibility:auto] [contain-intrinsic-size:auto_92px]",
+          selected
+            ? "border-accent/40 bg-accent/15"
+            : "border-transparent hover:border-border-subtle hover:bg-bg-hover"
+        )}
+      >
+        {canThumb && sessionId ? (
+          <Thumbnail
+            sessionId={sessionId}
+            entry={entry}
+            load={loadThumb!}
+            size={56}
+            fallback={bigIcon}
+          />
+        ) : (
+          bigIcon
+        )}
+        <span className="line-clamp-2 w-full break-words text-xs leading-tight">
+          {entry.name}
+        </span>
+      </div>
+    );
+  }
 
   if (viewMode === "list") {
     return (

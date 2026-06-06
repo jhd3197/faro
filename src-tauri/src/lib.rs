@@ -36,6 +36,7 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle().clone();
             let profile_store = Arc::new(
@@ -83,6 +84,7 @@ pub fn run() {
             commands::stop_edit,
             commands::list_directory,
             commands::capabilities,
+            commands::read_file_preview,
             commands::open_terminal,
             commands::terminal_write,
             commands::terminal_resize,
@@ -105,6 +107,10 @@ pub fn run() {
             commands::bridge_set_policy,
             commands::respond_to_bridge_approval,
             commands::bridge_activity,
+            commands::bridge_clear_activity,
+            commands::bridge_list_commands,
+            commands::bridge_save_command,
+            commands::bridge_delete_command,
             commands::export_agent_log,
         ])
         .run(tauri::generate_context!())
