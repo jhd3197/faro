@@ -59,6 +59,10 @@ interface SettingsState {
   // Connections
   defaultPort: number;
 
+  // Agent
+  /** Anthropic API key for the built-in Agent chat. Stored locally only. */
+  anthropicApiKey: string;
+
   setAppTheme: (t: AppTheme) => void;
   setOverwritePolicy: (p: OverwritePolicy) => void;
   setAutoOpenTransferPanel: (v: boolean) => void;
@@ -75,6 +79,7 @@ interface SettingsState {
   setTerminalTheme: (t: TerminalTheme) => void;
   setTerminalScrollback: (n: number) => void;
   setDefaultPort: (n: number) => void;
+  setAnthropicApiKey: (s: string) => void;
 }
 
 const STORAGE_KEY = "faro.settings.v1";
@@ -97,6 +102,7 @@ type Persisted = Omit<
   | "setTerminalTheme"
   | "setTerminalScrollback"
   | "setDefaultPort"
+  | "setAnthropicApiKey"
 >;
 
 const DEFAULTS: Persisted = {
@@ -117,6 +123,7 @@ const DEFAULTS: Persisted = {
   terminalTheme: "dark",
   terminalScrollback: 5000,
   defaultPort: 22,
+  anthropicApiKey: "",
 };
 
 function load(): Persisted {
@@ -165,6 +172,7 @@ function mutate<K extends keyof Persisted>(
     terminalTheme: s.terminalTheme,
     terminalScrollback: s.terminalScrollback,
     defaultPort: s.defaultPort,
+    anthropicApiKey: s.anthropicApiKey,
   });
 }
 
@@ -189,6 +197,7 @@ export const useSettings = create<SettingsState>((set, get) => ({
   setTerminalTheme: (t) => mutate(set, get, "terminalTheme", t),
   setTerminalScrollback: (n) => mutate(set, get, "terminalScrollback", n),
   setDefaultPort: (n) => mutate(set, get, "defaultPort", n),
+  setAnthropicApiKey: (s) => mutate(set, get, "anthropicApiKey", s),
 }));
 
 export const TERMINAL_THEMES: Record<

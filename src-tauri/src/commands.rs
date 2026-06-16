@@ -1,3 +1,4 @@
+use crate::agent::ChatRequest;
 use crate::profiles::ConnectionProfile;
 use crate::remotefs::{Capabilities, DirEntry, RemoteFs};
 use crate::session::{HostDecision, Session};
@@ -729,4 +730,76 @@ pub async fn export_agent_log(
     }
     std::fs::write(&path, content).map_err(err)?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+// ---------- Agent Bridge ----------
+
+/// Notify the bridge which session is currently focused in the UI. The bridge
+/// exposes this in `faro_context` so agents know what the user is looking at.
+#[tauri::command]
+pub async fn bridge_set_active_session(
+    session_id: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.bridge.set_active_session(session_id).await;
+    Ok(())
+}
+
+/// Send a message to the built-in Agent chat. The backend calls Anthropic's
+/// API with the Faro bridge tools and returns the assistant's final response.
+#[tauri::command]
+pub async fn agent_chat_cmd(
+    req: ChatRequest,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::agent::ChatResponse, String> {
+    crate::agent::agent_chat(&app, &state.bridge, req)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Register Faro's MCP server with Claude Code so the user doesn't have to
+/// copy/paste the `claude mcp add` command. Best-effort: reports success or
+/// the error text so the UI can guide the user.
+#[tauri::command]
+pub async fn bridge_register_mcp(url: String, token: String) -> Result<String, String> {
+    // Try the most likely binary names across platforms.
+    let candidates: Vec<&str> = if cfg!(windows) {
+        vec!["claude.exe", "claude"]
+    } else {
+        vec!["claude"]
+    };
+
+    let args = [
+        "mcp",
+        "add",
+        "--transport",
+        "http",
+        "faro",
+        &url,
+        "--header",
+        &format!("Authorization: Bearer {token}"),
+    ];
+
+    let mut last_err = String::new();
+    for bin in candidates {
+        let output = std::process::Command::new(bin)
+            .args(&args)
+            .output()
+            .map_err(|e| format!("couldn't run {bin}: {e}"))?;
+        if output.status.success() {
+            return Ok(format!(
+                "Faro MCP server registered as 'faro'. Claude Code can now use it."
+            ));
+        }
+        last_err = format!(
+            "{} exited with {}: {}",
+            bin,
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Err(format!(
+        "Couldn't register the MCP server automatically. Make sure Claude Code is installed and on your PATH. {last_err}"
+    ))
 }

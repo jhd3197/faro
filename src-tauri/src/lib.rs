@@ -7,6 +7,7 @@ use tauri::Manager;
 // the CLI deliberately redacts in `profiles show`.
 pub mod bridge;
 mod commands;
+pub mod agent;
 mod editor;
 pub mod importers;
 mod known_hosts;
@@ -105,6 +106,9 @@ pub fn run() {
             commands::bridge_status,
             commands::bridge_set_session_access,
             commands::bridge_set_policy,
+            commands::bridge_set_active_session,
+            commands::bridge_register_mcp,
+            commands::agent_chat_cmd,
             commands::respond_to_bridge_approval,
             commands::bridge_activity,
             commands::bridge_clear_activity,

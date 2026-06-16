@@ -28,6 +28,7 @@ import {
   AlertTriangle,
   Radio,
   Columns2,
+  Bot,
 } from "lucide-react";
 import { useEditor } from "./stores/editorStore";
 import { useToasts, type ToastVariant } from "./stores/toastStore";
@@ -38,6 +39,7 @@ import { CommandPalette } from "./components/CommandPalette";
 import { KeyboardShortcutsDialog } from "./components/KeyboardShortcutsDialog";
 import { AgentBridge, AgentBridgeHost } from "./components/AgentBridge";
 import { AgentConsoleDock } from "./components/AgentConsole";
+import { AgentChatDock } from "./components/AgentChat";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { relTime } from "./lib/format";
 import { cn } from "./lib/cn";
@@ -53,6 +55,7 @@ export default function App() {
   const toggleTerminal = useLayout((s) => s.toggleTerminal);
   const terminalVisible = !!activeSessionId && terminalOpen && supportsTerminal;
   const consoleOpen = useLayout((s) => s.consoleOpen);
+  const chatOpen = useLayout((s) => s.chatOpen);
   const browserLayout = useSettings((s) => s.browserLayout);
   const dialog = useLayout((s) => s.dialog);
   const closeDialog = useLayout((s) => s.closeDialog);
@@ -93,6 +96,11 @@ export default function App() {
           {consoleOpen && (
             <div className="h-64 border-t border-border">
               <AgentConsoleDock />
+            </div>
+          )}
+          {chatOpen && (
+            <div className="h-80 border-t border-border">
+              <AgentChatDock />
             </div>
           )}
           {/* The terminal dock stays mounted even when hidden so background
@@ -169,6 +177,8 @@ function StatusBar({
   const openDialog = useLayout((s) => s.openDialog);
   const consoleOpen = useLayout((s) => s.consoleOpen);
   const toggleConsole = useLayout((s) => s.toggleConsole);
+  const chatOpen = useLayout((s) => s.chatOpen);
+  const toggleChat = useLayout((s) => s.toggleChat);
   const browserLayout = useSettings((s) => s.browserLayout);
   const setBrowserLayout = useSettings((s) => s.setBrowserLayout);
 
@@ -367,6 +377,14 @@ function StatusBar({
         title="Agent console — live view of what the agent is doing over the bridge"
       >
         Console
+      </PillButton>
+      <PillButton
+        active={chatOpen}
+        onClick={toggleChat}
+        icon={<Bot size={11} />}
+        title="Agent chat — ask an AI agent to work on your servers"
+      >
+        Agent
       </PillButton>
       <PillButton
         active={browserLayout === "dual"}

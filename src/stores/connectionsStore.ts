@@ -74,6 +74,7 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
         activeProfileId: profileId,
         connecting: false,
       }));
+      void ipc.bridgeSetActiveSession(sessionId);
       toast.success(
         "Connected",
         profile
@@ -110,6 +111,7 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
       }
       return { sessions, activeSessionId, activeProfileId };
     });
+    void ipc.bridgeSetActiveSession(get().activeSessionId);
     toast.info("Disconnected", profile?.name);
   },
 
@@ -117,5 +119,7 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
     const target = get().sessions.find((s) => s.sessionId === sessionId);
     if (!target) return;
     set({ activeSessionId: sessionId, activeProfileId: target.profileId });
+    // Keep the Agent Bridge aware of which connection the user is focused on.
+    void ipc.bridgeSetActiveSession(sessionId);
   },
 }));

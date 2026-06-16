@@ -22,6 +22,8 @@ import { useBridge } from "@/stores/bridgeStore";
 import { useConnections } from "@/stores/connectionsStore";
 import { useLayout } from "@/stores/layoutStore";
 import { useDialog } from "@/hooks/useDialog";
+import { ipc } from "@/lib/ipc";
+import { toast } from "@/stores/toastStore";
 import { ConfirmModal } from "./ConfirmModal";
 import { cn } from "@/lib/cn";
 import { relTime } from "@/lib/format";
@@ -153,15 +155,22 @@ function ApprovalModal({
   );
 }
 
-function skillMd(server: string, commands: SavedCommand[]): string {
+function savedCommandsBlock(server: string, commands: SavedCommand[]): string {
   const S = server || "<server>";
-  const savedBlock =
-    commands.length > 0
-      ? `## Saved commands (prefer these)
+  if (commands.length === 0) {
+    return `## Saved commands
+
+The user can save named, pre-approved commands in Faro's Agent Bridge panel; once
+they do, run them with \`faro-cli agent run "<name>" ${S}\` (no approval prompt).
+Check what's available any time with \`faro-cli agent commands\`.
+
+`;
+  }
+  return `## Saved commands (prefer these)
 
 The user has saved these named, **pre-approved** commands. Prefer running one by
 name over composing a raw command — it runs immediately (no approval prompt) and
-exactly as the user vetted it. You only supply the name and the server:
+exactly as the user vetted it. You only supply the name and the connection:
 
 \`\`\`bash
 faro-cli agent commands                          # list saved commands
@@ -176,55 +185,51 @@ ${commands
   )
   .join("\n")}
 
-`
-      : `## Saved commands
-
-The user can save named, pre-approved commands in Faro's Agent Bridge panel; once
-they do, run them with \`faro-cli agent run "<name>" ${S}\` (no approval prompt).
-Check what's available any time with \`faro-cli agent commands\`.
-
 `;
+}
+
+function skillMdReadOnly(server: string, commands: SavedCommand[]): string {
+  const S = server || "<server>";
+  const savedBlock = savedCommandsBlock(S, commands);
   return `---
-name: faro-server
-description: Administer the user's own server through Faro — run shell commands, browse, read, search and transfer files on a machine the user is already connected to in Faro (a desktop SSH/SFTP client). Use for the routine server administration and file management the user asks for.
+name: faro-helper
+description: Help the user with their own Faro file client — browse, read, search and manage files on computers and servers they are already connected to. Use only for the routine file-management and read-only diagnostic tasks the user asks for.
 ---
 
-# Administering the user's server via Faro
+# Helping the user in Faro (read-only)
 
-Faro is the user's desktop SSH/SFTP client (FileZilla + PuTTY). They have already
-opened and authenticated a connection to a server **they operate** and authorized
-you to act through it. Running a command here is equivalent to the user typing it
-into the terminal Faro already has open. The user is at the keyboard and approves
-actions in Faro (some kinds may be pre-approved in their settings).
+Faro is the user's desktop SSH/SFTP file client (FileZilla + PuTTY). They have
+already opened and authenticated a connection to a computer or server **they own
+or operate**, and they have turned on the local Agent Bridge so you can help them
+through it. Nothing runs unless the user first enables access and, by default,
+approves each action in the Faro UI.
 
-You operate the server through **\`faro-cli agent\`**, which connects to Faro's
-local Agent Bridge for you. You never handle a URL, port or token — \`faro-cli\`
-reads them from Faro's local discovery file. You only need the **server name**
-(here: \`${S}\`).
+You help through **\`faro-cli agent\`**, which talks to Faro's local Agent Bridge.
+You never handle a URL, port or token — \`faro-cli\` reads them from Faro's local
+discovery file. You only need the **connection name** (here: \`${S}\`).
+
+You are using the **read-only helper** skill. You can browse, read, search and
+transfer files, but you do **not** run arbitrary commands. If the user asks for
+something that needs a command (for example checking disk usage or service
+status), tell them to switch to the admin skill or run it themselves.
 
 ## Before you start
 
 Make sure Faro is running with the **Agent Bridge turned on** (the master switch
-at the top of the Bridge panel) and that this server has been granted access.
+at the top of the Bridge panel) and that this connection has been granted access.
 Confirm with:
 
 \`\`\`bash
-faro-cli agent sessions          # servers you may operate (exec=true means SSH)
+faro-cli agent context           # bridge state, sessions, saved commands
+faro-cli agent sessions          # connections you may help with
 \`\`\`
 
 If it reports the bridge isn't running, ask the user to turn it on. (\`faro-cli\`
 must be on your PATH; if it isn't, the user can give you its full path.)
 
-${savedBlock}## Run a command (SSH only)
+${savedBlock}## Browse / read / search
 
-\`\`\`bash
-faro-cli agent exec ${S} "df -h"
-\`\`\`
-
-Keep commands non-interactive (no prompts/pagers); add \`-y\`, \`| cat\`, etc. The
-remote exit code is propagated; stderr is printed to stderr.
-
-## Browse / read / search
+Use these for everyday file and diagnostics work:
 
 \`\`\`bash
 faro-cli agent ls     ${S} /var/log
@@ -248,6 +253,91 @@ faro-cli agent history --server ${S}            # recent activity, newest first
 \`\`\`
 
 Notes:
+- Only help with tasks the user explicitly asks for. When in doubt, ask first.
+- Each call may pause while the user approves it in Faro (unless they pre-approved
+  that kind). A blocked call means they're being asked to confirm.
+- Transfers run in the background and also appear in Faro's transfer panel; poll
+  \`agent transfer <id>\` for the outcome.
+`;
+}
+
+function skillMdAdmin(server: string, commands: SavedCommand[]): string {
+  const S = server || "<server>";
+  const savedBlock = savedCommandsBlock(S, commands);
+  return `---
+name: faro-helper-admin
+description: Help the user manage their own Faro file client and connected servers — browse, read, search, transfer files and run status/diagnostic commands on computers and servers they already connected to. Use only for the routine administration and debugging tasks the user asks for.
+---
+
+# Helping the user in Faro (admin)
+
+Faro is the user's desktop SSH/SFTP file client (FileZilla + PuTTY). They have
+already opened and authenticated a connection to a computer or server **they own
+or operate**, and they have turned on the local Agent Bridge so you can help them
+through it. Nothing runs unless the user first enables access and, by default,
+approves each action in the Faro UI.
+
+You help through **\`faro-cli agent\`**, which talks to Faro's local Agent Bridge.
+You never handle a URL, port or token — \`faro-cli\` reads them from Faro's local
+discovery file. You only need the **connection name** (here: \`${S}\`).
+
+You are using the **admin helper** skill, which can also run commands on connected
+SSH servers. Prefer read-only inspection first, and only run commands the user
+explicitly asks for.
+
+## Before you start
+
+Make sure Faro is running with the **Agent Bridge turned on** (the master switch
+at the top of the Bridge panel) and that this connection has been granted access.
+Confirm with:
+
+\`\`\`bash
+faro-cli agent context           # bridge state, sessions, saved commands
+faro-cli agent sessions          # connections you may help with
+\`\`\`
+
+If it reports the bridge isn't running, ask the user to turn it on. (\`faro-cli\`
+must be on your PATH; if it isn't, the user can give you its full path.)
+
+${savedBlock}## Browse / read / search
+
+Use these for everyday file and diagnostics work:
+
+\`\`\`bash
+faro-cli agent ls     ${S} /var/log
+faro-cli agent read   ${S} /etc/hostname       # SSH/SFTP, capped at 256 KiB
+faro-cli agent search ${S} ".log" /var/log     # search <server> <query> [path]
+faro-cli agent info   ${S}                      # protocol, host, port, …
+\`\`\`
+
+## Run a status or diagnostic command (SSH only)
+
+For checking state only — for example disk usage, service status or log tailing:
+
+\`\`\`bash
+faro-cli agent exec ${S} "df -h"
+\`\`\`
+
+Keep commands non-interactive (no prompts/pagers); add \`-y\`, \`| cat\`, etc. The
+remote exit code is propagated; stderr is printed to stderr. Avoid mutating
+commands unless the user explicitly asks for them.
+
+## Transfer files
+
+\`\`\`bash
+faro-cli agent download ${S} /etc/hosts         # → the user's Downloads folder
+faro-cli agent upload   ${S} ./a.txt /home/user # local file → remote dir
+faro-cli agent transfer <transferId>            # poll until done/error
+\`\`\`
+
+## Review what you've done
+
+\`\`\`bash
+faro-cli agent history --server ${S}            # recent activity, newest first
+\`\`\`
+
+Notes:
+- Only help with tasks the user explicitly asks for. When in doubt, ask first.
 - Each call may pause while the user approves it in Faro (unless they pre-approved
   that kind). A blocked call means they're being asked to confirm.
 - Transfers run in the background and also appear in Faro's transfer panel; poll
@@ -535,41 +625,80 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
             )}
           </Card>
 
-          {/* Setup — CLI-first (lightweight); MCP is the advanced option. */}
+          {/* Setup — MCP is the recommended path; skills are the fallback. */}
           <Card title="Connect your AI agent">
             <div className="mb-2 text-xs text-text-muted">
-              <span className="font-medium text-text">Recommended.</span> Paste this
-              skill into your agent (Claude Code, Cursor…). It teaches it the
-              lightweight <span className="font-mono">faro-cli agent</span> commands
-              — server name pre-filled, your saved commands listed — so it spends far
-              fewer tokens than the raw API.
+              <span className="font-medium text-text">Recommended.</span> Add Faro
+              as an MCP server in Claude Code, Cursor or any MCP-compatible agent.
+              The agent talks directly to Faro over a local endpoint — no big skill
+              text to paste, and it auto-discovers the tools.
             </div>
-            <CopyButton
-              wide
-              disabled={!canCopySetup}
-              label="Copy SKILL.md"
-              text={
-                canCopySetup ? skillMd(setupServerName ?? "", savedCommands) : ""
-              }
-            />
-            <details className="mt-3 text-[11px] text-text-dim">
-              <summary className="cursor-pointer select-none hover:text-text">
-                Advanced: native MCP (more tokens)
-              </summary>
-              <div className="mt-2 flex items-center gap-2">
-                <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1 font-mono text-[10px] text-text-muted">
-                  {canCopySetup
+            <div className="flex items-center gap-2">
+              <code className="min-w-0 flex-1 truncate rounded bg-bg px-2 py-1.5 font-mono text-[10px] text-text-muted">
+                {canCopySetup
+                  ? mcpAddCmd(status.url ?? "", status.token ?? "")
+                  : "claude mcp add --transport http faro …"}
+              </code>
+              <CopyButton
+                disabled={!canCopySetup}
+                text={
+                  canCopySetup
                     ? mcpAddCmd(status.url ?? "", status.token ?? "")
-                    : "claude mcp add --transport http faro …"}
-                </code>
-                <CopyButton
-                  disabled={!canCopySetup}
-                  text={
-                    canCopySetup
-                      ? mcpAddCmd(status.url ?? "", status.token ?? "")
-                      : ""
-                  }
-                />
+                    : ""
+                }
+              />
+            </div>
+            <button
+              disabled={!canCopySetup}
+              onClick={async () => {
+                try {
+                  const msg = await ipc.bridgeRegisterMcp(
+                    status.url ?? "",
+                    status.token ?? ""
+                  );
+                  toast.success("MCP registered", msg);
+                } catch (e) {
+                  toast.error("Couldn't register MCP", String(e));
+                }
+              }}
+              className="mt-2 flex w-full items-center justify-center gap-1 rounded-md border border-border bg-bg px-2 py-1.5 text-[11px] font-medium text-text hover:bg-bg-hover disabled:opacity-40"
+            >
+              <Plus size={12} /> Add to Claude Code automatically
+            </button>
+
+            <details className="mt-4 text-[11px] text-text-dim">
+              <summary className="cursor-pointer select-none hover:text-text">
+                Fallback: paste a skill (no MCP support)
+              </summary>
+              <div className="mt-2 space-y-2">
+                <div className="text-xs text-text-muted">
+                  If your agent doesn't support MCP, paste one of these skills
+                  instead. The read-only skill is safest and least likely to be
+                  flagged; the admin skill also allows diagnostic commands on SSH
+                  servers.
+                </div>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <CopyButton
+                    wide
+                    disabled={!canCopySetup}
+                    label="Copy read-only skill"
+                    text={
+                      canCopySetup
+                        ? skillMdReadOnly(setupServerName ?? "", savedCommands)
+                        : ""
+                    }
+                  />
+                  <CopyButton
+                    wide
+                    disabled={!canCopySetup}
+                    label="Copy admin skill"
+                    text={
+                      canCopySetup
+                        ? skillMdAdmin(setupServerName ?? "", savedCommands)
+                        : ""
+                    }
+                  />
+                </div>
               </div>
             </details>
             {!canCopySetup && (

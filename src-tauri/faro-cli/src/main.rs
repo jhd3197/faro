@@ -128,12 +128,17 @@ enum ProfileCmd {
 
 #[derive(Subcommand)]
 enum AgentCmd {
+    /// Show agent context: bridge state, policy, enabled sessions, saved commands.
+    Context,
     /// List the servers the Agent Bridge can currently reach.
     Sessions,
     /// Run a shell command on a server (SSH only). Exits with its exit code.
     Exec {
         /// Saved server name (as shown in Faro) or its session id.
         server: String,
+        /// Show what would run and whether it would need approval, without executing.
+        #[arg(long)]
+        dry_run: bool,
         /// The command to run. Quote it, or pass it as trailing arguments.
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
@@ -146,6 +151,21 @@ enum AgentCmd {
     },
     /// Read a remote text file (SSH/SFTP, capped at 256 KiB).
     Read { server: String, path: String },
+    /// Read several remote text files at once (SSH/SFTP, total capped at 1 MiB).
+    ReadBatch {
+        server: String,
+        /// Remote file paths. Pass multiple times or space-separated.
+        #[arg(required = true)]
+        paths: Vec<String>,
+    },
+    /// Find files whose name matches a glob pattern, recursively (SSH only).
+    Glob {
+        server: String,
+        /// Root directory to search under (default: ".").
+        path: Option<String>,
+        /// Glob pattern, e.g. '*.log'.
+        pattern: String,
+    },
     /// Find entries whose name contains a substring, recursively.
     Search {
         server: String,
@@ -168,6 +188,15 @@ enum AgentCmd {
     },
     /// Check a transfer started via `agent download` / `agent upload`.
     Transfer { transfer_id: String },
+    /// Tail a remote log file for up to 30 seconds (SSH only).
+    Tail {
+        server: String,
+        /// Remote log file path.
+        path: String,
+        /// Number of trailing lines to start with (default 50).
+        #[arg(long, default_value_t = 50)]
+        lines: usize,
+    },
     /// Show context about a server (protocol, host, port, …).
     Info { server: String },
     /// Recent Agent Bridge activity (what's already run), newest first.
@@ -184,6 +213,9 @@ enum AgentCmd {
     Run {
         /// Saved server name (as shown in Faro) or its session id.
         server: String,
+        /// Show the saved command without running it.
+        #[arg(long)]
+        dry_run: bool,
         /// The saved command's name (see `agent commands`).
         name: String,
     },
@@ -819,6 +851,11 @@ fn resolve_server(ep: &Endpoint, name: &str) -> Result<String> {
 fn cmd_agent(action: AgentCmd) -> Result<()> {
     let ep = read_endpoint()?;
     match action {
+        AgentCmd::Context => {
+            let body = http_get(&ep, "/context")?;
+            println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+            Ok(())
+        }
         AgentCmd::Sessions => {
             let body = http_get(&ep, "/sessions")?;
             let sessions = body
@@ -840,12 +877,12 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             }
             Ok(())
         }
-        AgentCmd::Exec { server, command } => {
+        AgentCmd::Exec { server, dry_run, command } => {
             let id = resolve_server(&ep, &server)?;
             let body = http_post(
                 &ep,
                 "/exec",
-                serde_json::json!({ "sessionId": id, "command": command.join(" ") }),
+                serde_json::json!({ "sessionId": id, "command": command.join(" "), "dryRun": dry_run }),
             )?;
             if let Some(out) = body.get("stdout").and_then(|v| v.as_str()) {
                 let mut so = io::stdout();
@@ -886,6 +923,32 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             }
             if body.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false) {
                 eprintln!("\n{}", warn("output truncated at 256 KiB"));
+            }
+            Ok(())
+        }
+        AgentCmd::ReadBatch { server, paths } => {
+            let id = resolve_server(&ep, &server)?;
+            let body = http_post(
+                &ep,
+                "/read_batch",
+                serde_json::json!({ "sessionId": id, "paths": paths }),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+            Ok(())
+        }
+        AgentCmd::Glob { server, path, pattern } => {
+            let id = resolve_server(&ep, &server)?;
+            let mut req = serde_json::json!({ "sessionId": id, "pattern": pattern });
+            if let Some(p) = path {
+                req["path"] = serde_json::Value::String(p);
+            }
+            let body = http_post(&ep, "/glob", req)?;
+            if let Some(matches) = body.get("matches").and_then(|v| v.as_array()) {
+                for m in matches {
+                    if let Some(p) = m.as_str() {
+                        println!("{p}");
+                    }
+                }
             }
             Ok(())
         }
@@ -933,6 +996,23 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
             Ok(())
         }
+        AgentCmd::Tail { server, path, lines } => {
+            let id = resolve_server(&ep, &server)?;
+            let body = http_post(
+                &ep,
+                "/tail",
+                serde_json::json!({ "sessionId": id, "path": path, "lines": lines }),
+            )?;
+            if let Some(out) = body.get("stdout").and_then(|v| v.as_str()) {
+                let mut so = io::stdout();
+                so.write_all(out.as_bytes()).ok();
+                so.flush().ok();
+            }
+            if body.get("timedOut").and_then(|v| v.as_bool()).unwrap_or(false) {
+                eprintln!("{}", warn("tail stream timed out after 30s"));
+            }
+            Ok(())
+        }
         AgentCmd::Info { server } => {
             let id = resolve_server(&ep, &server)?;
             let body = http_post(&ep, "/info", serde_json::json!({ "sessionId": id }))?;
@@ -957,9 +1037,9 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             }
             Ok(())
         }
-        AgentCmd::Run { server, name } => {
+        AgentCmd::Run { server, dry_run, name } => {
             let id = resolve_server(&ep, &server)?;
-            let body = http_post(&ep, "/run", serde_json::json!({ "sessionId": id, "name": name }))?;
+            let body = http_post(&ep, "/run", serde_json::json!({ "sessionId": id, "name": name, "dryRun": dry_run }))?;
             if let Some(out) = body.get("stdout").and_then(|v| v.as_str()) {
                 let mut so = io::stdout();
                 so.write_all(out.as_bytes()).ok();

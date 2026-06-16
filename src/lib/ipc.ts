@@ -186,6 +186,16 @@ export const ipc = {
     invoke<BridgeStatus>("bridge_set_session_access", { sessionId, enabled }),
   bridgeSetPolicy: (policy: ApprovalPolicy) =>
     invoke<BridgeStatus>("bridge_set_policy", { policy }),
+  bridgeSetActiveSession: (sessionId: SessionId | null) =>
+    invoke<void>("bridge_set_active_session", { sessionId }),
+  bridgeRegisterMcp: (url: string, token: string) =>
+    invoke<string>("bridge_register_mcp", { url, token }),
+  agentChat: (req: {
+    apiKey: string;
+    sessionId: string | null;
+    prompt: string;
+    history: Array<{ role: "user" | "assistant"; content: string }>;
+  }) => invoke<{ content: string }>("agent_chat_cmd", { req }),
   respondToBridgeApproval: (requestId: string, decision: ApprovalDecision) =>
     invoke<void>("respond_to_bridge_approval", { requestId, decision }),
   bridgeActivity: () => invoke<BridgeActivity[]>("bridge_activity"),

@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef } from "react";
-import { X, Palette, ArrowDownUp, FolderTree, TerminalSquare, Plug, Radio } from "lucide-react";
+import { X, Palette, ArrowDownUp, FolderTree, TerminalSquare, Plug, Radio, Bot } from "lucide-react";
 import { useDialog } from "@/hooks/useDialog";
 import {
   useSettings,
@@ -325,6 +325,22 @@ export function Settings({ onClose }: Props) {
             <Help>
               Same setting as the Agent Bridge panel — applies to every
               agent-enabled session and persists across restarts.
+            </Help>
+          </Section>
+
+          <Section title="Agent" icon={<Bot size={13} />}>
+            <Field label="Anthropic API key">
+              <input
+                type="password"
+                value={s.anthropicApiKey}
+                onChange={(e) => s.setAnthropicApiKey(e.target.value)}
+                placeholder="sk-ant-api03-..."
+                className="w-full rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-sm outline-none focus:border-accent"
+              />
+            </Field>
+            <Help>
+              Used only by the built-in Agent chat. Stored locally; never sent
+              to Faro's servers.
             </Help>
           </Section>
         </div>

@@ -213,6 +213,23 @@ export interface BridgeStatus {
   policy: ApprovalPolicy;
 }
 
+export interface BridgeContext {
+  bridgeRunning: boolean;
+  policy: ApprovalPolicy;
+  activeSessionId: string | null;
+  sessions: Array<{
+    id: string;
+    name: string;
+    protocol: string;
+    host: string;
+    canExec: boolean;
+  }>;
+  savedCommands: Array<{
+    name: string;
+    description: string;
+  }>;
+}
+
 export interface BridgeActivity {
   id: string;
   sessionId: string;

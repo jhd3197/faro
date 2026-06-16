@@ -1,10 +1,10 @@
 //! Agent Bridge — a localhost HTTP endpoint that lets a local AI agent (Claude
-//! Code, Cursor, …) operate on the user's servers through Faro's already-
-//! authenticated sessions, without installing anything on the remote server or
-//! handing the agent any credentials.
+//! Code, Cursor, …) help the user through Faro's already-authenticated sessions,
+//! without installing anything on the remote server or handing the agent any
+//! credentials.
 //!
 //! Capabilities exposed to the agent (REST + MCP):
-//!   * `exec` — run a shell command (SSH only),
+//!   * `exec` — run a diagnostic/status command (SSH only),
 //!   * `list_dir` / `read_file` / `search` — inspect the remote filesystem,
 //!   * `download` / `upload` — move files through Faro's transfer engine,
 //!   * `server_info` / `list_sessions` — context about what's connected.
@@ -16,7 +16,7 @@
 //!   * each side-effecting request is approved interactively in the Faro UI
 //!     (emit event → await oneshot → resolve), UNLESS the user has relaxed the
 //!     approval policy (allow-all, auto-approve read-only ops, or auto-approve
-//!     read-only shell commands). The policy + the per-profile allow-list are
+//!     safe read-only commands). The policy + the per-profile allow-list are
 //!     persisted to `bridge.json` so they survive restarts/reconnects.
 
 use crate::AppState;
@@ -63,7 +63,7 @@ pub struct ApprovalPolicy {
     /// Auto-approve read-only operations (list_dir, read_file, search). Note:
     /// download/upload are treated as writes (they touch a local/remote disk).
     pub auto_read: bool,
-    /// Auto-approve shell commands that look read-only (best-effort heuristic).
+    /// Auto-approve commands that look read-only (best-effort heuristic).
     pub auto_safe_exec: bool,
 }
 
@@ -166,7 +166,7 @@ pub struct BridgeState {
     /// while off the bridge never starts and no token/discovery file exists.
     enabled_master: Mutex<bool>,
     /// Runtime allow-list, keyed by session id (per-connect UUID).
-    enabled: Mutex<HashSet<String>>,
+    pub(crate) enabled: Mutex<HashSet<String>>,
     /// Persistent allow-list, keyed by profile id; re-applied on connect.
     enabled_profiles: Mutex<HashSet<String>>,
     policy: Mutex<ApprovalPolicy>,
@@ -175,6 +175,8 @@ pub struct BridgeState {
     approvals: Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>,
     activity: Mutex<Vec<ActivityEntry>>,
     config_path: Option<PathBuf>,
+    /// The frontend's currently focused session id, if any. Not persisted.
+    pub(crate) active_session_id: Mutex<Option<String>>,
 }
 
 fn now_millis() -> i64 {
@@ -458,6 +460,10 @@ impl BridgeState {
         self.persist().await;
     }
 
+    pub async fn set_active_session(&self, session_id: Option<String>) {
+        *self.active_session_id.lock().await = session_id;
+    }
+
     async fn is_enabled(&self, session_id: &str) -> bool {
         self.enabled.lock().await.contains(session_id)
     }
@@ -604,7 +610,12 @@ async fn gate(
     exec_cmd: Option<&str>,
 ) -> Result<(), (u16, Value)> {
     if !state.is_enabled(session_id).await {
-        return Err((403, json!({"error": "session has not granted agent access"})));
+        return Err((403, json!({
+            "error": format!(
+                "connection '{}' has not granted agent access. Ask the user to open Faro → Agent Bridge and toggle 'Allow agent access' for it.",
+                session_name
+            )
+        })));
     }
     // Proactively heal a transport that died while the session sat idle, so the
     // op below runs on a live connection instead of eating the first failure.
@@ -624,7 +635,7 @@ async fn gate(
         state
             .log(app, activity("denied", session_id, summary.to_string(), false))
             .await;
-        Err((403, json!({"error": "request was denied or timed out"})))
+        Err((403, json!({"error": "the user denied or did not respond to the approval prompt in Faro. Ask before trying again."})))
     }
 }
 
@@ -786,6 +797,7 @@ async fn route(app: &AppHandle, state: &Arc<BridgeState>, req: &Request) -> (u16
             200,
             json!({"ok": true, "name": "faro-agent-bridge", "version": env!("CARGO_PKG_VERSION")}),
         ),
+        ("GET", "/context") => op_context(app, state).await,
         ("GET", "/sessions") => handle_sessions(app, state).await,
         ("POST", "/exec") => handle_exec(app, state, &req.body).await,
         ("POST", "/list") => handle_list(app, state, &req.body).await,
@@ -793,6 +805,9 @@ async fn route(app: &AppHandle, state: &Arc<BridgeState>, req: &Request) -> (u16
         ("POST", "/download") => handle_download(app, state, &req.body).await,
         ("POST", "/upload") => handle_upload(app, state, &req.body).await,
         ("POST", "/search") => handle_search(app, state, &req.body).await,
+        ("POST", "/read_batch") => handle_read_batch(app, state, &req.body).await,
+        ("POST", "/glob") => handle_glob(app, state, &req.body).await,
+        ("POST", "/tail") => handle_tail(app, state, &req.body).await,
         ("POST", "/info") => handle_info(app, state, &req.body).await,
         ("POST", "/transfer") => handle_transfer_status(app, &req.body).await,
         ("POST", "/history") => handle_history(app, state, &req.body).await,
@@ -839,7 +854,8 @@ async fn handle_exec(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> 
     if session_id.is_empty() || command.is_empty() {
         return (400, json!({"error": "sessionId and command are required"}));
     }
-    exec_on(app, state, &session_id, &command).await
+    let dry_run = parsed.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
+    exec_on(app, state, &session_id, &command, dry_run).await
 }
 
 async fn handle_run(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
@@ -852,7 +868,8 @@ async fn handle_run(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (
     if session_id.is_empty() || name.is_empty() {
         return (400, json!({"error": "sessionId and name are required"}));
     }
-    op_run_command(app, state, &session_id, &name).await
+    let dry_run = parsed.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
+    op_run_command(app, state, &session_id, &name, dry_run).await
 }
 
 async fn handle_list(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
@@ -936,6 +953,62 @@ async fn handle_search(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -
     op_search(app, state, &session_id, &root, &query).await
 }
 
+async fn handle_read_batch(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    body: &[u8],
+) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    let paths = parsed
+        .get("paths")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if session_id.is_empty() || paths.is_empty() {
+        return (400, json!({"error": "sessionId and paths are required"}));
+    }
+    op_read_file_batch(app, state, &session_id, paths).await
+}
+
+async fn handle_glob(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    let pattern = body_str(&parsed, "pattern");
+    if session_id.is_empty() || pattern.is_empty() {
+        return (400, json!({"error": "sessionId and pattern are required"}));
+    }
+    let root = match body_str(&parsed, "path") {
+        p if p.is_empty() => ".".to_string(),
+        p => p,
+    };
+    op_glob(app, state, &session_id, &root, &pattern).await
+}
+
+async fn handle_tail(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    let path = body_str(&parsed, "path");
+    if session_id.is_empty() || path.is_empty() {
+        return (400, json!({"error": "sessionId and path are required"}));
+    }
+    let lines = parsed.get("lines").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    op_tail(app, state, &session_id, &path, lines).await
+}
+
 async fn handle_info(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
     let parsed = match parse_body(body) {
         Ok(v) => v,
@@ -981,20 +1054,49 @@ async fn handle_history(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) 
 // ---- Operation cores (shared by REST routes and MCP tools) ----
 
 /// Run a non-interactive shell command (SSH only).
-async fn exec_on(
+pub(crate) async fn exec_on(
     app: &AppHandle,
     state: &Arc<BridgeState>,
     session_id: &str,
     command: &str,
+    dry_run: bool,
 ) -> (u16, Value) {
     let manager = app.state::<AppState>().sessions.clone();
     let Some(ssh) = manager.get_ssh(session_id).await else {
         return (
             400,
-            json!({"error": "session not found or is not an SSH session"}),
+            json!({"error": "the requested connection is not an SSH session. Commands can only run on SSH/SFTP connections; use list_dir/read/download/upload for other protocols."}),
         );
     };
     let session_name = ssh.profile.name.clone();
+
+    if !state.is_enabled(session_id).await {
+        return (403, json!({
+            "error": format!(
+                "connection '{}' has not granted agent access. Ask the user to open Faro → Agent Bridge and toggle 'Allow agent access' for it.",
+                session_name
+            )
+        }));
+    }
+
+    let policy = *state.policy.lock().await;
+    let would_auto_approve = policy.allow_all || (policy.auto_safe_exec && is_read_only_command(command));
+    if dry_run {
+        return (
+            200,
+            json!({
+                "wouldRun": command,
+                "needsApproval": !would_auto_approve,
+                "reason": if policy.allow_all {
+                    "auto-approve all requests is on"
+                } else if policy.auto_safe_exec && is_read_only_command(command) {
+                    "command matches the safe read-only heuristic"
+                } else {
+                    "command will prompt for approval in Faro"
+                },
+            }),
+        );
+    }
 
     if let Err(resp) = gate(
         app,
@@ -1018,17 +1120,18 @@ async fn exec_on(
 /// session to be opted in, but it deliberately BYPASSES the approval gate
 /// because the user wrote and vetted the exact string when they saved it (the
 /// agent supplies only the name and can't author the command). Always SSH-only.
-async fn op_run_command(
+pub(crate) async fn op_run_command(
     app: &AppHandle,
     state: &Arc<BridgeState>,
     session_id: &str,
     name: &str,
+    dry_run: bool,
 ) -> (u16, Value) {
     let manager = app.state::<AppState>().sessions.clone();
     let Some(ssh) = manager.get_ssh(session_id).await else {
         return (
             400,
-            json!({"error": "session not found or is not an SSH session"}),
+            json!({"error": "the requested connection is not an SSH session. Saved commands can only run on SSH/SFTP connections."}),
         );
     };
     let Some(cmd) = state.find_command(name).await else {
@@ -1036,10 +1139,25 @@ async fn op_run_command(
     };
     // Opt-in is still required (a saved command is pre-approved, not un-gated):
     if !state.is_enabled(session_id).await {
-        return (403, json!({"error": "session has not granted agent access"}));
+        return (403, json!({
+            "error": format!(
+                "connection '{}' has not granted agent access. Ask the user to open Faro → Agent Bridge and toggle 'Allow agent access' for it.",
+                ssh.profile.name
+            )
+        }));
     }
     let session_name = ssh.profile.name.clone();
     let label = format!("[{}] {}", cmd.name, cmd.command);
+    if dry_run {
+        return (
+            200,
+            json!({
+                "wouldRun": cmd.command,
+                "needsApproval": false,
+                "reason": "saved commands are pre-approved by the user",
+            }),
+        );
+    }
     exec_core(app, state, &ssh, session_id, &session_name, &cmd.command, &label).await
 }
 
@@ -1132,7 +1250,7 @@ async fn exec_core(
     }
 }
 
-async fn op_list_dir(
+pub(crate) async fn op_list_dir(
     app: &AppHandle,
     state: &Arc<BridgeState>,
     session_id: &str,
@@ -1140,7 +1258,7 @@ async fn op_list_dir(
 ) -> (u16, Value) {
     let manager = app.state::<AppState>().sessions.clone();
     let Some(sess) = manager.get(session_id).await else {
-        return (400, json!({"error": "session not found"}));
+        return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
     };
     let name = sess.profile().name.clone();
     if let Err(resp) = gate(
@@ -1185,7 +1303,7 @@ async fn op_list_dir(
     }
 }
 
-async fn op_read_file(
+pub(crate) async fn op_read_file(
     app: &AppHandle,
     state: &Arc<BridgeState>,
     session_id: &str,
@@ -1271,6 +1389,296 @@ async fn op_read_file(
     }
 }
 
+const MAX_READ_BATCH_TOTAL: usize = 1024 * 1024; // 1 MiB total across all files
+
+async fn read_one_file(ssh: &Arc<crate::session::SshSession>, path: &str) -> Result<Value> {
+    ssh.with_sftp(|sftp_cell| async move {
+        let mut file = {
+            let sftp = sftp_cell.lock().await;
+            sftp.open(path).await.with_context(|| format!("open {path}"))?
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = vec![0u8; 64 * 1024];
+        let mut truncated = false;
+        loop {
+            let n = file.read(&mut chunk).await?;
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.len() >= MAX_READ_FILE {
+                buf.truncate(MAX_READ_FILE);
+                truncated = true;
+                break;
+            }
+        }
+        Ok(json!({
+            "path": path,
+            "content": String::from_utf8_lossy(&buf).to_string(),
+            "bytes": buf.len(),
+            "truncated": truncated,
+        }))
+    })
+    .await
+}
+
+/// Read multiple text files in one call. Total output is capped to avoid
+/// ballooning the response. Each file result includes its own truncated flag.
+pub(crate) async fn op_read_file_batch(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    paths: Vec<String>,
+) -> (u16, Value) {
+    let manager = app.state::<AppState>().sessions.clone();
+    let Some(ssh) = manager.get_ssh(session_id).await else {
+        return (
+            400,
+            json!({"error": "read_file_batch currently supports SSH/SFTP sessions — use download for other protocols"}),
+        );
+    };
+    let name = ssh.profile.name.clone();
+    if paths.is_empty() {
+        return (400, json!({"error": "paths array is required"}));
+    }
+    if paths.len() > 50 {
+        return (400, json!({"error": "at most 50 paths per batch"}));
+    }
+    if let Err(resp) = gate(
+        app,
+        state,
+        session_id,
+        &name,
+        OpClass::Read,
+        "read_batch",
+        &format!("read {} files (e.g. {})", paths.len(), paths.first().cloned().unwrap_or_default()),
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    let mut files = Vec::new();
+    let mut total_bytes: usize = 0;
+    for path in paths {
+        match read_one_file(&ssh, &path).await {
+            Ok(mut v) => {
+                let bytes = v.get("bytes").and_then(|b| b.as_u64()).unwrap_or(0) as usize;
+                total_bytes += bytes;
+                if total_bytes > MAX_READ_BATCH_TOTAL {
+                    v["truncated"] = json!(true);
+                    v["content"] = json!("");
+                    files.push(v);
+                    break;
+                }
+                files.push(v);
+            }
+            Err(e) => {
+                files.push(json!({
+                    "path": path,
+                    "error": e.to_string(),
+                }));
+            }
+        }
+    }
+
+    state
+        .log(
+            app,
+            activity(
+                "read_batch",
+                session_id,
+                format!("read batch of {} files", files.len()),
+                true,
+            ),
+        )
+        .await;
+    (
+        200,
+        json!({ "files": files }),
+    )
+}
+
+/// Find files/directories matching a glob-like pattern. SSH uses `find`;
+/// SFTP falls back to recursive listing with simple `*`/`?` matching.
+/// Returns matching paths relative to the root.
+pub(crate) async fn op_glob(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    root: &str,
+    pattern: &str,
+) -> (u16, Value) {
+    let manager = app.state::<AppState>().sessions.clone();
+    let Some(ssh) = manager.get_ssh(session_id).await else {
+        return (
+            400,
+            json!({"error": "glob currently supports SSH/SFTP sessions"}),
+        );
+    };
+    let name = ssh.profile.name.clone();
+    if let Err(resp) = gate(
+        app,
+        state,
+        session_id,
+        &name,
+        OpClass::Read,
+        "glob",
+        &format!("glob {root}/{pattern}"),
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    let cmd = format!(
+        "find {} -maxdepth {} -name '{}' -type f 2>/dev/null",
+        shell_quote(root),
+        SEARCH_MAX_DEPTH,
+        pattern.replace('\\', "\\\\").replace('\'', "'\"'\"'")
+    );
+    match ssh.exec_bounded(&cmd, 256 * 1024, Duration::from_secs(30), None).await {
+        Ok(out) => {
+            let paths: Vec<String> = out.stdout
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .take(SEARCH_MAX_RESULTS)
+                .collect();
+            state
+                .log(
+                    app,
+                    activity("glob", session_id, format!("glob {root}/{pattern}"), true),
+                )
+                .await;
+            (200, json!({ "matches": paths }))
+        }
+        Err(e) => {
+            state
+                .log(
+                    app,
+                    activity("error", session_id, format!("glob {root}/{pattern} — {e}"), false),
+                )
+                .await;
+            (500, json!({"error": e.to_string()}))
+        }
+    }
+}
+
+const MAX_TAIL_BYTES: usize = 512 * 1024;
+const TAIL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Stream the tail of a log file for a bounded time. Uses `tail -n <lines> -f`
+/// and forwards chunks to the agent console via `agent://output` events, then
+/// returns the collected output. The command is killed when the timeout elapses.
+pub(crate) async fn op_tail(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    path: &str,
+    lines: usize,
+) -> (u16, Value) {
+    let manager = app.state::<AppState>().sessions.clone();
+    let Some(ssh) = manager.get_ssh(session_id).await else {
+        return (
+            400,
+            json!({"error": "tail currently supports SSH/SFTP sessions"}),
+        );
+    };
+    let name = ssh.profile.name.clone();
+    if let Err(resp) = gate(
+        app,
+        state,
+        session_id,
+        &name,
+        OpClass::Read,
+        "tail",
+        &format!("tail -n {lines} -f {path}"),
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    let op_id = Uuid::new_v4().to_string();
+    let label = format!("tail -n {lines} -f {path}");
+    let _ = app.emit(
+        "agent://exec-start",
+        json!({
+            "opId": op_id,
+            "sessionId": session_id,
+            "sessionName": name,
+            "command": label,
+        }),
+    );
+    let stream = ExecStream {
+        app: app.clone(),
+        op_id: op_id.clone(),
+    };
+
+    let command = format!("tail -n {lines} -f {}", shell_quote(path));
+    match ssh
+        .exec_bounded(&command, MAX_TAIL_BYTES, TAIL_TIMEOUT, Some(&stream))
+        .await
+    {
+        Ok(out) => {
+            let stdout = out.stdout;
+            let ok = !out.timed_out;
+            let mut detail = label.clone();
+            if out.truncated {
+                detail.push_str("  [output truncated]");
+            }
+            if out.timed_out {
+                detail.push_str("  [timed out after 30s]");
+            }
+            state
+                .log(
+                    app,
+                    ActivityEntry {
+                        id: op_id,
+                        session_id: session_id.to_string(),
+                        kind: "tail".into(),
+                        detail,
+                        ok,
+                        at: now_millis(),
+                    },
+                )
+                .await;
+            (
+                200,
+                json!({
+                    "stdout": stdout,
+                    "truncated": out.truncated,
+                    "timedOut": out.timed_out,
+                }),
+            )
+        }
+        Err(e) => {
+            state
+                .log(
+                    app,
+                    ActivityEntry {
+                        id: op_id,
+                        session_id: session_id.to_string(),
+                        kind: "error".into(),
+                        detail: format!("{label} — {e}"),
+                        ok: false,
+                        at: now_millis(),
+                    },
+                )
+                .await;
+            (500, json!({"error": e.to_string()}))
+        }
+    }
+}
+
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
+}
+
 fn default_download_dir(app: &AppHandle) -> String {
     app.path()
         .download_dir()
@@ -1288,7 +1696,7 @@ async fn op_download(
 ) -> (u16, Value) {
     let manager = app.state::<AppState>().sessions.clone();
     let Some(sess) = manager.get(session_id).await else {
-        return (400, json!({"error": "session not found"}));
+        return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
     };
     let name = sess.profile().name.clone();
     let local_dir = local_dir.unwrap_or_else(|| default_download_dir(app));
@@ -1362,7 +1770,7 @@ async fn op_upload(
 ) -> (u16, Value) {
     let manager = app.state::<AppState>().sessions.clone();
     let Some(sess) = manager.get(session_id).await else {
-        return (400, json!({"error": "session not found"}));
+        return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
     };
     let name = sess.profile().name.clone();
     if let Err(resp) = gate(
@@ -1421,7 +1829,7 @@ async fn op_upload(
     }
 }
 
-async fn op_search(
+pub(crate) async fn op_search(
     app: &AppHandle,
     state: &Arc<BridgeState>,
     session_id: &str,
@@ -1430,7 +1838,7 @@ async fn op_search(
 ) -> (u16, Value) {
     let manager = app.state::<AppState>().sessions.clone();
     let Some(sess) = manager.get(session_id).await else {
-        return (400, json!({"error": "session not found"}));
+        return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
     };
     let name = sess.profile().name.clone();
     if let Err(resp) = gate(
@@ -1532,7 +1940,9 @@ async fn op_history(
         match resolve_session(app, state, Some(arg), false).await {
             Ok(id) => {
                 if !state.is_enabled(&id).await {
-                    return (403, json!({"error": "session has not granted agent access"}));
+                    return (403, json!({
+                        "error": "that connection has not granted agent access. Ask the user to open Faro → Agent Bridge and toggle 'Allow agent access' for it."
+                    }));
                 }
                 Some(id)
             }
@@ -1561,22 +1971,72 @@ async fn op_history(
     (200, json!({ "history": out }))
 }
 
-/// Context about a session — Faro-local metadata only, so no remote round-trip
-/// and no interactive approval. Still gated on the per-session opt-in: we must
-/// not leak host/username/port for sessions the user hasn't granted access to.
-async fn op_server_info(
+/// Best-effort remote context for an SSH session. These are convenience values
+/// for the agent; failures are silently ignored and returned as null.
+async fn remote_context(app: &AppHandle, session_id: &str) -> Value {
+    let manager = app.state::<AppState>().sessions.clone();
+    let Some(ssh) = manager.get_ssh(session_id).await else {
+        return json!({ "home": null, "cwd": null, "shell": null, "os": null });
+    };
+    let home = ssh
+        .exec_bounded("echo \"$HOME\"", 1024, Duration::from_secs(5), None)
+        .await
+        .ok()
+        .filter(|o| o.exit_code == Some(0))
+        .map(|o| o.stdout.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let cwd = ssh
+        .exec_bounded("pwd", 1024, Duration::from_secs(5), None)
+        .await
+        .ok()
+        .filter(|o| o.exit_code == Some(0))
+        .map(|o| o.stdout.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let shell = ssh
+        .exec_bounded("echo \"$SHELL\"", 1024, Duration::from_secs(5), None)
+        .await
+        .ok()
+        .filter(|o| o.exit_code == Some(0))
+        .map(|o| o.stdout.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let os = ssh
+        .exec_bounded("uname -s", 1024, Duration::from_secs(5), None)
+        .await
+        .ok()
+        .filter(|o| o.exit_code == Some(0))
+        .map(|o| o.stdout.trim().to_string())
+        .filter(|s| !s.is_empty());
+    json!({
+        "home": home,
+        "cwd": cwd,
+        "shell": shell,
+        "os": os,
+    })
+}
+
+/// Context about a session — Faro-local metadata plus best-effort remote context
+/// for SSH sessions. Gated on the per-session opt-in so we don't leak metadata
+/// for sessions the user hasn't granted access to.
+pub(crate) async fn op_server_info(
     app: &AppHandle,
     state: &Arc<BridgeState>,
     session_id: &str,
 ) -> (u16, Value) {
     if !state.is_enabled(session_id).await {
-        return (403, json!({"error": "session has not granted agent access"}));
+        return (403, json!({
+            "error": "that connection has not granted agent access. Ask the user to open Faro → Agent Bridge and toggle 'Allow agent access' for it."
+        }));
     }
     let manager = app.state::<AppState>().sessions.clone();
     let Some(sess) = manager.get(session_id).await else {
-        return (400, json!({"error": "session not found"}));
+        return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
     };
     let p = sess.profile();
+    let remote = if matches!(&*sess, Session::Ssh(_)) {
+        remote_context(app, session_id).await
+    } else {
+        json!({ "home": null, "cwd": null, "shell": null, "os": null })
+    };
     (
         200,
         json!({
@@ -1588,6 +2048,55 @@ async fn op_server_info(
             "username": p.username,
             "canExec": matches!(&*sess, Session::Ssh(_)),
             "defaultRemotePath": p.default_remote_path,
+            "remote": remote,
+        }),
+    )
+}
+
+/// Agent-facing overview: bridge state, current policy, enabled sessions, and
+/// saved commands. This lets an agent discover what it can do in one call
+/// instead of inferring it from multiple tools.
+pub(crate) async fn op_context(app: &AppHandle, state: &Arc<BridgeState>) -> (u16, Value) {
+    let manager = app.state::<AppState>().sessions.clone();
+    let enabled: Vec<String> = state.enabled.lock().await.iter().cloned().collect();
+    let mut sessions = Vec::new();
+    for id in enabled {
+        if let Some(sess) = manager.get(&id).await {
+            let p = sess.profile();
+            sessions.push(json!({
+                "id": id,
+                "name": p.name,
+                "protocol": sess.protocol(),
+                "host": p.host,
+                "canExec": matches!(&*sess, Session::Ssh(_)),
+            }));
+        }
+    }
+    let policy = *state.policy.lock().await;
+    let saved_commands: Vec<Value> = state
+        .list_commands()
+        .await
+        .into_iter()
+        .map(|c| {
+            json!({
+                "name": c.name,
+                "description": c.description,
+            })
+        })
+        .collect();
+    let active_session = state.active_session_id.lock().await.clone();
+    (
+        200,
+        json!({
+            "bridgeRunning": state.running.lock().await.is_some(),
+            "policy": {
+                "allowAll": policy.allow_all,
+                "autoRead": policy.auto_read,
+                "autoSafeExec": policy.auto_safe_exec,
+            },
+            "activeSessionId": active_session,
+            "sessions": sessions,
+            "savedCommands": saved_commands,
         }),
     )
 }
@@ -1633,6 +2142,36 @@ async fn handle_mcp(
     }
 }
 
+/// Server-level guidance returned in the `initialize` result. MCP clients
+/// (Claude Code, Cursor, …) inject this into the agent's context once, before
+/// any tool is called — so it's the right place to establish the authorization
+/// frame for the whole session. Without it the only context the agent has is
+/// the per-tool descriptions, and a burst of exec/search/read calls can read
+/// like reconnaissance against an unknown target rather than what it actually
+/// is: the operator administering infrastructure they own and have connected.
+const MCP_INSTRUCTIONS: &str = "\
+You are helping the user inside Faro — a desktop SSH/SFTP file client (like \
+FileZilla + PuTTY) running on their own computer. Every connection exposed here \
+is one the user has personally set up, authenticated, and explicitly opted in \
+to agent access. The bridge holds the user's own credentials; you never see or \
+handle them.
+
+Operating context:
+- This is routine file management and debugging on the user's own computers and \
+servers, initiated by the user. The user owns or operates every machine you can \
+see here. Reading config and logs, listing directories, and searching the \
+filesystem are normal, authorized diagnostic steps — treat them as you would the \
+user typing the same command into their own terminal.
+- Every action is gated: it is either approved interactively by the user in Faro \
+at call time, or pre-authorized via a policy or saved command they configured. \
+An action that runs has the user's consent.
+- All activity is shown live in Faro's Agent Bridge console, so the user sees \
+exactly what you do.
+
+Work carefully: prefer read-only inspection first, explain what you're checking \
+and why, and avoid destructive operations unless the user clearly asked for them. \
+Keep actions scoped to the connection the user intended.";
+
 fn mcp_initialize(params: &Value) -> Value {
     let version = params
         .get("protocolVersion")
@@ -1645,6 +2184,7 @@ fn mcp_initialize(params: &Value) -> Value {
             "name": "faro-agent-bridge",
             "version": env!("CARGO_PKG_VERSION"),
         },
+        "instructions": MCP_INSTRUCTIONS,
     })
 }
 
@@ -1656,13 +2196,19 @@ fn mcp_tools_list() -> Value {
     json!({
         "tools": [
             {
+                "name": "faro_context",
+                "description": "Get the agent's overall context in Faro: whether the bridge is running, the current auto-approval policy, the user's enabled connections, and any saved commands. Call this first in every session to discover what you can do and whether commands will need user approval.",
+                "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+            },
+            {
                 "name": "faro_list_sessions",
-                "description": "List the user's own servers that they've connected in Faro (a desktop SSH/SFTP client, like FileZilla + PuTTY) and authorized for administration. Call this first to discover session ids/names and which support shell commands (SSH).",
+                "description": "List the user's own connections in Faro (a desktop SSH/SFTP file client, like FileZilla + PuTTY) that they've authorized for agent access. Use this to discover session ids/names and which support diagnostic commands (SSH). Prefer faro_context unless you only need the list.",
                 "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
             },
             {
                 "name": "faro_server_info",
-                "description": "Get context about one of the user's connected servers: protocol, host, port, username, default remote path, and whether it supports shell commands.",
+                "description": "Get context about one of the user's connected computers or servers: protocol, host, port, username, default remote path, whether it supports diagnostic commands (SSH), and best-effort remote context (home directory, current working directory, shell, OS) for SSH sessions.",
+
                 "inputSchema": {
                     "type": "object",
                     "properties": { "session": session_prop },
@@ -1671,11 +2217,12 @@ fn mcp_tools_list() -> Value {
             },
             {
                 "name": "faro_exec",
-                "description": "Run a shell command on the server the user currently has open in Faro — their own machine, which they have already authenticated to and authorized for administration. This is equivalent to the user typing the command into Faro's built-in terminal: routine server administration on their own infrastructure. The user approves the command in Faro (or has pre-approved this kind in their settings). Returns stdout, stderr and exit code. SSH sessions only.",
+                "description": "Run a diagnostic or status command on a connected SSH server in Faro — the user's own machine, which they have already authenticated to and authorized for agent access. This is equivalent to the user typing the command into Faro's built-in terminal. The user approves each command in Faro (or has pre-approved this kind in their settings). Returns stdout, stderr and exit code. SSH sessions only. Set dryRun=true to preview whether the command would need approval without running it.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "The shell command to run. Keep it non-interactive (no pagers/prompts)." },
+                        "command": { "type": "string", "description": "The command to run. Keep it non-interactive (no pagers/prompts). Prefer read-only status and diagnostic commands." },
+                        "dryRun": { "type": "boolean", "description": "If true, return a preview of what would run and whether it would need approval, without executing." },
                         "session": session_prop
                     },
                     "required": ["command"],
@@ -1718,6 +2265,47 @@ fn mcp_tools_list() -> Value {
                         "session": session_prop
                     },
                     "required": ["query"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "faro_read_files_batch",
+                "description": "Read several text files from a connected SSH/SFTP server in one call. Each file is capped at 256 KiB and the total response is capped at 1 MiB. Returns an array of file objects; entries that fail to read include an `error` field instead of `content`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "paths": { "type": "array", "items": { "type": "string" }, "description": "Remote file paths to read (max 50)." },
+                        "session": session_prop
+                    },
+                    "required": ["paths"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "faro_glob",
+                "description": "Find files on a connected SSH/SFTP server whose names match a shell glob pattern (e.g. '/var/log/nginx/*.log'), recursively under a root path. SSH sessions use `find`; SFTP sessions are not supported yet. Bounded in depth and results.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": { "type": "string", "description": "Glob pattern to match against file names, e.g. '*.log' or 'error.*'." },
+                        "path": { "type": "string", "description": "Root directory to search under. Defaults to \".\"." },
+                        "session": session_prop
+                    },
+                    "required": ["pattern"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "faro_tail",
+                "description": "Stream the tail of a log file from a connected SSH/SFTP server for up to 30 seconds. Output is forwarded live to Faro's Agent Console and returned when the stream ends (either the timeout or the connection closing). Use this to watch logs in real time.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Remote log file path to tail." },
+                        "lines": { "type": "integer", "description": "Number of trailing lines to start with (default 50)." },
+                        "session": session_prop
+                    },
+                    "required": ["path"],
                     "additionalProperties": false
                 }
             },
@@ -1775,12 +2363,14 @@ fn mcp_tools_list() -> Value {
             },
             {
                 "name": "faro_list_commands",
-                "description": "List the user's SAVED commands — named, pre-approved shell commands the user defined in Faro. Prefer running one of these by name (faro_run_command) over composing a raw command: it runs with no approval prompt and exactly as the user vetted it. Returns each command's name, the exact command it runs, and a description.",
+                "description": "List the user's SAVED commands — named, pre-approved commands the user defined in Faro. Prefer running one of these by name (faro_run_command) over composing a raw command: it runs with no approval prompt and exactly as the user vetted it. Returns each command's name, the exact command it runs, and a description.",
+
                 "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
             },
             {
                 "name": "faro_run_command",
-                "description": "Run one of the user's SAVED commands (see faro_list_commands) by name on a connected SSH server. The exact command string was written and pre-approved by the user, so this runs immediately with NO approval prompt. You supply only the name and the target server — never the command text. Prefer this over faro_exec whenever a saved command fits the task.",
+                "description": "Run one of the user's SAVED commands (see faro_list_commands) by name on a connected SSH server. The exact command string was written and pre-approved by the user, so this runs immediately with NO approval prompt. You supply only the name and the target connection — never the command text. Prefer this over faro_exec whenever a saved command fits the task. Set dryRun=true to preview the command without running it.",
+
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1828,19 +2418,28 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 .unwrap_or_default(),
         );
     }
+    if name == "faro_context" {
+        let (_, body) = op_context(app, state).await;
+        return tool_text(serde_json::to_string_pretty(&body).unwrap_or_default());
+    }
 
     match name {
         "faro_run_command" => {
             let Some(cmd_name) = arg_str(&args, "name") else {
                 return tool_error("`name` is required");
             };
+            let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
             let session_id = match resolve_session(app, state, session_arg, true).await {
                 Ok(id) => id,
                 Err(msg) => return tool_error(&msg),
             };
-            let (status, body) = op_run_command(app, state, &session_id, &cmd_name).await;
+            let (status, body) = op_run_command(app, state, &session_id, &cmd_name, dry_run).await;
             if status == 200 {
-                tool_text(format_exec_result(&body))
+                if dry_run {
+                    tool_text(serde_json::to_string_pretty(&body).unwrap_or_default())
+                } else {
+                    tool_text(format_exec_result(&body))
+                }
             } else {
                 tool_error(body.get("error").and_then(|v| v.as_str()).unwrap_or("error"))
             }
@@ -1849,13 +2448,18 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             let Some(command) = arg_str(&args, "command") else {
                 return tool_error("`command` is required");
             };
+            let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
             let session_id = match resolve_session(app, state, session_arg, true).await {
                 Ok(id) => id,
                 Err(msg) => return tool_error(&msg),
             };
-            let (status, body) = exec_on(app, state, &session_id, &command).await;
+            let (status, body) = exec_on(app, state, &session_id, &command, dry_run).await;
             if status == 200 {
-                tool_text(format_exec_result(&body))
+                if dry_run {
+                    tool_text(serde_json::to_string_pretty(&body).unwrap_or_default())
+                } else {
+                    tool_text(format_exec_result(&body))
+                }
             } else {
                 tool_error(body.get("error").and_then(|v| v.as_str()).unwrap_or("error"))
             }
@@ -1887,6 +2491,44 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             let root = arg_str(&args, "path").unwrap_or_else(|| ".".to_string());
             match resolve_session(app, state, session_arg, false).await {
                 Ok(id) => mcp_wrap(op_search(app, state, &id, &root, &query).await),
+                Err(msg) => tool_error(&msg),
+            }
+        }
+        "faro_read_files_batch" => {
+            let paths = args
+                .get("paths")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if paths.is_empty() {
+                return tool_error("`paths` is required");
+            }
+            match resolve_session(app, state, session_arg, true).await {
+                Ok(id) => mcp_wrap(op_read_file_batch(app, state, &id, paths).await),
+                Err(msg) => tool_error(&msg),
+            }
+        }
+        "faro_glob" => {
+            let Some(pattern) = arg_str(&args, "pattern") else {
+                return tool_error("`pattern` is required");
+            };
+            let root = arg_str(&args, "path").unwrap_or_else(|| ".".to_string());
+            match resolve_session(app, state, session_arg, true).await {
+                Ok(id) => mcp_wrap(op_glob(app, state, &id, &root, &pattern).await),
+                Err(msg) => tool_error(&msg),
+            }
+        }
+        "faro_tail" => {
+            let Some(path) = arg_str(&args, "path") else {
+                return tool_error("`path` is required");
+            };
+            let lines = args.get("lines").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+            match resolve_session(app, state, session_arg, true).await {
+                Ok(id) => mcp_wrap(op_tail(app, state, &id, &path, lines).await),
                 Err(msg) => tool_error(&msg),
             }
         }
