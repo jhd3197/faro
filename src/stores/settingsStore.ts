@@ -36,6 +36,9 @@ interface SettingsState {
 
   // Transfers
   overwritePolicy: OverwritePolicy;
+  /** Show a per-file conflict prompt before overwriting. When false, apply
+   *  `overwritePolicy` silently (the pre-prompt behaviour). */
+  promptOnOverwrite: boolean;
   autoOpenTransferPanel: boolean;
   /** Where downloads land. Blank = the OS Downloads folder. */
   defaultDownloadFolder: string;
@@ -65,6 +68,7 @@ interface SettingsState {
 
   setAppTheme: (t: AppTheme) => void;
   setOverwritePolicy: (p: OverwritePolicy) => void;
+  setPromptOnOverwrite: (v: boolean) => void;
   setAutoOpenTransferPanel: (v: boolean) => void;
   setDefaultDownloadFolder: (s: string) => void;
   setDefaultEditor: (s: string) => void;
@@ -88,6 +92,7 @@ type Persisted = Omit<
   SettingsState,
   | "setAppTheme"
   | "setOverwritePolicy"
+  | "setPromptOnOverwrite"
   | "setAutoOpenTransferPanel"
   | "setDefaultDownloadFolder"
   | "setDefaultEditor"
@@ -108,6 +113,7 @@ type Persisted = Omit<
 const DEFAULTS: Persisted = {
   appTheme: "dark",
   overwritePolicy: "overwrite",
+  promptOnOverwrite: true,
   autoOpenTransferPanel: true,
   defaultDownloadFolder: "",
   defaultEditor: "",
@@ -158,6 +164,7 @@ function mutate<K extends keyof Persisted>(
   persist({
     appTheme: s.appTheme,
     overwritePolicy: s.overwritePolicy,
+    promptOnOverwrite: s.promptOnOverwrite,
     autoOpenTransferPanel: s.autoOpenTransferPanel,
     defaultDownloadFolder: s.defaultDownloadFolder,
     defaultEditor: s.defaultEditor,
@@ -181,6 +188,7 @@ export const useSettings = create<SettingsState>((set, get) => ({
 
   setAppTheme: (t) => mutate(set, get, "appTheme", t),
   setOverwritePolicy: (p) => mutate(set, get, "overwritePolicy", p),
+  setPromptOnOverwrite: (v) => mutate(set, get, "promptOnOverwrite", v),
   setAutoOpenTransferPanel: (v) =>
     mutate(set, get, "autoOpenTransferPanel", v),
   setDefaultDownloadFolder: (s) =>

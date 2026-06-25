@@ -83,14 +83,23 @@ export function Settings({ onClose }: Props) {
                 ]}
               />
               <Help>
+                The default action — applied for the rest of a batch after you
+                choose “apply to all”, or to every transfer when the prompt below
+                is off.{" "}
                 {s.overwritePolicy === "overwrite" &&
-                  "Replaces the existing file in place."}
+                  "Overwrite replaces the existing file in place."}
                 {s.overwritePolicy === "skip" &&
-                  "Leaves the existing file alone, marks the transfer as skipped."}
+                  "Skip leaves the existing file alone and marks the transfer skipped."}
                 {s.overwritePolicy === "rename" &&
-                  "Appends _1, _2, … to the destination until a free name is found."}
+                  "Rename appends _1, _2, … until a free name is found."}
               </Help>
             </Field>
+            <ToggleField
+              label="Ask before overwriting"
+              help="Prompt before a transfer overwrites an existing file (overwrite / keep both / skip). Turn off to apply the default action above silently."
+              checked={s.promptOnOverwrite}
+              onChange={s.setPromptOnOverwrite}
+            />
             <ToggleField
               label="Open the transfer panel automatically"
               help="When a new transfer starts, slide the bottom panel into view."

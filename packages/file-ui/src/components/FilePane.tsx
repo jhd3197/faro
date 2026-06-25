@@ -486,6 +486,25 @@ export function FilePane({
         label: single.kind === "directory" ? "Open" : transferLabel,
         onClick: () => onRowActivate(single),
       });
+      // Edit-in-place sits right under the primary action so it's easy to find
+      // (it used to be last, below chmod). Remote files only — local files open
+      // in their app via the OS, and there's nothing to upload back.
+      if (
+        single.kind === "file" &&
+        sessionId &&
+        sessionId !== LOCAL_SESSION &&
+        fs.editFile
+      ) {
+        items.push({
+          label: editorLabel ? `Edit with ${editorLabel}…` : "Edit file…",
+          icon: <ExternalLink size={12} />,
+          onClick: () => {
+            fs.editFile!(sessionId, single.path).catch((e) =>
+              setError(String(e))
+            );
+          },
+        });
+      }
       items.push({
         label: "Rename",
         icon: <Edit3 size={12} />,
@@ -525,20 +544,6 @@ export function FilePane({
         label: "Change permissions (chmod)…",
         icon: <ShieldCheck size={12} />,
         onClick: () => setModal({ type: "chmod", entry: single }),
-      });
-    }
-    if (
-      single?.kind === "file" &&
-      sessionId &&
-      sessionId !== LOCAL_SESSION &&
-      fs.editFile
-    ) {
-      items.push({
-        label: editorLabel ? `Edit with ${editorLabel}…` : "Edit in default app…",
-        icon: <ExternalLink size={12} />,
-        onClick: () => {
-          fs.editFile!(sessionId, single.path).catch((e) => setError(String(e)));
-        },
       });
     }
     setMenu({ x: e.clientX, y: e.clientY, items });

@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { ipc, onEditSaved, onEditError } from "@/lib/ipc";
 import { useSettings } from "./settingsStore";
+import { toast } from "./toastStore";
+import { baseName, fmtSize } from "@/lib/format";
 import type { SessionId } from "@/lib/types";
 
 // Tracks active edit sessions so the UI can show a "Editing N files" pill
@@ -38,6 +40,12 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (get()._listenersWired) return;
     set({ _listenersWired: true });
     await onEditSaved((e) => {
+      // Make the round-trip visible: an external-editor save is silent
+      // otherwise, so the user can't tell the change actually uploaded.
+      toast.success(
+        "Saved to server",
+        `${baseName(e.remotePath)} · ${fmtSize(e.bytes)}`
+      );
       set((s) => {
         const existing = s.edits[e.editId];
         if (!existing) return s;
@@ -55,6 +63,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       });
     });
     await onEditError((e) => {
+      toast.error("Save failed", `${baseName(e.remotePath)} — ${e.message}`);
       set((s) => {
         const existing = s.edits[e.editId];
         if (!existing) return s;
@@ -71,7 +80,17 @@ export const useEditor = create<EditorState>((set, get) => ({
   startEditing: async (sessionId, remotePath) => {
     await get().ensureListeners();
     const editor = useSettings.getState().defaultEditor || undefined;
-    const ev = await ipc.startEdit(sessionId, remotePath, editor);
+    let ev;
+    try {
+      ev = await ipc.startEdit(sessionId, remotePath, editor);
+    } catch (e) {
+      toast.error("Couldn't open editor", `${baseName(remotePath)} — ${e}`);
+      throw e;
+    }
+    toast.info(
+      "Opened for editing",
+      `${baseName(remotePath)} — saving in your editor uploads it back`
+    );
     set((s) => ({
       edits: {
         ...s.edits,

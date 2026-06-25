@@ -490,6 +490,122 @@ impl SshSession {
             timed_out,
         })
     }
+
+    /// Run a command that uses `sudo`, answering sudo's password prompt with
+    /// `password`. A plain exec channel has no tty, so `sudo` either errors with
+    /// "no tty present" or can't prompt — this opens a **PTY** so sudo prompts
+    /// normally. We prime sudo's credential cache against a unique prompt marker
+    /// (`sudo -p '<marker>' -v`) and type the password **only when that exact
+    /// marker appears**, so a NOPASSWD server never receives it. After priming,
+    /// the real command's own `sudo` calls reuse the cached timestamp (so it also
+    /// works when sudo sits mid-pipeline). The password is written to the
+    /// channel's stdin (the tty) and never embedded in the command string, so it
+    /// never lands in logs, `ps`, or the captured output. PTY output is a single
+    /// merged stream, so everything comes back as `stdout` with `stderr` empty.
+    pub async fn exec_sudo(
+        &self,
+        command: &str,
+        password: &str,
+        max_bytes: usize,
+        timeout: Duration,
+        stream: Option<&ExecStream>,
+    ) -> Result<ExecOutput> {
+        let marker = format!("[faro-sudo-{}]", Uuid::new_v4().simple());
+        let wrapped = format!("sudo -p '{marker}' -v && {command}");
+        let wrapped_ref = wrapped.as_str();
+
+        // Open + request a PTY + exec, reconnecting once if the transport is dead
+        // (mirrors open_exec_channel). The closure is re-runnable: it only
+        // captures Copy references.
+        let mut channel = self
+            .with_reconnect(|| async move {
+                let channel = {
+                    let h = self.handle.lock().await;
+                    h.channel_open_session().await?
+                };
+                channel
+                    .request_pty(true, "xterm", 80, 24, 0, 0, &[])
+                    .await?;
+                channel.exec(true, wrapped_ref.as_bytes()).await?;
+                Ok(channel)
+            })
+            .await?;
+
+        let mut out = Vec::new();
+        let mut exit_code = None;
+        let mut truncated = false;
+        let marker_bytes = marker.as_bytes();
+        let mut markers_seen = 0usize; // prompts observed so far
+        let mut pw_sent = 0usize; // password lines typed
+
+        let collect = async {
+            loop {
+                let Some(msg) = channel.wait().await else { break };
+                match msg {
+                    ChannelMsg::Data { ref data } | ChannelMsg::ExtendedData { ref data, .. } => {
+                        let total = out.len();
+                        append_capped(&mut out, data, max_bytes, total, &mut truncated);
+                        if let Some(s) = stream {
+                            emit_chunk(s, "stdout", data);
+                        }
+                        // Type the password each time a *new* sudo prompt appears.
+                        // sudo retries up to 3x on a wrong password and then gives
+                        // up (channel closes), so capping the sends avoids a hang.
+                        let hits = count_occurrences(&out, marker_bytes);
+                        while markers_seen < hits {
+                            markers_seen += 1;
+                            if pw_sent < 3 {
+                                let mut line = password.as_bytes().to_vec();
+                                line.push(b'\n');
+                                if channel.data(&line[..]).await.is_err() {
+                                    return;
+                                }
+                                pw_sent += 1;
+                            }
+                        }
+                    }
+                    ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status as i32),
+                    ChannelMsg::Eof | ChannelMsg::Close => break,
+                    _ => {}
+                }
+                if truncated {
+                    break;
+                }
+            }
+        };
+
+        let timed_out = tokio::time::timeout(timeout, collect).await.is_err();
+
+        // Scrub the priming prompt(s) so the caller/agent sees clean output.
+        let text = String::from_utf8_lossy(&out).replace(&marker, "");
+        let text = text.trim_start_matches(['\r', '\n']).to_string();
+
+        Ok(ExecOutput {
+            stdout: text,
+            stderr: String::new(),
+            exit_code,
+            truncated,
+            timed_out,
+        })
+    }
+}
+
+/// Count non-overlapping occurrences of `needle` in `haystack`.
+fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return 0;
+    }
+    let mut count = 0;
+    let mut i = 0;
+    while i + needle.len() <= haystack.len() {
+        if &haystack[i..i + needle.len()] == needle {
+            count += 1;
+            i += needle.len();
+        } else {
+            i += 1;
+        }
+    }
+    count
 }
 
 /// Sink for live exec output — emits `agent://output` events tagged with `op_id`.

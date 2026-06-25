@@ -5,7 +5,7 @@ import { downloadDir } from "@tauri-apps/api/path";
 import { FilePane } from "@faro/file-ui";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { useConnections } from "@/stores/connectionsStore";
-import { useTransfers } from "@/stores/transfersStore";
+import { useTransfers, toTransferItem } from "@/stores/transfersStore";
 import { useLayout } from "@/stores/layoutStore";
 import { useSettings } from "@/stores/settingsStore";
 import { toast } from "@/stores/toastStore";
@@ -25,10 +25,8 @@ export function FileBrowser() {
   const browseLocal = useLayout((s) => s.browseLocal);
   const defaultDownloadFolder = useSettings((s) => s.defaultDownloadFolder);
 
-  const download = useTransfers((s) => s.download);
-  const downloadDirFn = useTransfers((s) => s.downloadDir);
-  const upload = useTransfers((s) => s.upload);
-  const uploadDirFn = useTransfers((s) => s.uploadDir);
+  const enqueueDownloads = useTransfers((s) => s.enqueueDownloads);
+  const enqueueUploads = useTransfers((s) => s.enqueueUploads);
   const activeCount = useTransfers(
     (s) =>
       Object.values(s.byId).filter(
@@ -91,11 +89,11 @@ export function FileBrowser() {
     });
     if (!picked) return;
     const paths = Array.isArray(picked) ? picked : [picked];
-    for (const p of paths) {
-      if (kind === "folder")
-        uploadDirFn(serverSid, p, serverRemotePath).catch(() => {});
-      else upload(serverSid, p, serverRemotePath).catch(() => {});
-    }
+    const items = paths.map((p) => ({
+      path: p,
+      kind: (kind === "folder" ? "directory" : "file") as "directory" | "file",
+    }));
+    enqueueUploads(serverSid, items, serverRemotePath).catch(() => {});
   };
   const onUpload = (e: React.MouseEvent) => {
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -122,11 +120,9 @@ export function FileBrowser() {
         toast.info("Not connected", "Connect to a server to upload there.");
         return;
       }
-      for (const e of entries) {
-        if (e.kind === "directory")
-          uploadDirFn(serverSid, e.path, serverRemotePath).catch(() => {});
-        else upload(serverSid, e.path, serverRemotePath).catch(() => {});
-      }
+      enqueueUploads(serverSid, entries.map(toTransferItem), serverRemotePath).catch(
+        () => {}
+      );
       return;
     }
     // Server view → download the selection to the Downloads folder.
@@ -139,11 +135,7 @@ export function FileBrowser() {
       );
       return;
     }
-    for (const e of entries) {
-      if (e.kind === "directory")
-        downloadDirFn(serverSid, e.path, dest).catch(() => {});
-      else download(serverSid, e.path, dest).catch(() => {});
-    }
+    enqueueDownloads(serverSid, entries.map(toTransferItem), dest).catch(() => {});
   };
 
   return (

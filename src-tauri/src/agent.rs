@@ -196,7 +196,7 @@ fn anthropic_tools() -> Vec<Value> {
         }),
         json!({
             "name": "faro_exec",
-            "description": "Run a diagnostic/status command on an SSH server. Prefer read-only commands. Set dryRun=true to preview approval.",
+            "description": "Run a diagnostic/status command on an SSH server. Prefer read-only commands. Set dryRun=true to preview approval. `sudo` is supported when the user enabled it — write `sudo <cmd>` normally (Faro answers the password prompt); never add `-S` or pipe in a password.",
             "input_schema": {
                 "type": "object",
                 "properties": {

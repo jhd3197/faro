@@ -2,7 +2,7 @@ import { useState } from "react";
 import { FilePane } from "@faro/file-ui";
 import { SyncDialog } from "./SyncDialog";
 import { useConnections } from "@/stores/connectionsStore";
-import { useTransfers } from "@/stores/transfersStore";
+import { useTransfers, toTransferItem } from "@/stores/transfersStore";
 import { LOCAL_SESSION } from "@/lib/types";
 import type { DirEntry } from "@/lib/types";
 import { ArrowRightLeft } from "lucide-react";
@@ -12,10 +12,8 @@ export function DualPaneBrowser() {
   const activeProfileId = useConnections((s) => s.activeProfileId);
   const profiles = useConnections((s) => s.profiles);
   const profile = profiles.find((p) => p.id === activeProfileId) || null;
-  const startDownload = useTransfers((s) => s.download);
-  const startUpload = useTransfers((s) => s.upload);
-  const startDirDownload = useTransfers((s) => s.downloadDir);
-  const startDirUpload = useTransfers((s) => s.uploadDir);
+  const enqueueUploads = useTransfers((s) => s.enqueueUploads);
+  const enqueueDownloads = useTransfers((s) => s.enqueueDownloads);
 
   const [localPath, setLocalPath] = useState(
     navigator.userAgent.includes("Windows") ? "C:\\" : "/"
@@ -36,24 +34,16 @@ export function DualPaneBrowser() {
 
   const uploadAll = (entries: DirEntry[]) => {
     if (!activeSessionId) return;
-    for (const e of entries) {
-      if (e.kind === "directory") {
-        startDirUpload(activeSessionId, e.path, remotePath).catch(() => {});
-      } else if (e.kind === "file") {
-        startUpload(activeSessionId, e.path, remotePath).catch(() => {});
-      }
-    }
+    enqueueUploads(activeSessionId, entries.map(toTransferItem), remotePath).catch(
+      () => {}
+    );
   };
 
   const downloadAll = (entries: DirEntry[]) => {
     if (!activeSessionId) return;
-    for (const e of entries) {
-      if (e.kind === "directory") {
-        startDirDownload(activeSessionId, e.path, localPath).catch(() => {});
-      } else if (e.kind === "file") {
-        startDownload(activeSessionId, e.path, localPath).catch(() => {});
-      }
-    }
+    enqueueDownloads(activeSessionId, entries.map(toTransferItem), localPath).catch(
+      () => {}
+    );
   };
 
   return (

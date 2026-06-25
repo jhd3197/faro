@@ -28,7 +28,7 @@ const EMPTY: BridgeStatus = {
   port: null,
   token: null,
   enabledSessions: [],
-  policy: { allowAll: false, autoRead: false, autoSafeExec: false },
+  policy: { allowAll: false, autoRead: false, autoSafeExec: false, allowSudo: false },
 };
 
 interface BridgeStoreState {

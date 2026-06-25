@@ -65,6 +65,12 @@ pub struct ApprovalPolicy {
     pub auto_read: bool,
     /// Auto-approve commands that look read-only (best-effort heuristic).
     pub auto_safe_exec: bool,
+    /// Answer sudo's password prompt with the connection's own password when an
+    /// (approved) command runs `sudo`. Off by default; only takes effect on
+    /// password-auth sessions — key/agent logins have no password to reuse.
+    /// This is a capability gate, NOT an auto-approve: a sudo command still
+    /// prompts for approval unless `allow_all`/`auto_safe_exec` say otherwise.
+    pub allow_sudo: bool,
 }
 
 /// A user-defined, pre-approved command the agent can run by NAME. The agent
@@ -273,6 +279,28 @@ fn is_read_only_command(cmd: &str) -> bool {
         "cal", "arch", "lsusb", "lspci", "uptime",
     ];
     READ_ONLY.contains(&bin)
+}
+
+/// Best-effort: does this command invoke `sudo`? Splits on shell word
+/// boundaries so `sudo …`, `cmd | sudo …`, `;sudo`, `$(sudo …)` all match.
+/// Used only to decide whether to feed the connection password; never a
+/// security boundary. We deliberately don't special-case `sudo -n`: priming
+/// the credential cache simply makes a later `sudo -n` succeed too, which is
+/// the desired outcome, and a blanket `-n` check would mis-fire on unrelated
+/// flags like `grep -n`.
+fn command_uses_sudo(cmd: &str) -> bool {
+    let is_sep = |c: char| c.is_whitespace() || "|&;()<>".contains(c);
+    cmd.split(is_sep)
+        .any(|tok| tok.rsplit('/').next().unwrap_or(tok) == "sudo")
+}
+
+/// The reusable login password for a session, if it authenticated with one.
+/// Key/agent logins return None (nothing to hand to sudo).
+fn connection_password(ssh: &crate::session::SshSession) -> Option<String> {
+    match &ssh.profile.auth {
+        crate::profiles::AuthMethod::Password { password } => Some(password.clone()),
+        _ => None,
+    }
 }
 
 impl BridgeState {
@@ -1191,10 +1219,29 @@ async fn exec_core(
         op_id: op_id.clone(),
     };
 
-    match ssh
-        .exec_bounded(command, MAX_EXEC_BYTES, EXEC_TIMEOUT, Some(&stream))
-        .await
-    {
+    // Sudo support: when the user opted in (allow_sudo) and this is a
+    // password-auth session, answer sudo's prompt with the connection password
+    // over a PTY. Otherwise the normal no-tty exec (clean stdout/stderr split).
+    let sudo_pw = {
+        let policy = *state.policy.lock().await;
+        if policy.allow_sudo && command_uses_sudo(command) {
+            connection_password(ssh)
+        } else {
+            None
+        }
+    };
+    let result = match &sudo_pw {
+        Some(pw) => {
+            ssh.exec_sudo(command, pw, MAX_EXEC_BYTES, EXEC_TIMEOUT, Some(&stream))
+                .await
+        }
+        None => {
+            ssh.exec_bounded(command, MAX_EXEC_BYTES, EXEC_TIMEOUT, Some(&stream))
+                .await
+        }
+    };
+
+    match result {
         Ok(out) => {
             let ok = !out.timed_out && out.exit_code.unwrap_or(0) == 0;
             let mut detail = label.to_string();
@@ -2221,7 +2268,7 @@ fn mcp_tools_list() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "The command to run. Keep it non-interactive (no pagers/prompts). Prefer read-only status and diagnostic commands." },
+                        "command": { "type": "string", "description": "The command to run. Keep it non-interactive (no pagers/prompts). Prefer read-only status and diagnostic commands. `sudo` is supported: when the user has enabled it, Faro answers sudo's password prompt with their connection password — so just write `sudo <cmd>` normally; do NOT add `-S`, a password, or `echo <pw> |`." },
                         "dryRun": { "type": "boolean", "description": "If true, return a preview of what would run and whether it would need approval, without executing." },
                         "session": session_prop
                     },

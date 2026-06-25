@@ -97,6 +97,9 @@ function ApprovalModal({
   onDeny: () => void;
 }) {
   const copy = approvalCopy(approval.kind);
+  const allowSudo = useBridge((s) => s.status.policy.allowSudo);
+  const sudoNote =
+    allowSudo && approval.kind === "exec" && /\bsudo\b/.test(approval.command);
   const panelRef = useRef<HTMLDivElement>(null);
   const denyRef = useRef<HTMLButtonElement>(null);
   const titleId = useId();
@@ -129,6 +132,12 @@ function ApprovalModal({
           <div className="mt-3 flex items-center gap-1.5 text-[11px] text-text-dim">
             <TerminalIcon size={11} /> {copy.foot}
           </div>
+          {sudoNote && (
+            <div className="mt-2 flex items-center gap-1.5 text-[11px] text-accent">
+              <ShieldCheck size={11} /> Faro will answer sudo's prompt with this
+              connection's password.
+            </div>
+          )}
         </div>
         <div className="flex items-center justify-between gap-2 border-t border-border px-5 py-3">
           <span className="text-[11px] text-text-dim">
@@ -621,6 +630,23 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
               <div className="mt-2.5 flex items-start gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2.5 py-1.5 text-[11px] text-warning">
                 <CircleAlert size={12} className="mt-0.5 shrink-0" />
                 The agent can run anything on enabled sessions without confirmation.
+              </div>
+            )}
+          </Card>
+
+          {/* Sudo — let Faro answer sudo's prompt with the login password. */}
+          <Card title="Privileged commands (sudo)">
+            <PolicyRow
+              label="Answer sudo prompts with my password"
+              help="When a command runs sudo, Faro types this connection's login password to answer the prompt — over a private pseudo-terminal, and only when sudo actually asks (a passwordless server never receives it). Password-auth connections only; key/agent logins have no password to reuse. The command still needs approval above."
+              checked={policy.allowSudo}
+              onChange={(v) => patchPolicy({ allowSudo: v })}
+            />
+            {policy.allowSudo && (
+              <div className="mt-2.5 flex items-start gap-1.5 rounded-md border border-warning/30 bg-warning/10 px-2.5 py-1.5 text-[11px] text-warning">
+                <CircleAlert size={12} className="mt-0.5 shrink-0" />
+                Faro will send your login password to <span className="font-mono">sudo</span> for
+                approved commands. It's never stored in or shown to the agent.
               </div>
             )}
           </Card>

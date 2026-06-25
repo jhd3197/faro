@@ -35,6 +35,7 @@ import { useToasts, type ToastVariant } from "./stores/toastStore";
 import { useBridge } from "./stores/bridgeStore";
 import { useSettings } from "./stores/settingsStore";
 import { Toaster } from "./components/ui/Toaster";
+import { OverwriteDialogHost } from "./components/OverwriteModal";
 import { CommandPalette } from "./components/CommandPalette";
 import { KeyboardShortcutsDialog } from "./components/KeyboardShortcutsDialog";
 import { AgentBridge, AgentBridgeHost } from "./components/AgentBridge";
@@ -83,6 +84,7 @@ export default function App() {
       <HostKeyModal />
       <Toaster />
       <AgentBridgeHost />
+      <OverwriteDialogHost />
       <CommandPalette />
       <KeyboardShortcutsDialog />
       <div className="flex flex-1 overflow-hidden">

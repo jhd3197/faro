@@ -200,6 +200,9 @@ export interface ApprovalPolicy {
   autoRead: boolean;
   /** Auto-approve shell commands that look read-only (best-effort heuristic). */
   autoSafeExec: boolean;
+  /** Answer sudo's prompt with the connection password (password-auth only).
+   *  A capability gate, not an auto-approve — sudo commands still prompt. */
+  allowSudo: boolean;
 }
 
 export interface BridgeStatus {
