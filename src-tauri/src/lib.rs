@@ -73,6 +73,8 @@ pub fn run() {
             commands::delete_profile,
             commands::connect,
             commands::disconnect,
+            commands::list_agent_jobs,
+            commands::kill_agent_job,
             commands::respond_to_host_prompt,
             commands::importer_default_paths,
             commands::import_openssh,

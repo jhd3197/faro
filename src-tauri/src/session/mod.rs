@@ -251,6 +251,11 @@ pub struct SshSession {
     /// Bumped on every successful reconnect; lets a waiter that lost the race
     /// notice another task already reconnected and skip doing it again.
     generation: AtomicU64,
+    /// In-flight tracked commands, keyed by op_id, each holding the pgid needed
+    /// to terminate it. Lets a long job be killed on demand or on disconnect even
+    /// after the `exec_bounded` that launched it returned (e.g. on timeout).
+    /// Terminal jobs are dropped once their `agent://job` event fires.
+    jobs: Mutex<HashMap<String, JobHandle>>,
 }
 
 /// True only when an error means the SSH transport itself is gone (the run-loop
@@ -283,6 +288,7 @@ impl SshSession {
             sftp: Mutex::new(None),
             reconnect_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
+            jobs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -439,12 +445,42 @@ impl SshSession {
         timeout: Duration,
         stream: Option<&ExecStream>,
     ) -> Result<ExecOutput> {
-        let mut channel = self.open_exec_channel(command).await?;
+        // Commands run on behalf of the agent (i.e. with a live `stream`) are
+        // *tracked*: we wrap them so the remote shell prints its own pid on
+        // stderr before running the real command. sshd runs each exec in a fresh
+        // session, so that pid is the command's process-group leader, and
+        // `kill -- -pid` reaps the whole tree (the command, any pipe stages,
+        // anything it forks) if it overruns its deadline. Untracked calls (the
+        // CLI's bare `exec`, the kill itself) run the command verbatim so they
+        // can't recurse or pay for the wrapper. See `wrap_tracked`.
+        let tracked = stream.is_some();
+        let started_at = now_millis();
+        let marker = format!("__FARO_PGID_{}", Uuid::new_v4().simple());
+        let launch = if tracked {
+            wrap_tracked(command, &marker)
+        } else {
+            command.to_string()
+        };
+        let mut channel = self.open_exec_channel(&launch).await?;
+
+        // Register the run as a live job so it can be killed on demand or on
+        // disconnect; its pgid is filled in below once the wrapper reports it.
+        if let Some(s) = stream {
+            self.job_start(&s.app, &s.op_id, &s.label, started_at).await;
+        }
 
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut exit_code = None;
         let mut truncated = false;
+
+        // Process-group id of the running command, parsed from the marker line
+        // the wrapper writes to stderr. Stays `None` for untracked runs, or until
+        // the marker is seen (it's the first thing the wrapper emits).
+        let mut pgid: Option<i32> = None;
+        let marker_bytes = marker.as_bytes();
+        let mut marker_buf: Vec<u8> = Vec::new();
+        let mut marker_done = !tracked;
 
         let collect = async {
             loop {
@@ -459,8 +495,36 @@ impl SshSession {
                     }
                     ChannelMsg::ExtendedData { ref data, ext } => {
                         // ext == 1 is the conventional stderr stream.
-                        let total = stdout.len() + stderr.len();
                         let is_err = ext == 1;
+                        // The wrapper's pgid marker is the first line on stderr.
+                        // Buffer until its newline, parse out the pgid, and drop
+                        // the line so it never reaches the caller/agent; forward
+                        // any real stderr that trailed it in the same chunk.
+                        if is_err && !marker_done {
+                            marker_buf.extend_from_slice(data);
+                            if let Some(nl) = marker_buf.iter().position(|&b| b == b'\n') {
+                                pgid = parse_pgid(&marker_buf[..nl], marker_bytes);
+                                let rest = marker_buf.split_off(nl + 1);
+                                marker_done = true;
+                                if let (Some(p), Some(s)) = (pgid, stream) {
+                                    self.job_set_pgid(&s.app, &s.op_id, p).await;
+                                }
+                                if !rest.is_empty() {
+                                    let total = stdout.len() + stderr.len();
+                                    append_capped(
+                                        &mut stderr, &rest, max_bytes, total, &mut truncated,
+                                    );
+                                    if let Some(s) = stream {
+                                        emit_chunk(s, "stderr", &rest);
+                                    }
+                                }
+                            }
+                            if truncated {
+                                break;
+                            }
+                            continue;
+                        }
+                        let total = stdout.len() + stderr.len();
                         if is_err {
                             append_capped(&mut stderr, data, max_bytes, total, &mut truncated);
                         } else {
@@ -482,13 +546,153 @@ impl SshSession {
 
         let timed_out = tokio::time::timeout(timeout, collect).await.is_err();
 
+        // The old behaviour stopped here: dropping the channel left the remote
+        // process running, because a no-pty exec gets no SIGHUP on channel close.
+        // Now a tracked command that blew its deadline gets its whole process
+        // group terminated, so it can't outlive the call (the failure mode that
+        // let a stray `wp search-replace` grind for hours after the session ended).
+        let mut killed = false;
+        if timed_out {
+            if let Some(pgid) = pgid {
+                match self.kill_pgid(pgid).await {
+                    Ok(()) => {
+                        killed = true;
+                        tracing::info!(session = %self.id, pgid, "terminated timed-out command group");
+                    }
+                    Err(e) => {
+                        tracing::warn!(session = %self.id, pgid, "failed to kill timed-out command group: {e:#}");
+                    }
+                }
+            }
+        }
+
+        // Finalize the job: emit its terminal `agent://job` and drop it from the
+        // live registry. `job_finish` preserves a `Killed` state set by an
+        // external `kill_job`, so an on-demand kill isn't relabelled a failure.
+        if let Some(s) = stream {
+            let status = if killed {
+                JobStatus::Killed
+            } else if timed_out {
+                JobStatus::TimedOut
+            } else if exit_code.unwrap_or(0) == 0 {
+                JobStatus::Completed
+            } else {
+                JobStatus::Failed
+            };
+            self.job_finish(&s.app, &s.op_id, status, exit_code).await;
+        }
+
         Ok(ExecOutput {
             stdout: String::from_utf8_lossy(&stdout).to_string(),
             stderr: String::from_utf8_lossy(&stderr).to_string(),
             exit_code,
             truncated,
             timed_out,
+            killed,
         })
+    }
+
+    /// Terminate a process group started by a tracked `exec_bounded` run: SIGTERM
+    /// the whole group (`-pgid`), give it a moment, then SIGKILL, with a
+    /// single-process fallback for the unusual server where the shell wasn't a
+    /// group leader. Runs **untracked** on a fresh short-lived channel — the
+    /// channel that launched the original command is already gone by the time we
+    /// need this (it timed out), and running untracked stops the kill from being
+    /// wrapped/tracked itself. Best-effort. NOTE: this reaps the client process
+    /// tree only; a server-side database statement the command kicked off (e.g. a
+    /// long `UPDATE`) keeps running until cancelled at the database.
+    pub async fn kill_pgid(&self, pgid: i32) -> Result<()> {
+        let cmd = format!(
+            "kill -TERM -{pgid} 2>/dev/null || kill -TERM {pgid} 2>/dev/null; \
+             sleep 2; \
+             kill -KILL -{pgid} 2>/dev/null || kill -KILL {pgid} 2>/dev/null; true"
+        );
+        // `Box::pin` breaks the exec_bounded → kill_pgid → exec_bounded async
+        // recursion cycle (it only ever recurses one level: the kill runs
+        // untracked, so it can't time out into another kill).
+        Box::pin(self.exec_bounded(&cmd, 4096, Duration::from_secs(10), None))
+            .await
+            .map(|_| ())
+    }
+
+    /// Snapshot of this session's in-flight tracked jobs.
+    pub async fn list_jobs(&self) -> Vec<JobHandle> {
+        self.jobs.lock().await.values().cloned().collect()
+    }
+
+    /// Terminate a tracked job by op_id. Marks it `Killed` first (so the
+    /// in-flight `exec_bounded` finalizes it as killed rather than a generic
+    /// failure when its channel closes), then signals the process group. Returns
+    /// `false` if there's no such live job; `true` once it's been marked
+    /// (and signalled, if its pgid is known yet).
+    pub async fn kill_job(&self, op_id: &str) -> Result<bool> {
+        let pgid = {
+            let mut map = self.jobs.lock().await;
+            match map.get_mut(op_id) {
+                Some(job) => {
+                    job.status = JobStatus::Killed;
+                    job.pgid
+                }
+                None => return Ok(false),
+            }
+        };
+        if let Some(pgid) = pgid {
+            self.kill_pgid(pgid).await?;
+        }
+        Ok(true)
+    }
+
+    /// Register a newly-launched tracked command as a `Running` job and emit it.
+    async fn job_start(&self, app: &AppHandle, op_id: &str, label: &str, started_at: u64) {
+        let job = JobHandle {
+            op_id: op_id.to_string(),
+            session_id: self.id.clone(),
+            label: label.to_string(),
+            pgid: None,
+            started_at,
+            status: JobStatus::Running,
+            exit_code: None,
+        };
+        self.jobs.lock().await.insert(op_id.to_string(), job.clone());
+        emit_job(app, &job);
+    }
+
+    /// Record the process-group id parsed from the wrapper marker, and re-emit.
+    async fn job_set_pgid(&self, app: &AppHandle, op_id: &str, pgid: i32) {
+        let updated = {
+            let mut map = self.jobs.lock().await;
+            map.get_mut(op_id).map(|j| {
+                j.pgid = Some(pgid);
+                j.clone()
+            })
+        };
+        if let Some(job) = updated {
+            emit_job(app, &job);
+        }
+    }
+
+    /// Move a job to a terminal state, emit it, and drop it from the live map.
+    /// A `Killed` state set by an external `kill_job` is never downgraded.
+    async fn job_finish(
+        &self,
+        app: &AppHandle,
+        op_id: &str,
+        status: JobStatus,
+        exit_code: Option<i32>,
+    ) {
+        let finished = {
+            let mut map = self.jobs.lock().await;
+            map.remove(op_id).map(|mut job| {
+                if job.status != JobStatus::Killed {
+                    job.status = status;
+                }
+                job.exit_code = exit_code;
+                job
+            })
+        };
+        if let Some(job) = finished {
+            emit_job(app, &job);
+        }
     }
 
     /// Run a command that uses `sudo`, answering sudo's password prompt with
@@ -586,8 +790,33 @@ impl SshSession {
             exit_code,
             truncated,
             timed_out,
+            // TODO: extend the pgid wrapping + kill-on-timeout to the sudo/PTY
+            // path too (a sudo'd migration is exactly the dangerous case). For
+            // now the sudo path still abandons on timeout, as before.
+            killed: false,
         })
     }
+}
+
+/// Wrap a command so the remote shell prints its own pid (which, because sshd
+/// runs each exec in a fresh session, is the command's process-group leader) to
+/// stderr before running, so `exec_bounded` can later `kill -- -pid` the whole
+/// tree. The real command is base64-encoded and piped into `sh`, so any quoting
+/// or shell metacharacters in it can't break the wrapper. The marker line is
+/// stripped from the captured output before the caller ever sees it. The marker
+/// echo runs first and unconditionally, so the pid is reported even if the
+/// command (or `base64`) then fails.
+fn wrap_tracked(command: &str, marker: &str) -> String {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(command);
+    format!("echo \"{marker}:$$\" 1>&2; echo {encoded} | base64 -d | sh")
+}
+
+/// Parse the `<marker>:<pid>` line that `wrap_tracked` emits into the pid.
+fn parse_pgid(line: &[u8], marker: &[u8]) -> Option<i32> {
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    let rest = line.strip_prefix(marker)?.strip_prefix(b":")?;
+    std::str::from_utf8(rest).ok()?.trim().parse().ok()
 }
 
 /// Count non-overlapping occurrences of `needle` in `haystack`.
@@ -612,6 +841,51 @@ fn count_occurrences(haystack: &[u8], needle: &[u8]) -> usize {
 pub struct ExecStream {
     pub app: AppHandle,
     pub op_id: String,
+    /// Friendly label for the run (the raw command, or "[name] cmd" for a saved
+    /// command) — shown in the live console and the Jobs panel.
+    pub label: String,
+}
+
+/// Lifecycle state of a tracked remote command. The registry (`SshSession.jobs`)
+/// holds only *in-flight* (`Running`) jobs; reaching a terminal state emits an
+/// `agent://job` event and drops the entry (completed history lives in the
+/// bridge activity log).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JobStatus {
+    Running,
+    Completed,
+    /// Ran past its deadline but couldn't be terminated (no pgid / kill failed).
+    TimedOut,
+    /// Terminated by Faro — on timeout, on demand, or on disconnect.
+    Killed,
+    Failed,
+}
+
+/// A long-running command Faro launched on a session, carrying the process-group
+/// id needed to terminate it on demand (`kill_job`) or on disconnect, even after
+/// the originating `exec_bounded` call already returned (e.g. on timeout).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobHandle {
+    pub op_id: String,
+    pub session_id: String,
+    pub label: String,
+    pub pgid: Option<i32>,
+    pub started_at: u64,
+    pub status: JobStatus,
+    pub exit_code: Option<i32>,
+}
+
+fn emit_job(app: &AppHandle, job: &JobHandle) {
+    let _ = app.emit("agent://job", job);
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn emit_chunk(s: &ExecStream, stream: &str, data: &[u8]) {
@@ -647,6 +921,10 @@ pub struct ExecOutput {
     pub exit_code: Option<i32>,
     pub truncated: bool,
     pub timed_out: bool,
+    /// True when a tracked command ran past its deadline and Faro terminated its
+    /// remote process group (vs `timed_out` alone, which used to mean "we gave
+    /// up but it's probably still running"). See `exec_bounded`/`kill_pgid`.
+    pub killed: bool,
 }
 
 /// Open a Session for any supported protocol given a profile and a verifier.
@@ -888,6 +1166,7 @@ impl SessionManager {
                     sftp: Mutex::new(None),
                     reconnect_lock: Mutex::new(()),
                     generation: AtomicU64::new(0),
+                    jobs: Mutex::new(HashMap::new()),
                 });
                 (id, Session::Ssh(ssh))
             }
@@ -933,6 +1212,13 @@ impl SessionManager {
         if let Some(s) = s {
             match &*s {
                 Session::Ssh(ssh) => {
+                    // Reap any still-running tracked commands *before* tearing the
+                    // transport down, while the channel is still usable — so a
+                    // long background job can't outlive the session (the failure
+                    // that let a stray migration run for hours). Best-effort.
+                    for job in ssh.list_jobs().await {
+                        let _ = ssh.kill_job(&job.op_id).await;
+                    }
                     let h = ssh.handle.lock().await;
                     let _ = h
                         .disconnect(russh::Disconnect::ByApplication, "bye", "en")

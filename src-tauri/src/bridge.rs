@@ -1217,6 +1217,7 @@ async fn exec_core(
     let stream = ExecStream {
         app: app.clone(),
         op_id: op_id.clone(),
+        label: label.to_string(),
     };
 
     // Sudo support: when the user opted in (allow_sudo) and this is a
@@ -1249,7 +1250,11 @@ async fn exec_core(
                 detail.push_str("  [output truncated]");
             }
             if out.timed_out {
-                detail.push_str("  [timed out]");
+                detail.push_str(if out.killed {
+                    "  [timed out — terminated]"
+                } else {
+                    "  [timed out]"
+                });
             }
             state
                 .log(
@@ -1272,6 +1277,7 @@ async fn exec_core(
                     "exitCode": out.exit_code,
                     "truncated": out.truncated,
                     "timedOut": out.timed_out,
+                    "killed": out.killed,
                 }),
             )
         }
@@ -1664,6 +1670,7 @@ pub(crate) async fn op_tail(
     let stream = ExecStream {
         app: app.clone(),
         op_id: op_id.clone(),
+        label: label.clone(),
     };
 
     let command = format!("tail -n {lines} -f {}", shell_quote(path));
