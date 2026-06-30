@@ -86,6 +86,163 @@ impl HostPromptRegistry {
     }
 }
 
+// ---- Keyboard-interactive auth prompting ----
+//
+// A temp/expired password makes the server demand an immediate password change
+// during *authentication* (via PAM, over the keyboard-interactive method),
+// before any shell exists — so plain password auth just fails. We drive that
+// exchange in `ssh_connect`: the prompts the server can't answer from the stored
+// password (the "New password" / "Retype" rounds of a forced change) are
+// surfaced to the user through this bridge, which mirrors the host-key prompt
+// machinery above.
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthPromptField {
+    pub prompt: String,
+    pub echo: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthPromptEvent {
+    pub request_id: String,
+    pub profile_id: String,
+    pub host: String,
+    pub name: String,
+    pub instructions: String,
+    pub prompts: Vec<AuthPromptField>,
+}
+
+#[derive(Default)]
+pub struct AuthPromptRegistry {
+    pending: Mutex<HashMap<String, oneshot::Sender<Option<Vec<String>>>>>,
+}
+
+impl AuthPromptRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    async fn register(&self) -> (String, oneshot::Receiver<Option<Vec<String>>>) {
+        let id = Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(id.clone(), tx);
+        (id, rx)
+    }
+
+    /// Resolve a pending prompt. `responses == None` means the user cancelled the
+    /// dialog, which aborts authentication.
+    pub async fn resolve(&self, request_id: &str, responses: Option<Vec<String>>) -> Result<()> {
+        let tx = self
+            .pending
+            .lock()
+            .await
+            .remove(request_id)
+            .ok_or_else(|| anyhow!("no pending auth prompt {request_id}"))?;
+        tx.send(responses)
+            .map_err(|_| anyhow!("auth prompt receiver dropped"))?;
+        Ok(())
+    }
+}
+
+/// Answers the server's keyboard-interactive prompts during auth. Implementations:
+/// the GUI's `TauriAuthPrompter` (emits `auth://prompt` + awaits the user), and
+/// `RejectAuthPrompter` (refuses — for silent reconnects and the CLI, where no
+/// one is watching to type a new password).
+#[async_trait]
+pub trait AuthPrompter: Send + Sync {
+    async fn prompt(
+        &self,
+        name: &str,
+        instructions: &str,
+        prompts: &[AuthPromptField],
+    ) -> Result<Vec<String>>;
+
+    /// Called once after an interactive exchange the user had to answer succeeds,
+    /// so the GUI can offer to save a freshly-changed password. No-op otherwise.
+    fn on_interactive_success(&self) {}
+}
+
+/// GUI auth prompter: emits `auth://prompt` and waits for `respond_to_auth_prompt`.
+pub struct TauriAuthPrompter {
+    app: AppHandle,
+    registry: Arc<AuthPromptRegistry>,
+    profile_id: String,
+    host: String,
+}
+
+impl TauriAuthPrompter {
+    pub fn new(
+        app: AppHandle,
+        registry: Arc<AuthPromptRegistry>,
+        profile_id: String,
+        host: String,
+    ) -> Self {
+        Self {
+            app,
+            registry,
+            profile_id,
+            host,
+        }
+    }
+}
+
+#[async_trait]
+impl AuthPrompter for TauriAuthPrompter {
+    async fn prompt(
+        &self,
+        name: &str,
+        instructions: &str,
+        prompts: &[AuthPromptField],
+    ) -> Result<Vec<String>> {
+        let (request_id, rx) = self.registry.register().await;
+        let event = AuthPromptEvent {
+            request_id,
+            profile_id: self.profile_id.clone(),
+            host: self.host.clone(),
+            name: name.to_string(),
+            instructions: instructions.to_string(),
+            prompts: prompts.to_vec(),
+        };
+        self.app
+            .emit("auth://prompt", event)
+            .map_err(|_| anyhow!("failed to surface auth prompt"))?;
+        match rx.await {
+            Ok(Some(responses)) => Ok(responses),
+            // Cancelled, or the window closed out from under the prompt.
+            _ => Err(anyhow!("authentication cancelled")),
+        }
+    }
+
+    fn on_interactive_success(&self) {
+        // Signal that a password may have just been changed for this profile, so
+        // the UI can offer to update the saved credential. Carries no secret.
+        let _ = self.app.emit(
+            "auth://changed",
+            serde_json::json!({ "profileId": self.profile_id }),
+        );
+    }
+}
+
+/// Non-interactive prompter that refuses any prompt — used for silent reconnects
+/// (no user to ask) and the CLI.
+pub struct RejectAuthPrompter;
+
+#[async_trait]
+impl AuthPrompter for RejectAuthPrompter {
+    async fn prompt(
+        &self,
+        _name: &str,
+        _instructions: &str,
+        _prompts: &[AuthPromptField],
+    ) -> Result<Vec<String>> {
+        Err(anyhow!(
+            "this server requires interactive authentication, which isn't available here"
+        ))
+    }
+}
+
 /// Decides what to do with a server key on connect. Implementations: the
 /// GUI's `TauriHostKeyVerifier` (emits a Tauri event + awaits the user's
 /// click via oneshot), and the CLI's `CliHostKeyVerifier` (prompts on
@@ -357,7 +514,11 @@ impl SshSession {
         }
         tracing::warn!(session = %self.id, host = %self.profile.host, "SSH transport dead — reconnecting");
         let verifier: Arc<dyn HostKeyVerifier> = Arc::new(AutoTrustVerifier::reject_unknown());
-        let handle = ssh_connect(&self.profile, verifier)
+        // A silent reconnect has no user to answer prompts — refuse interactive
+        // auth rather than hang. (An expired password on reconnect surfaces as a
+        // failed reconnect, which the user resolves by reconnecting by hand.)
+        let prompter: Arc<dyn AuthPrompter> = Arc::new(RejectAuthPrompter);
+        let handle = ssh_connect(&self.profile, verifier, prompter)
             .await
             .context("reconnecting SSH session")?;
         *self.handle.lock().await = handle;
@@ -936,7 +1097,10 @@ pub async fn open_session(
 ) -> Result<Session> {
     match profile.protocol.as_str() {
         "sftp" | "ssh" | "" => {
-            let handle = ssh_connect(profile, verifier).await?;
+            // The CLI has no interactive prompt UI, so forced-change/KBI servers
+            // aren't supported here — refuse rather than hang.
+            let prompter: Arc<dyn AuthPrompter> = Arc::new(RejectAuthPrompter);
+            let handle = ssh_connect(profile, verifier, prompter).await?;
             let ssh = Arc::new(SshSession::new(profile.clone(), handle));
             Ok(Session::Ssh(ssh))
         }
@@ -1043,6 +1207,7 @@ async fn authenticate_with_agent(
 pub async fn ssh_connect(
     profile: &ConnectionProfile,
     verifier: Arc<dyn HostKeyVerifier>,
+    prompter: Arc<dyn AuthPrompter>,
 ) -> Result<client::Handle<ClientHandler>> {
     let config = Arc::new(client::Config {
         // Keep idle sessions alive and detect a genuinely dead peer (laptop
@@ -1069,10 +1234,26 @@ pub async fn ssh_connect(
         .with_context(|| format!("connect to {}:{}", profile.host, profile.port))?;
 
     let authed = match &profile.auth {
-        AuthMethod::Password { password } => session
-            .authenticate_password(&profile.username, password)
-            .await
-            .context("password auth")?,
+        AuthMethod::Password { password } => {
+            let ok = session
+                .authenticate_password(&profile.username, password)
+                .await
+                .context("password auth")?;
+            if ok {
+                true
+            } else {
+                // Plain password failed. The server may only offer the
+                // keyboard-interactive method, or it's demanding an immediate
+                // change for an expired/temp password. Drive that exchange.
+                keyboard_interactive_auth(
+                    &mut session,
+                    &profile.username,
+                    Some(password.as_str()),
+                    &prompter,
+                )
+                .await?
+            }
+        }
         AuthMethod::Key { path, passphrase } => {
             let key = russh_keys::load_secret_key(path, passphrase.as_deref())
                 .with_context(|| format!("load key {path}"))?;
@@ -1088,6 +1269,87 @@ pub async fn ssh_connect(
         return Err(anyhow!("Authentication failed"));
     }
     Ok(session)
+}
+
+/// Drive a keyboard-interactive exchange. Auto-answers the ordinary login
+/// password prompt from the stored password (so a server that only offers
+/// keyboard-interactive still connects without bothering the user), and routes
+/// every other round — the "New password"/"Retype" steps of a forced change —
+/// to `prompter`. Returns whether authentication succeeded.
+async fn keyboard_interactive_auth(
+    session: &mut client::Handle<ClientHandler>,
+    username: &str,
+    stored_password: Option<&str>,
+    prompter: &Arc<dyn AuthPrompter>,
+) -> Result<bool> {
+    use russh::client::KeyboardInteractiveAuthResponse as Kbi;
+
+    let mut response = session
+        .authenticate_keyboard_interactive_start(username, None)
+        .await
+        .context("starting keyboard-interactive auth")?;
+    let mut auto_password_used = false;
+    let mut interactive_used = false;
+
+    loop {
+        match response {
+            Kbi::Success => {
+                if interactive_used {
+                    prompter.on_interactive_success();
+                }
+                return Ok(true);
+            }
+            Kbi::Failure => return Ok(false),
+            Kbi::InfoRequest {
+                name,
+                instructions,
+                prompts,
+            } => {
+                let fields: Vec<AuthPromptField> = prompts
+                    .iter()
+                    .map(|p| AuthPromptField {
+                        prompt: p.prompt.clone(),
+                        echo: p.echo,
+                    })
+                    .collect();
+
+                let answers = if stored_password.is_some()
+                    && !auto_password_used
+                    && is_initial_password_request(&fields)
+                {
+                    auto_password_used = true;
+                    vec![stored_password.unwrap().to_string()]
+                } else if fields.is_empty() {
+                    // Some servers send an empty info request (just a banner).
+                    Vec::new()
+                } else {
+                    interactive_used = true;
+                    prompter.prompt(&name, &instructions, &fields).await?
+                };
+
+                response = session
+                    .authenticate_keyboard_interactive_respond(answers)
+                    .await
+                    .context("answering keyboard-interactive prompt")?;
+            }
+        }
+    }
+}
+
+/// True when an info request looks like the ordinary "enter your password" login
+/// step — a single hidden field whose label mentions "password" but not a *new*
+/// or *retype* password — i.e. the one we can safely auto-answer from the stored
+/// credential rather than asking the user.
+fn is_initial_password_request(fields: &[AuthPromptField]) -> bool {
+    if fields.len() != 1 || fields[0].echo {
+        return false;
+    }
+    let p = fields[0].prompt.to_lowercase();
+    p.contains("password")
+        && !p.contains("new")
+        && !p.contains("retype")
+        && !p.contains("again")
+        && !p.contains("confirm")
 }
 
 // ---- Session enum + SessionManager ----
@@ -1124,6 +1386,7 @@ impl Session {
 pub struct SessionManager {
     sessions: Mutex<HashMap<String, Arc<Session>>>,
     pub prompts: Arc<HostPromptRegistry>,
+    pub auth_prompts: Arc<AuthPromptRegistry>,
 }
 
 impl SessionManager {
@@ -1131,6 +1394,7 @@ impl SessionManager {
         Self {
             sessions: Mutex::new(HashMap::new()),
             prompts: Arc::new(HostPromptRegistry::new()),
+            auth_prompts: Arc::new(AuthPromptRegistry::new()),
         }
     }
 
@@ -1141,7 +1405,14 @@ impl SessionManager {
     ) -> Result<String> {
         let verifier: Arc<dyn HostKeyVerifier> =
             Arc::new(TauriHostKeyVerifier::new(app.clone(), self.prompts.clone()));
-        self.connect_with_verifier(profile, app, verifier).await
+        let prompter: Arc<dyn AuthPrompter> = Arc::new(TauriAuthPrompter::new(
+            app.clone(),
+            self.auth_prompts.clone(),
+            profile.id.clone(),
+            profile.host.clone(),
+        ));
+        self.connect_with_verifier(profile, app, verifier, prompter)
+            .await
     }
 
     /// Used by the CLI binary, which plugs in its own stdin-based verifier
@@ -1153,11 +1424,12 @@ impl SessionManager {
         profile: ConnectionProfile,
         app: AppHandle,
         verifier: Arc<dyn HostKeyVerifier>,
+        prompter: Arc<dyn AuthPrompter>,
     ) -> Result<String> {
         let _ = app;
         let session = match profile.protocol.as_str() {
             "sftp" | "ssh" | "" => {
-                let handle = ssh_connect(&profile, verifier).await?;
+                let handle = ssh_connect(&profile, verifier, prompter).await?;
                 let id = Uuid::new_v4().to_string();
                 let ssh = Arc::new(SshSession {
                     id: id.clone(),

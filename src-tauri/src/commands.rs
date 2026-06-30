@@ -119,6 +119,23 @@ pub async fn respond_to_host_prompt(
         .map_err(err)
 }
 
+/// Answer a keyboard-interactive auth prompt (e.g. a forced password change for
+/// an expired/temp password). `responses` is one string per prompt, or `null`
+/// when the user cancelled the dialog (which aborts the connection).
+#[tauri::command]
+pub async fn respond_to_auth_prompt(
+    request_id: String,
+    responses: Option<Vec<String>>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .sessions
+        .auth_prompts
+        .resolve(&request_id, responses)
+        .await
+        .map_err(err)
+}
+
 // ---------- File system ----------
 
 #[tauri::command]

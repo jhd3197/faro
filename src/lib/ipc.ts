@@ -9,6 +9,8 @@ import type {
   EditStartedEvent,
   HostDecision,
   HostPromptEvent,
+  AuthPromptEvent,
+  AuthChangedEvent,
   ImporterPaths,
   ProfilePreview,
   SessionId,
@@ -157,6 +159,10 @@ export const ipc = {
   respondToHostPrompt: (requestId: string, decision: HostDecision) =>
     invoke<void>("respond_to_host_prompt", { requestId, decision }),
 
+  // Answer a keyboard-interactive auth prompt; pass null to cancel (aborts connect).
+  respondToAuthPrompt: (requestId: string, responses: string[] | null) =>
+    invoke<void>("respond_to_auth_prompt", { requestId, responses }),
+
   importerDefaultPaths: () => invoke<ImporterPaths>("importer_default_paths"),
 
   importOpenssh: (path?: string) =>
@@ -244,6 +250,18 @@ export async function onHostPrompt(
   cb: (event: HostPromptEvent) => void
 ): Promise<UnlistenFn> {
   return listen<HostPromptEvent>("host://prompt", (e) => cb(e.payload));
+}
+
+export async function onAuthPrompt(
+  cb: (event: AuthPromptEvent) => void
+): Promise<UnlistenFn> {
+  return listen<AuthPromptEvent>("auth://prompt", (e) => cb(e.payload));
+}
+
+export async function onAuthChanged(
+  cb: (event: AuthChangedEvent) => void
+): Promise<UnlistenFn> {
+  return listen<AuthChangedEvent>("auth://changed", (e) => cb(e.payload));
 }
 
 export async function onTerminalData(

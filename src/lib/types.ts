@@ -191,6 +191,27 @@ export interface HostPromptEvent {
   kind: HostPromptKind;
 }
 
+// ---- Keyboard-interactive auth (e.g. forced password change for a temp pw) ----
+
+export interface AuthPromptField {
+  prompt: string;
+  /** Whether the server wants the typed value echoed (false for passwords). */
+  echo: boolean;
+}
+
+export interface AuthPromptEvent {
+  requestId: string;
+  profileId: string;
+  host: string;
+  name: string;
+  instructions: string;
+  prompts: AuthPromptField[];
+}
+
+export interface AuthChangedEvent {
+  profileId: string;
+}
+
 // ---- Agent Bridge ----
 
 export interface ApprovalPolicy {

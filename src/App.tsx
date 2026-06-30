@@ -7,6 +7,7 @@ import { TerminalDock } from "./components/Terminal";
 import { TransferQueue } from "./components/TransferQueue";
 import { Settings } from "./components/Settings";
 import { HostKeyModal } from "./components/HostKeyModal";
+import { AuthPromptModal } from "./components/AuthPromptModal";
 import { TitleBar } from "./components/TitleBar";
 import { ProfileEditor } from "./components/ProfileEditor";
 import { ImportDialog } from "./components/ImportDialog";
@@ -82,6 +83,7 @@ export default function App() {
       {dialog === "about" && <AboutDialog onClose={closeDialog} />}
       {dialog === "agentBridge" && <AgentBridge onClose={closeDialog} />}
       <HostKeyModal />
+      <AuthPromptModal />
       <Toaster />
       <AgentBridgeHost />
       <OverwriteDialogHost />
