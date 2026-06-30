@@ -1,7 +1,7 @@
 use crate::agent::ChatRequest;
 use crate::profiles::ConnectionProfile;
 use crate::remotefs::{Capabilities, DirEntry, RemoteFs};
-use crate::session::{HostDecision, Session, SshSession};
+use crate::session::{HostDecision, JobHandle, Session, SshSession};
 use crate::transfer::{OverwritePolicy, Transfer, TransferStatus};
 use crate::AppState;
 use base64::Engine as _;
@@ -74,6 +74,35 @@ pub async fn disconnect(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     state.sessions.disconnect(&session_id).await.map_err(err)
+}
+
+/// List the in-flight tracked commands (agent/bridge `exec`s, tails) running on a
+/// session, so the UI can show a Jobs panel with a Kill button. Returns an empty
+/// list for a non-SSH or unknown session rather than erroring.
+#[tauri::command]
+pub async fn list_agent_jobs(
+    session_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<JobHandle>, String> {
+    match state.sessions.get_ssh(&session_id).await {
+        Some(ssh) => Ok(ssh.list_jobs().await),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Terminate a running tracked job (by op_id) on a session — the user-facing
+/// "stop this" for a long background command. Returns `true` if a matching live
+/// job was found and signalled.
+#[tauri::command]
+pub async fn kill_agent_job(
+    session_id: String,
+    op_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let Some(ssh) = state.sessions.get_ssh(&session_id).await else {
+        return Err(format!("session {session_id} is not a live SSH connection"));
+    };
+    ssh.kill_job(&op_id).await.map_err(err)
 }
 
 #[tauri::command]
