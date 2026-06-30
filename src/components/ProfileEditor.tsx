@@ -17,7 +17,13 @@ import {
   ShieldOff,
   Terminal as TerminalIcon,
   Cloud,
+  Eye,
+  EyeOff,
+  Wand2,
+  Check,
 } from "lucide-react";
+import { cn } from "@/lib/cn";
+import { generatePassword } from "@/lib/password";
 
 interface Props {
   profile: ConnectionProfile | null;
@@ -286,12 +292,7 @@ export function ProfileEditor({ profile, onClose }: Props) {
 
             {authKind === "password" && (
               <Field label="Password">
-                <input
-                  type="password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className={inputCls}
-                />
+                <PasswordInput value={password} onChange={setPassword} />
               </Field>
             )}
 
@@ -642,5 +643,70 @@ function Field({
       <div className="mb-1 text-xs text-text-muted">{label}</div>
       {children}
     </label>
+  );
+}
+
+/**
+ * Password input with a reveal toggle and a "Generate strong password" action
+ * that fills the field and copies the value to the clipboard — for the common
+ * case of creating a brand-new server account while adding the connection.
+ */
+function PasswordInput({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  const [reveal, setReveal] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  async function generate() {
+    const pw = generatePassword();
+    onChange(pw);
+    setReveal(true); // so the user can see/verify what was generated
+    try {
+      await navigator.clipboard.writeText(pw);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard can be unavailable (focus/permissions); the field is still set.
+    }
+  }
+
+  return (
+    <div>
+      <div className="relative">
+        <input
+          type={reveal ? "text" : "password"}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className={cn(inputCls, "pr-9")}
+          autoComplete="off"
+          spellCheck={false}
+        />
+        <button
+          type="button"
+          onClick={() => setReveal((r) => !r)}
+          title={reveal ? "Hide password" : "Show password"}
+          aria-label={reveal ? "Hide password" : "Show password"}
+          className="absolute inset-y-0 right-0 flex items-center px-2.5 text-text-dim hover:text-text"
+        >
+          {reveal ? <EyeOff size={13} /> : <Eye size={13} />}
+        </button>
+      </div>
+      <button
+        type="button"
+        onClick={generate}
+        className="mt-1.5 inline-flex items-center gap-1 rounded-md border border-border bg-bg-subtle px-2 py-1 text-[11.5px] text-text-muted transition-colors hover:bg-bg-hover hover:text-text"
+      >
+        {copied ? (
+          <Check size={11} className="text-accent" />
+        ) : (
+          <Wand2 size={11} />
+        )}
+        {copied ? "Generated & copied" : "Generate strong password"}
+      </button>
+    </div>
   );
 }
