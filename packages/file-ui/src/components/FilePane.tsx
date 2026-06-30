@@ -8,9 +8,13 @@ import {
   Edit3,
   Trash2,
   Copy,
+  CopyPlus,
   ShieldCheck,
   ServerOff,
   ExternalLink,
+  FileArchive,
+  TerminalSquare,
+  Info,
   Search,
   X,
   ChevronUp,
@@ -42,6 +46,7 @@ import { isImage, type FileIconSpec } from "../lib/fileIcons";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { PromptModal } from "./PromptModal";
 import { ConfirmModal } from "./ConfirmModal";
+import { PropertiesModal } from "./PropertiesModal";
 import { FileListSkeleton } from "./Skeleton";
 import { EmptyState } from "./EmptyState";
 import { Thumbnail } from "./Thumbnail";
@@ -104,6 +109,7 @@ type ModalState =
   | { type: "mkdir" }
   | { type: "chmod"; entry: DirEntry }
   | { type: "delete"; entries: DirEntry[] }
+  | { type: "props"; entry: DirEntry }
   | null;
 
 export function FilePane({
@@ -480,6 +486,10 @@ export function FilePane({
       : [entry];
     const single = selectedItems.length === 1 ? selectedItems[0] : null;
 
+    // A remote (non-local) session that exposes a shell, used to gate
+    // server-side actions (archive, terminal) that local browsing can't do.
+    const isRemote = !!sessionId && sessionId !== LOCAL_SESSION;
+
     const items: MenuItem[] = [];
     if (single) {
       items.push({
@@ -489,20 +499,70 @@ export function FilePane({
       // Edit-in-place sits right under the primary action so it's easy to find
       // (it used to be last, below chmod). Remote files only — local files open
       // in their app via the OS, and there's nothing to upload back.
-      if (
-        single.kind === "file" &&
-        sessionId &&
-        sessionId !== LOCAL_SESSION &&
-        fs.editFile
-      ) {
+      if (single.kind === "file" && isRemote && fs.editFile) {
         items.push({
           label: editorLabel ? `Edit with ${editorLabel}…` : "Edit file…",
           icon: <ExternalLink size={12} />,
           onClick: () => {
-            fs.editFile!(sessionId, single.path).catch((e) =>
+            fs.editFile!(sessionId!, single.path).catch((e) =>
               setError(String(e))
             );
           },
+        });
+      }
+      // Server-side zip/tar of a folder: one command on the host, then download
+      // the single archive — no per-file walk. Remote dirs only (needs a shell).
+      if (
+        single.kind === "directory" &&
+        isRemote &&
+        caps?.hasShell &&
+        fs.archive
+      ) {
+        items.push({
+          label: "Download as…",
+          icon: <FileArchive size={12} />,
+          onClick: () => {},
+          children: [
+            {
+              label: "Compressed .tar.gz",
+              onClick: () =>
+                fs
+                  .archive!(sessionId!, single.path, "tar.gz")
+                  .catch((e) => setError(String(e))),
+            },
+            {
+              label: "Zip archive (.zip)",
+              onClick: () =>
+                fs
+                  .archive!(sessionId!, single.path, "zip")
+                  .catch((e) => setError(String(e))),
+            },
+          ],
+        });
+      }
+      // Open an SSH terminal already cd'd into this folder.
+      if (
+        single.kind === "directory" &&
+        isRemote &&
+        caps?.hasShell &&
+        fs.openTerminal
+      ) {
+        items.push({
+          label: "Open terminal here",
+          icon: <TerminalSquare size={12} />,
+          onClick: () =>
+            fs
+              .openTerminal!(sessionId!, single.path)
+              .catch((e) => setError(String(e))),
+        });
+      }
+      // Duplicate needs a server-side copy (cp over SSH) or local fs copy; object
+      // stores / FTP can't, so hide it there.
+      if (fs.duplicate && (sessionId === LOCAL_SESSION || caps?.hasShell)) {
+        items.push({
+          label: "Duplicate",
+          icon: <CopyPlus size={12} />,
+          onClick: () => doDuplicate(single),
         });
       }
       items.push({
@@ -533,7 +593,7 @@ export function FilePane({
     items.push({
       label: `Copy name${selectedItems.length > 1 ? `s (${selectedItems.length})` : ""}`,
       onClick: () => copyNames(selectedItems),
-      separatorAfter: single?.kind === "file",
+      separatorAfter: !!single,
     });
     if (
       single?.kind === "file" &&
@@ -544,6 +604,13 @@ export function FilePane({
         label: "Change permissions (chmod)…",
         icon: <ShieldCheck size={12} />,
         onClick: () => setModal({ type: "chmod", entry: single }),
+      });
+    }
+    if (single) {
+      items.push({
+        label: "Properties",
+        icon: <Info size={12} />,
+        onClick: () => setModal({ type: "props", entry: single }),
       });
     }
     setMenu({ x: e.clientX, y: e.clientY, items });
@@ -593,6 +660,16 @@ export function FilePane({
       for (const it of items) {
         await fs.remove(sessionId, it.path, it.kind === "directory");
       }
+      await load(path);
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const doDuplicate = async (entry: DirEntry) => {
+    if (!sessionId || !fs.duplicate) return;
+    try {
+      await fs.duplicate(sessionId, entry.path, entry.kind);
       await load(path);
     } catch (e) {
       setError(String(e));
@@ -1083,6 +1160,12 @@ export function FilePane({
           okLabel="Apply"
           onClose={() => setModal(null)}
           onSubmit={(v) => doChmod(modal.entry, v)}
+        />
+      )}
+      {modal?.type === "props" && (
+        <PropertiesModal
+          entry={modal.entry}
+          onClose={() => setModal(null)}
         />
       )}
       {modal?.type === "delete" && (

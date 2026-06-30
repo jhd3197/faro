@@ -145,6 +145,7 @@ impl RemoteFs for ObjectFs {
             can_symlink: false,
             can_rename: true,
             has_directories: false,
+            has_shell: false,
         }
     }
 }

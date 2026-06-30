@@ -97,6 +97,7 @@ impl RemoteFs for LocalFs {
             can_symlink: true,
             can_rename: true,
             has_directories: true,
+            has_shell: false,
         }
     }
 }

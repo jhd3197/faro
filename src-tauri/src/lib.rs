@@ -100,6 +100,8 @@ pub fn run() {
             commands::delete_path,
             commands::create_directory,
             commands::chmod_path,
+            commands::duplicate_path,
+            commands::start_archive_download,
             commands::bridge_start,
             commands::bridge_stop,
             commands::bridge_set_enabled,

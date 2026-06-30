@@ -1,12 +1,15 @@
 use crate::agent::ChatRequest;
 use crate::profiles::ConnectionProfile;
 use crate::remotefs::{Capabilities, DirEntry, RemoteFs};
-use crate::session::{HostDecision, Session};
-use crate::transfer::{OverwritePolicy, Transfer};
+use crate::session::{HostDecision, Session, SshSession};
+use crate::transfer::{OverwritePolicy, Transfer, TransferStatus};
 use crate::AppState;
 use base64::Engine as _;
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
+use uuid::Uuid;
 
 pub const LOCAL_SESSION: &str = "local";
 
@@ -393,6 +396,269 @@ pub async fn chmod_path(
 ) -> Result<(), String> {
     let fs = fs_for(&session_id, &state).await?;
     fs.chmod(&path, mode).await.map_err(err)
+}
+
+// ---------- Duplicate ----------
+
+/// POSIX single-quote a string so it survives spaces / shell metacharacters when
+/// interpolated into a remote command. `'` is closed, escaped, and reopened.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Split a POSIX path into (parent, last-component). "/foo" → ("", "foo"),
+/// "/a/b" → ("/a", "b"), "rel" → (".", "rel").
+fn split_remote(path: &str) -> (&str, &str) {
+    match path.rfind('/') {
+        Some(0) => ("", &path[1..]),
+        Some(i) => (&path[..i], &path[i + 1..]),
+        None => (".", path),
+    }
+}
+
+/// "foo.txt" + 1 → "foo copy.txt"; + 2 → "foo copy 2.txt". The extension (a dot
+/// that isn't the leading char) is preserved; dotfiles / extension-less names
+/// just get the suffix appended.
+fn copy_name(name: &str, n: usize) -> String {
+    let suffix = if n <= 1 {
+        " copy".to_string()
+    } else {
+        format!(" copy {n}")
+    };
+    match name.rfind('.') {
+        Some(i) if i > 0 => format!("{}{}{}", &name[..i], suffix, &name[i..]),
+        _ => format!("{name}{suffix}"),
+    }
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &to)?;
+        } else {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
+fn duplicate_local(path: &str) -> Result<(), String> {
+    let src = Path::new(path);
+    if !src.exists() {
+        return Err(format!("{path} does not exist"));
+    }
+    let parent = src
+        .parent()
+        .ok_or_else(|| "can't duplicate this path".to_string())?;
+    let name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "invalid file name".to_string())?;
+
+    let mut n = 1;
+    let mut dst = parent.join(copy_name(name, n));
+    while dst.exists() {
+        n += 1;
+        if n > 1000 {
+            return Err("too many copies already exist".into());
+        }
+        dst = parent.join(copy_name(name, n));
+    }
+
+    if src.is_dir() {
+        copy_dir_recursive(src, &dst).map_err(err)?;
+    } else {
+        std::fs::copy(src, &dst).map_err(err)?;
+    }
+    Ok(())
+}
+
+async fn duplicate_ssh(ssh: &Arc<SshSession>, path: &str) -> Result<(), String> {
+    let path = path.trim_end_matches('/');
+    let (parent, name) = split_remote(path);
+    let mut n = 1;
+    let dst = loop {
+        let cand = format!("{parent}/{}", copy_name(name, n));
+        let probe = ssh
+            .exec(&format!("test -e {}", sh_quote(&cand)))
+            .await
+            .map_err(err)?;
+        if probe.exit_code != Some(0) {
+            break cand; // doesn't exist yet
+        }
+        n += 1;
+        if n > 1000 {
+            return Err("too many copies already exist".into());
+        }
+    };
+    let out = ssh
+        .exec(&format!(
+            "cp -a -- {} {}",
+            sh_quote(path),
+            sh_quote(&dst)
+        ))
+        .await
+        .map_err(err)?;
+    if out.exit_code != Some(0) {
+        let msg = out.stderr.trim();
+        return Err(if msg.is_empty() {
+            "copy failed".into()
+        } else {
+            format!("copy failed: {msg}")
+        });
+    }
+    Ok(())
+}
+
+/// Copy a file/folder next to the original under a free "… copy" name. Local
+/// uses a filesystem copy; SSH uses `cp -a` server-side. FTP/object stores have
+/// no copy primitive, so they're refused.
+#[tauri::command]
+pub async fn duplicate_path(
+    session_id: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if session_id == LOCAL_SESSION {
+        return duplicate_local(&path);
+    }
+    let session = state
+        .sessions
+        .get(&session_id)
+        .await
+        .ok_or_else(|| format!("session {session_id} not found"))?;
+    match &*session {
+        Session::Ssh(ssh) => duplicate_ssh(ssh, &path).await,
+        _ => Err("Duplicate isn't supported on this connection yet".into()),
+    }
+}
+
+// ---------- Server-side archive + download ----------
+
+/// Archive a remote directory on the server (a single `tar`/`zip` command) and
+/// download the resulting file — far cheaper than walking the tree and pulling
+/// each file. The temp archive lives in a unique `/tmp` dir so the downloaded
+/// file keeps a friendly name (`<folder>.tar.gz`); it's removed once the
+/// transfer settles. SSH/SFTP only.
+#[tauri::command]
+pub async fn start_archive_download(
+    session_id: String,
+    remote_path: String,
+    format: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let ssh = state
+        .sessions
+        .get_ssh(&session_id)
+        .await
+        .ok_or_else(|| "Archiving requires an SSH/SFTP connection".to_string())?;
+    let session = state
+        .sessions
+        .get(&session_id)
+        .await
+        .ok_or_else(|| format!("session {session_id} not found"))?;
+
+    let folder = remote_path.trim_end_matches('/');
+    if folder.is_empty() {
+        return Err("Can't archive the filesystem root".into());
+    }
+    let (parent, base) = split_remote(folder);
+    let parent = if parent.is_empty() { "/" } else { parent };
+
+    let is_zip = format == "zip";
+    let ext = if is_zip { "zip" } else { "tar.gz" };
+    let tmp_dir = format!("/tmp/faro-archive-{}", Uuid::new_v4());
+    let tmp = format!("{tmp_dir}/{base}.{ext}");
+
+    // `cd parent` (zip) / `-C parent` (tar) so paths inside the archive are
+    // relative to the folder, not absolute.
+    let build = if is_zip {
+        format!(
+            "mkdir -p {dir} && cd {p} && zip -r -q {out} {b}",
+            dir = sh_quote(&tmp_dir),
+            p = sh_quote(parent),
+            out = sh_quote(&tmp),
+            b = sh_quote(&format!("./{base}")),
+        )
+    } else {
+        format!(
+            "mkdir -p {dir} && tar -czf {out} -C {p} -- {b}",
+            dir = sh_quote(&tmp_dir),
+            out = sh_quote(&tmp),
+            p = sh_quote(parent),
+            b = sh_quote(base),
+        )
+    };
+
+    let out = ssh.exec(&build).await.map_err(err)?;
+    if out.exit_code != Some(0) {
+        let _ = ssh.exec(&format!("rm -rf {}", sh_quote(&tmp_dir))).await;
+        let stderr = out.stderr.trim();
+        let hint = if is_zip
+            && (stderr.contains("not found") || stderr.contains("command not found"))
+        {
+            "  (the `zip` command may not be installed on the server — try .tar.gz)"
+        } else {
+            ""
+        };
+        return Err(format!(
+            "Archive failed: {}{}",
+            if stderr.is_empty() {
+                "non-zero exit"
+            } else {
+                stderr
+            },
+            hint
+        ));
+    }
+
+    let dir = app
+        .path()
+        .download_dir()
+        .or_else(|_| app.path().app_data_dir())
+        .map_err(err)?;
+    std::fs::create_dir_all(&dir).map_err(err)?;
+    let local_dir = dir.to_string_lossy().into_owned();
+
+    let id = state
+        .transfers
+        .start_download(session, tmp.clone(), local_dir, OverwritePolicy::Rename, app)
+        .await
+        .map_err(err)?;
+
+    // Poll the transfer; once it settles, delete the server-side temp dir.
+    let transfers = Arc::clone(&state.transfers);
+    let ssh_cleanup = Arc::clone(&ssh);
+    let tmp_dir_cleanup = tmp_dir.clone();
+    let id_cleanup = id.clone();
+    tokio::spawn(async move {
+        for _ in 0..14_400u32 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            match transfers.snapshot(&id_cleanup).await {
+                Some(t) => {
+                    if matches!(
+                        t.status,
+                        TransferStatus::Done
+                            | TransferStatus::Error
+                            | TransferStatus::Skipped
+                            | TransferStatus::Canceled
+                    ) {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+        let _ = ssh_cleanup
+            .exec(&format!("rm -rf {}", sh_quote(&tmp_dir_cleanup)))
+            .await;
+    });
+
+    Ok(id)
 }
 
 // ---------- Importers (OpenSSH config, FileZilla, PuTTY) ----------

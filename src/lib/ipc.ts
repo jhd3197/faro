@@ -137,6 +137,23 @@ export const ipc = {
   chmodPath: (sessionId: SessionId, path: string, mode: number) =>
     invoke<void>("chmod_path", { sessionId, path, mode }),
 
+  // Copy a file/folder alongside the original; backend picks a free name.
+  duplicatePath: (sessionId: SessionId, path: string) =>
+    invoke<void>("duplicate_path", { sessionId, path }),
+
+  // Build a tar.gz/zip of a remote dir on the server, then download it. Returns
+  // the resulting transfer id (the archive shows in the transfers panel).
+  startArchiveDownload: (
+    sessionId: SessionId,
+    remotePath: string,
+    format: "tar.gz" | "zip"
+  ) =>
+    invoke<string>("start_archive_download", {
+      sessionId,
+      remotePath,
+      format,
+    }),
+
   respondToHostPrompt: (requestId: string, decision: HostDecision) =>
     invoke<void>("respond_to_host_prompt", { requestId, decision }),
 

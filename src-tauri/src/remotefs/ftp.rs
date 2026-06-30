@@ -152,6 +152,7 @@ impl RemoteFs for FtpFs {
             can_symlink: false,
             can_rename: true,
             has_directories: true,
+            has_shell: false,
         }
     }
 }

@@ -18,6 +18,10 @@ export interface Capabilities {
   canSymlink: boolean;
   canRename: boolean;
   hasDirectories: boolean; // false for object stores (S3/Azure)
+  /** Backend can run shell commands — gates server-side archive + "open
+   *  terminal here". Optional so older adapters that omit it just don't get
+   *  those actions. */
+  hasShell?: boolean;
 }
 
 // A session handle is opaque to the UI — it's whatever your adapter understands
@@ -33,3 +37,8 @@ export type SortField = "name" | "size" | "modified";
 export type SortDirection = "asc" | "desc";
 export type PaneViewMode = "list" | "details" | "grid";
 export type PaneDensity = "comfortable" | "compact";
+
+// Server-side archive formats offered by the "Download folder as…" action. The
+// adapter builds the archive on the remote host (one command) and downloads the
+// single file, rather than walking the tree client-side.
+export type ArchiveFormat = "tar.gz" | "zip";

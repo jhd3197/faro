@@ -152,6 +152,7 @@ impl RemoteFs for SftpFs {
             can_symlink: true,
             can_rename: true,
             has_directories: true,
+            has_shell: true,
         }
     }
 }

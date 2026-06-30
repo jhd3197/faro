@@ -260,6 +260,11 @@ function TerminalPane({
         }
         setStatus("ready");
         term.focus();
+        // "Open terminal here" seeds the tab with a cd; run it once the shell
+        // is live so the prompt lands in the chosen directory.
+        if (tab.initialCommand) {
+          ipc.terminalWrite(id, tab.initialCommand).catch(() => {});
+        }
       } catch (e) {
         setError(String(e));
         setStatus("exited");

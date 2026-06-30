@@ -9,13 +9,16 @@ export interface TerminalTab {
   id: string; // client-side id, used as React key
   sessionId: SessionId;
   title: string; // editable; defaults to `Shell N`
+  /** Sent to the PTY once, right after it opens (e.g. a `cd` from "Open
+   *  terminal here"). Includes its own trailing newline. */
+  initialCommand?: string;
 }
 
 interface TerminalsState {
   tabs: TerminalTab[];
   activeId: string | null;
 
-  openTab: (sessionId: SessionId) => TerminalTab;
+  openTab: (sessionId: SessionId, initialCommand?: string) => TerminalTab;
   closeTab: (id: string) => void;
   setActive: (id: string) => void;
   renameTab: (id: string, title: string) => void;
@@ -31,12 +34,13 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
   tabs: [],
   activeId: null,
 
-  openTab: (sessionId) => {
+  openTab: (sessionId, initialCommand) => {
     const sessionCount = get().tabs.filter((t) => t.sessionId === sessionId).length;
     const tab: TerminalTab = {
       id: genId(),
       sessionId,
       title: `Shell ${sessionCount + 1}`,
+      initialCommand,
     };
     set((s) => ({ tabs: [...s.tabs, tab], activeId: tab.id }));
     return tab;

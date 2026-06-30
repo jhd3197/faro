@@ -35,6 +35,9 @@ pub struct Capabilities {
     pub can_symlink: bool,
     pub can_rename: bool,
     pub has_directories: bool,
+    /// Backend runs shell commands (gates server-side archive + "open terminal
+    /// here"). True for SSH; false for local/FTP/object stores.
+    pub has_shell: bool,
 }
 
 /// Unified filesystem abstraction. Each backend (Local, SFTP, S3, FTP, ...)

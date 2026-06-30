@@ -16,6 +16,7 @@ export type {
 export { ContextMenu, type MenuItem } from "./components/ContextMenu";
 export { PromptModal } from "./components/PromptModal";
 export { ConfirmModal } from "./components/ConfirmModal";
+export { PropertiesModal } from "./components/PropertiesModal";
 export { Skeleton, FileListSkeleton } from "./components/Skeleton";
 export { EmptyState } from "./components/EmptyState";
 export { Thumbnail } from "./components/Thumbnail";
@@ -47,4 +48,5 @@ export {
   type SortDirection,
   type PaneViewMode,
   type PaneDensity,
+  type ArchiveFormat,
 } from "./types";

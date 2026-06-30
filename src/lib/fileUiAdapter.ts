@@ -6,6 +6,13 @@ import {
 } from "@faro/file-ui";
 import { ipc } from "./ipc";
 import { useEditor } from "@/stores/editorStore";
+import { useTerminals } from "@/stores/terminalsStore";
+import { useLayout } from "@/stores/layoutStore";
+
+// POSIX single-quote a path so a `cd` survives spaces / shell metacharacters.
+function shQuote(p: string): string {
+  return `'${p.replace(/'/g, `'\\''`)}'`;
+}
 
 // The concrete @faro/file-ui adapter for Faro: it maps the package's
 // transport-agnostic operations onto Faro's Tauri command surface. This is the
@@ -23,6 +30,23 @@ export const tauriFileSystem: FileSystemAdapter = {
   // save/error listeners and tracks the live-edit pill in the status bar.
   editFile: (sessionId, path) =>
     useEditor.getState().startEditing(sessionId, path),
+
+  // Copy a file/folder next to the original. The Rust side resolves a free
+  // name and does the copy server-side (cp over SSH) or on the local disk.
+  duplicate: (sessionId, path) => ipc.duplicatePath(sessionId, path),
+
+  // Server-side archive then download. Returns once the transfer is queued; the
+  // transfers panel tracks the actual byte download, and the backend removes the
+  // temp archive on the server when it finishes.
+  archive: async (sessionId, path, format) => {
+    await ipc.startArchiveDownload(sessionId, path, format);
+  },
+
+  // Reveal the terminal dock and open a fresh shell already cd'd into `path`.
+  openTerminal: async (sessionId, path) => {
+    useLayout.getState().setTerminalOpen(true);
+    useTerminals.getState().openTab(sessionId, `cd ${shQuote(path)}\n`);
+  },
 
   // Image previews for the grid view. Local files only for now — the backend
   // `read_file_preview` command reads bytes off the local disk and we wrap them

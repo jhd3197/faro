@@ -1,7 +1,9 @@
 import { createContext, useContext, type ReactNode } from "react";
 import type {
+  ArchiveFormat,
   Capabilities,
   DirEntry,
+  FileKind,
   PaneDensity,
   PaneViewMode,
   SessionId,
@@ -38,6 +40,28 @@ export interface FileSystemAdapter {
    * adapter only has to hand back bytes. Omit it entirely to keep icons only.
    */
   thumbnail?(sessionId: SessionId, entry: DirEntry): Promise<Blob | null>;
+  /**
+   * Optional: make a copy of a file/folder alongside the original (the host
+   * picks a non-colliding name like "foo copy"). Omit it and the pane doesn't
+   * offer "Duplicate". May reject for backends that can't copy server-side.
+   */
+  duplicate?(sessionId: SessionId, path: string, kind: FileKind): Promise<void>;
+  /**
+   * Optional: archive a remote directory on the server (one `tar`/`zip`
+   * command) and download the single resulting file — far cheaper than walking
+   * the tree. Omit it and the pane doesn't offer "Download as …". Remote
+   * (shell-capable) backends only.
+   */
+  archive?(
+    sessionId: SessionId,
+    path: string,
+    format: ArchiveFormat
+  ): Promise<void>;
+  /**
+   * Optional: open an interactive terminal already changed into `path`. Omit it
+   * and the pane doesn't offer "Open terminal here". Remote sessions only.
+   */
+  openTerminal?(sessionId: SessionId, path: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

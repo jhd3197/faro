@@ -1,4 +1,5 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { ChevronRight } from "lucide-react";
 import { cn } from "../lib/cn";
 
 export interface MenuItem {
@@ -8,6 +9,11 @@ export interface MenuItem {
   disabled?: boolean;
   destructive?: boolean;
   separatorAfter?: boolean;
+  /**
+   * Nested items. When present, this row is a submenu parent: clicking/hovering
+   * it reveals `children` in a flyout and its own `onClick` is ignored.
+   */
+  children?: MenuItem[];
 }
 
 interface Props {
@@ -19,6 +25,7 @@ interface Props {
 
 export function ContextMenu({ x, y, items, onClose }: Props) {
   const ref = useRef<HTMLDivElement>(null);
+  const [openSub, setOpenSub] = useState<number | null>(null);
 
   useEffect(() => {
     const onAnyClick = (e: MouseEvent) => {
@@ -78,32 +85,78 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
       style={{ left, top }}
       className="anim-modal fixed z-menu min-w-[200px] rounded-lg border border-border bg-bg-panel py-1 shadow-elev-3"
     >
-      {items.map((item, i) => (
-        <div key={i}>
-          <button
-            role="menuitem"
-            disabled={item.disabled}
-            onClick={() => {
-              item.onClick();
-              onClose();
-            }}
-            className={cn(
-              "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-bg-hover disabled:opacity-40 disabled:hover:bg-transparent",
-              item.destructive && "text-danger hover:bg-danger-soft"
-            )}
+      {items.map((item, i) => {
+        const hasChildren = !!item.children?.length;
+        return (
+          <div
+            key={i}
+            className="relative"
+            onMouseEnter={hasChildren ? () => setOpenSub(i) : undefined}
+            onMouseLeave={hasChildren ? () => setOpenSub(null) : undefined}
           >
-            {item.icon && (
-              <span className="flex h-3.5 w-3.5 items-center justify-center text-text-muted">
-                {item.icon}
-              </span>
+            <button
+              role="menuitem"
+              aria-haspopup={hasChildren || undefined}
+              aria-expanded={hasChildren ? openSub === i : undefined}
+              disabled={item.disabled}
+              onClick={() => {
+                if (hasChildren) {
+                  setOpenSub((cur) => (cur === i ? null : i));
+                  return;
+                }
+                item.onClick();
+                onClose();
+              }}
+              className={cn(
+                "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-bg-hover disabled:opacity-40 disabled:hover:bg-transparent",
+                item.destructive && "text-danger hover:bg-danger-soft"
+              )}
+            >
+              {item.icon && (
+                <span className="flex h-3.5 w-3.5 items-center justify-center text-text-muted">
+                  {item.icon}
+                </span>
+              )}
+              <span className="flex-1">{item.label}</span>
+              {hasChildren && (
+                <ChevronRight size={12} className="text-text-dim" />
+              )}
+            </button>
+            {hasChildren && openSub === i && (
+              <div
+                role="menu"
+                className="anim-modal absolute left-full top-0 z-menu ml-0.5 min-w-[180px] rounded-lg border border-border bg-bg-panel py-1 shadow-elev-3"
+              >
+                {item.children!.map((child, j) => (
+                  <button
+                    key={j}
+                    role="menuitem"
+                    disabled={child.disabled}
+                    onClick={() => {
+                      child.onClick();
+                      onClose();
+                    }}
+                    className={cn(
+                      "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-bg-hover disabled:opacity-40 disabled:hover:bg-transparent",
+                      child.destructive && "text-danger hover:bg-danger-soft"
+                    )}
+                  >
+                    {child.icon && (
+                      <span className="flex h-3.5 w-3.5 items-center justify-center text-text-muted">
+                        {child.icon}
+                      </span>
+                    )}
+                    <span className="flex-1">{child.label}</span>
+                  </button>
+                ))}
+              </div>
             )}
-            <span className="flex-1">{item.label}</span>
-          </button>
-          {item.separatorAfter && (
-            <div className="my-1 border-t border-border" />
-          )}
-        </div>
-      ))}
+            {item.separatorAfter && (
+              <div className="my-1 border-t border-border" />
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }
