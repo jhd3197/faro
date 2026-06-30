@@ -1,9 +1,11 @@
-import { useEffect, useId, useRef } from "react";
-import { X, Palette, ArrowDownUp, FolderTree, TerminalSquare, Plug, Radio, Bot } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { X, Palette, ArrowDownUp, FolderTree, TerminalSquare, Plug, Radio, Bot, Ban, Check, Info } from "lucide-react";
 import { useDialog } from "@/hooks/useDialog";
+import { ACCENTS } from "@/lib/accent";
 import {
   useSettings,
-  APP_THEMES,
+  COLOR_THEMES,
   type AppTheme,
   type OverwritePolicy,
   type SortField,
@@ -21,6 +23,25 @@ interface Props {
   onClose: () => void;
 }
 
+type SectionId =
+  | "appearance"
+  | "transfers"
+  | "panes"
+  | "terminal"
+  | "connections"
+  | "bridge"
+  | "agent";
+
+const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
+  { id: "appearance", label: "Appearance", icon: <Palette size={14} /> },
+  { id: "transfers", label: "Transfers", icon: <ArrowDownUp size={14} /> },
+  { id: "panes", label: "File panes", icon: <FolderTree size={14} /> },
+  { id: "terminal", label: "Terminal", icon: <TerminalSquare size={14} /> },
+  { id: "connections", label: "Connections", icon: <Plug size={14} /> },
+  { id: "bridge", label: "Agent Bridge", icon: <Radio size={14} /> },
+  { id: "agent", label: "Agent", icon: <Bot size={14} /> },
+];
+
 export function Settings({ onClose }: Props) {
   const s = useSettings();
 
@@ -37,41 +58,44 @@ export function Settings({ onClose }: Props) {
   const titleId = useId();
   useDialog(panelRef, { onClose });
 
-  return (
-    <div
-      className="fixed inset-0 z-modal flex items-center justify-center bg-black/60 backdrop-blur-sm"
-      onClick={onClose}
-    >
-      <div
-        ref={panelRef}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        onClick={(e) => e.stopPropagation()}
-        className="anim-modal flex max-h-[85vh] w-[34rem] max-w-[92vw] flex-col rounded-xl border border-border bg-bg-panel shadow-elev-3"
-      >
-        <div className="flex items-center border-b border-border px-5 py-3.5">
-          <span id={titleId} className="text-[15px] font-semibold tracking-tight">Settings</span>
-          <div className="flex-1" />
-          <button
-            onClick={onClose}
-            className="rounded-md p-1.5 text-text-muted hover:bg-bg-hover hover:text-text"
-          >
-            <X size={14} />
-          </button>
-        </div>
+  const [active, setActive] = useState<SectionId>("appearance");
 
-        <div className="flex-1 overflow-y-auto px-5 py-2">
-          <Section title="Appearance" icon={<Palette size={13} />}>
+  const renderContent = () => {
+    switch (active) {
+      case "appearance":
+        return (
+          <>
             <Field
-              label="App theme"
-              help="Recolors the whole interface — accent, surfaces, scrollbars and focus rings all follow the selected palette."
+              label="Mode"
+              help="The light or dark base. Pick a named color palette below to override it."
+            >
+              <Segmented<AppTheme>
+                value={s.appTheme}
+                onChange={s.setAppTheme}
+                options={[
+                  { value: "light", label: "Light" },
+                  { value: "dark", label: "Dark" },
+                ]}
+              />
+            </Field>
+            <Field
+              label="Accent color"
+              help="The highlight color for buttons, links, focus rings, the active rail pill and selection. Layers on top of the mode and palette below."
+            >
+              <AccentGrid value={s.accentColor} onChange={s.setAccentColor} />
+            </Field>
+            <Field
+              label="Color palette"
+              help="Full presets that also re-tint the surfaces, not just the accent."
             >
               <ThemeGrid value={s.appTheme} onChange={s.setAppTheme} />
             </Field>
-          </Section>
+          </>
+        );
 
-          <Section title="Transfers" icon={<ArrowDownUp size={13} />}>
+      case "transfers":
+        return (
+          <>
             <Field label="When the destination already exists">
               <Segmented<OverwritePolicy>
                 value={s.overwritePolicy}
@@ -110,7 +134,7 @@ export function Settings({ onClose }: Props) {
               label="Download folder"
               help="Where downloads land. Leave blank to use your system Downloads folder."
             >
-              <div className="flex items-center gap-1.5">
+              <div className="flex w-full items-center gap-1.5">
                 <input
                   value={s.defaultDownloadFolder}
                   onChange={(e) => s.setDefaultDownloadFolder(e.target.value)}
@@ -141,9 +165,12 @@ export function Settings({ onClose }: Props) {
                 )}
               </div>
             </Field>
-          </Section>
+          </>
+        );
 
-          <Section title="File panes" icon={<FolderTree size={13} />}>
+      case "panes":
+        return (
+          <>
             <ToggleField
               label="Show hidden files"
               help="Files and directories whose name starts with a dot."
@@ -205,7 +232,7 @@ export function Settings({ onClose }: Props) {
               label="Default editor"
               help="Command used to open files for edit-in-place (e.g. code). Blank = your OS default app."
             >
-              <div className="flex items-center gap-1.5">
+              <div className="flex w-full items-center gap-1.5">
                 <input
                   value={s.defaultEditor}
                   onChange={(e) => s.setDefaultEditor(e.target.value)}
@@ -230,9 +257,12 @@ export function Settings({ onClose }: Props) {
                 )}
               </div>
             </Field>
-          </Section>
+          </>
+        );
 
-          <Section title="Terminal" icon={<TerminalSquare size={13} />}>
+      case "terminal":
+        return (
+          <>
             <Field label="Font size">
               <NumberInput
                 min={8}
@@ -278,6 +308,9 @@ export function Settings({ onClose }: Props) {
                   { value: "dracula", label: "Dracula" },
                   { value: "solarized-dark", label: "Solarized Dark" },
                   { value: "gruvbox-dark", label: "Gruvbox Dark" },
+                  { value: "onedark", label: "One Dark" },
+                  { value: "rosepine", label: "Rosé Pine" },
+                  { value: "everforest", label: "Everforest" },
                 ]}
               />
               <Help>Applies live to open terminals.</Help>
@@ -295,20 +328,30 @@ export function Settings({ onClose }: Props) {
               />
               <Help>Takes effect on the next opened terminal.</Help>
             </Field>
-          </Section>
+            <ToggleField
+              label="Copy on select"
+              help="Copy the selected text to the clipboard the moment you select it in the terminal (PuTTY-style). Paste as usual with Ctrl/⌘+V or a right-click."
+              checked={s.terminalCopyOnSelect}
+              onChange={s.setTerminalCopyOnSelect}
+            />
+          </>
+        );
 
-          <Section title="Connections" icon={<Plug size={13} />}>
-            <Field label="Default port for new profiles">
-              <NumberInput
-                min={1}
-                max={65535}
-                value={s.defaultPort}
-                onChange={s.setDefaultPort}
-              />
-            </Field>
-          </Section>
+      case "connections":
+        return (
+          <Field label="Default port for new profiles">
+            <NumberInput
+              min={1}
+              max={65535}
+              value={s.defaultPort}
+              onChange={s.setDefaultPort}
+            />
+          </Field>
+        );
 
-          <Section title="Agent Bridge" icon={<Radio size={13} />}>
+      case "bridge":
+        return (
+          <>
             <ToggleField
               label="Allow all — no prompts"
               help="Let connected AI agents run every request (commands, reads, transfers) on enabled sessions without asking. Most permissive."
@@ -335,9 +378,12 @@ export function Settings({ onClose }: Props) {
               Same setting as the Agent Bridge panel — applies to every
               agent-enabled session and persists across restarts.
             </Help>
-          </Section>
+          </>
+        );
 
-          <Section title="Agent" icon={<Bot size={13} />}>
+      case "agent":
+        return (
+          <>
             <Field label="Anthropic API key">
               <input
                 type="password"
@@ -351,44 +397,134 @@ export function Settings({ onClose }: Props) {
               Used only by the built-in Agent chat. Stored locally; never sent
               to Faro's servers.
             </Help>
-          </Section>
-        </div>
+          </>
+        );
+    }
+  };
 
-        <div className="flex items-center justify-between border-t border-border px-5 py-3">
-          <span className="text-xs text-text-dim">
-            Settings persist locally (browser storage).
-          </span>
-          <button
-            onClick={onClose}
-            className="btn-accent rounded-md px-3.5 py-1.5 text-sm font-medium text-white"
+  const activeLabel = SECTIONS.find((sec) => sec.id === active)?.label;
+
+  return (
+    <div
+      className="fixed inset-0 z-modal flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        onClick={(e) => e.stopPropagation()}
+        className="anim-modal flex h-[34rem] max-h-[88vh] w-[52rem] max-w-[94vw] overflow-hidden rounded-xl border border-border bg-bg-panel shadow-elev-3"
+      >
+        {/* Left navigation — macOS / FileZilla-style section list. */}
+        <nav className="flex w-48 shrink-0 flex-col gap-0.5 border-r border-border bg-bg-subtle/50 p-2">
+          <div
+            id={titleId}
+            className="px-2 pb-2 pt-1 text-[15px] font-semibold tracking-tight"
           >
-            Done
-          </button>
+            Settings
+          </div>
+          {SECTIONS.map((sec) => {
+            const on = active === sec.id;
+            return (
+              <button
+                key={sec.id}
+                onClick={() => setActive(sec.id)}
+                aria-current={on ? "page" : undefined}
+                className={cn(
+                  "flex items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors",
+                  on
+                    ? "bg-accent-soft text-accent"
+                    : "text-text-muted hover:bg-bg-hover hover:text-text"
+                )}
+              >
+                <span className={on ? "text-accent" : "text-text-dim"}>
+                  {sec.icon}
+                </span>
+                <span className="truncate">{sec.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Content pane for the active section. */}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex items-center border-b border-border px-6 py-3.5">
+            <span className="text-sm font-semibold">{activeLabel}</span>
+            <div className="flex-1" />
+            <button
+              onClick={onClose}
+              className="rounded-md p-1.5 text-text-muted hover:bg-bg-hover hover:text-text"
+            >
+              <X size={14} />
+            </button>
+          </div>
+
+          <div className="flex-1 space-y-4 overflow-y-auto px-6 py-4">
+            {renderContent()}
+          </div>
+
+          <div className="flex items-center justify-between border-t border-border px-6 py-3">
+            <span className="text-xs text-text-dim">
+              Settings persist locally.
+            </span>
+            <button
+              onClick={onClose}
+              className="btn-accent rounded-md px-3.5 py-1.5 text-sm font-medium text-white"
+            >
+              Done
+            </button>
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-function Section({
-  title,
-  icon,
-  children,
-}: {
-  title: string;
-  icon?: React.ReactNode;
-  children: React.ReactNode;
-}) {
+// An (i) that reveals its help on hover/focus — replaces the always-on subtitle
+// so titles stay clean. Portals to <body> so it's never clipped by the dialog's
+// scroll area and sits above the modal.
+function InfoTip({ text }: { text: string }) {
+  const [coords, setCoords] = useState<{ left: number; top: number } | null>(
+    null
+  );
+  const ref = useRef<HTMLButtonElement>(null);
+  const show = () => {
+    const r = ref.current?.getBoundingClientRect();
+    if (r) setCoords({ left: r.left + r.width / 2, top: r.top - 6 });
+  };
+  const hide = () => setCoords(null);
   return (
-    <div className="border-b border-border-subtle py-4 last:border-b-0">
-      <div className="mb-3 flex items-center gap-1.5">
-        <span className="text-text-muted">{icon}</span>
-        <span className="text-[11px] font-semibold uppercase tracking-[0.08em] text-text-muted">
-          {title}
-        </span>
-      </div>
-      <div className="space-y-3">{children}</div>
-    </div>
+    <>
+      <button
+        ref={ref}
+        type="button"
+        onMouseEnter={show}
+        onMouseLeave={hide}
+        onFocus={show}
+        onBlur={hide}
+        aria-label="More info"
+        className="inline-flex text-text-dim transition-colors hover:text-text"
+      >
+        <Info size={13} />
+      </button>
+      {coords &&
+        createPortal(
+          <span
+            role="tooltip"
+            style={{
+              left: coords.left,
+              top: coords.top,
+              transform: "translate(-50%, -100%)",
+            }}
+            className="anim-fade pointer-events-none fixed z-tooltip w-64 max-w-[80vw] rounded-md border border-border bg-bg-panel px-2.5 py-1.5 text-[11px] leading-snug text-text-muted shadow-elev-2"
+          >
+            {text}
+          </span>,
+          document.body
+        )}
+    </>
   );
 }
 
@@ -403,8 +539,10 @@ function Field({
 }) {
   return (
     <div>
-      <div className="mb-1.5 text-sm">{label}</div>
-      {help && <div className="mb-1.5 text-xs text-text-dim">{help}</div>}
+      <div className="mb-1.5 flex items-center gap-1.5">
+        <span className="text-sm">{label}</span>
+        {help && <InfoTip text={help} />}
+      </div>
       <div className="flex flex-wrap items-center gap-2">{children}</div>
     </div>
   );
@@ -426,10 +564,10 @@ function ToggleField({
   onChange: (v: boolean) => void;
 }) {
   return (
-    <div className="flex items-start gap-3">
-      <div className="min-w-0 flex-1">
-        <div className="text-sm">{label}</div>
-        {help && <div className="text-xs text-text-dim">{help}</div>}
+    <div className="flex items-center gap-3">
+      <div className="flex min-w-0 flex-1 items-center gap-1.5">
+        <span className="text-sm">{label}</span>
+        {help && <InfoTip text={help} />}
       </div>
       <Toggle checked={checked} onChange={onChange} />
     </div>
@@ -475,7 +613,7 @@ function ThemeGrid({
 }) {
   return (
     <div className="grid w-full grid-cols-3 gap-2">
-      {APP_THEMES.map((t) => {
+      {COLOR_THEMES.map((t) => {
         const active = value === t.value;
         return (
           <button
@@ -503,6 +641,88 @@ function ThemeGrid({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+function AccentGrid({
+  value,
+  onChange,
+}: {
+  value: string;
+  onChange: (hex: string) => void;
+}) {
+  const lower = value.toLowerCase();
+  const isPreset = ACCENTS.some((a) => a.hex.toLowerCase() === lower);
+  const isCustom = value !== "" && !isPreset;
+  const chip =
+    "flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition-colors";
+  return (
+    <div className="w-full space-y-2.5">
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => onChange("")}
+          className={cn(
+            chip,
+            value === ""
+              ? "border-accent bg-accent/10 text-text"
+              : "border-border text-text-muted hover:border-text-dim hover:text-text"
+          )}
+        >
+          <Ban size={12} /> Theme default
+        </button>
+        <label
+          title="Pick any color"
+          className={cn(
+            chip,
+            "cursor-pointer",
+            isCustom
+              ? "border-accent bg-accent/10 text-text"
+              : "border-border text-text-muted hover:border-text-dim hover:text-text"
+          )}
+        >
+          <span
+            className="h-3.5 w-3.5 rounded-full border border-white/20"
+            style={{
+              background: isCustom
+                ? value
+                : "conic-gradient(from 0deg, #ef4444, #eab308, #22c55e, #06b6d4, #3b82f6, #a855f7, #ef4444)",
+            }}
+          />
+          Custom
+          <input
+            type="color"
+            value={isCustom ? value : "#8b7ff6"}
+            onChange={(e) => onChange(e.target.value)}
+            className="sr-only"
+          />
+        </label>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {ACCENTS.map((a) => {
+          const active = lower === a.hex.toLowerCase();
+          return (
+            <button
+              key={a.hex}
+              onClick={() => onChange(a.hex)}
+              title={a.name}
+              aria-label={a.name}
+              aria-pressed={active}
+              style={{ background: a.hex }}
+              className={cn(
+                "flex h-7 w-7 items-center justify-center rounded-md ring-offset-2 ring-offset-bg-panel transition-all",
+                active
+                  ? "ring-2 ring-accent"
+                  : "ring-1 ring-black/10 hover:ring-2 hover:ring-white/50"
+              )}
+            >
+              {active && (
+                <Check size={12} className="text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.7)]" />
+              )}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

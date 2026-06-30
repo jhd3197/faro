@@ -432,7 +432,7 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
         aria-modal="true"
         aria-labelledby={titleId}
         onClick={(e) => e.stopPropagation()}
-        className="anim-modal flex max-h-[85vh] w-[38rem] max-w-[94vw] flex-col rounded-xl border border-border bg-bg-panel shadow-elev-3"
+        className="anim-modal flex max-h-[88vh] w-[52rem] max-w-[94vw] flex-col rounded-xl border border-border bg-bg-panel shadow-elev-3"
       >
         <div className="flex items-center gap-2 border-b border-border px-5 py-3.5">
           <Radio size={15} className="text-accent" />
@@ -492,7 +492,9 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
 
           <div
             className={cn(
-              "space-y-4",
+              // Two-column masonry of cards — each card stays whole, the popup is
+              // wider rather than a long single scroll.
+              "columns-1 gap-4 md:columns-2 [&>*]:mb-4 [&>*]:break-inside-avoid",
               !status.enabled && "pointer-events-none select-none opacity-50"
             )}
             aria-disabled={!status.enabled}

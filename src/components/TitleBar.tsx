@@ -197,9 +197,8 @@ export function TitleBar() {
 
       <div className="flex-1" data-tauri-drag-region />
 
-      <IconButton onClick={switchTheme} title={`Switch to ${appTheme === "light" ? "dark" : "light"} theme`}>
-        {appTheme === "light" ? <Moon size={13} /> : <Sun size={13} />}
-      </IconButton>
+      {/* Light/dark now lives in Settings → Appearance (Mode); the View menu
+          item + Ctrl+Shift+T still toggle it for quick access. */}
       <IconButton onClick={() => openDialog("settings")} title="Settings">
         <SettingsIcon size={13} />
       </IconButton>

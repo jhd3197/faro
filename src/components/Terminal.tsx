@@ -230,6 +230,16 @@ function TerminalPane({
       if (id) ipc.terminalResize(id, cols, rows).catch(() => {});
     });
 
+    // Copy-on-select (PuTTY-style): as soon as a selection is made, mirror it to
+    // the clipboard. Read the toggle live so flipping it in Settings takes effect
+    // without reopening the terminal. Empty selections (a click that clears the
+    // old one) are ignored so we don't wipe the clipboard.
+    const selectionDisposable = term.onSelectionChange(() => {
+      if (!useSettings.getState().terminalCopyOnSelect) return;
+      const text = term.getSelection();
+      if (text) navigator.clipboard.writeText(text).catch(() => {});
+    });
+
     const onWindowResize = () => {
       try {
         fit.fit();
@@ -276,6 +286,7 @@ function TerminalPane({
       window.removeEventListener("resize", onWindowResize);
       dataDisposable.dispose();
       resizeDisposable.dispose();
+      selectionDisposable.dispose();
       if (unlistenData) unlistenData();
       if (unlistenExit) unlistenExit();
       const id = terminalIdRef.current;

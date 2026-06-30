@@ -4,7 +4,7 @@ import path from "node:path";
 
 const host = process.env.TAURI_DEV_HOST;
 
-export default defineConfig(async () => ({
+export default defineConfig(async ({ mode }) => ({
   plugins: [react()],
   resolve: {
     alias: {
@@ -15,7 +15,20 @@ export default defineConfig(async () => ({
         __dirname,
         "packages/file-ui/src/index.ts"
       ),
+      // Demo/screenshot build: swap the Tauri API surface for an in-browser mock
+      // so the whole UI renders with fictional data and no Rust backend.
+      ...(mode === "mock"
+        ? {
+            "@tauri-apps/api/core": path.resolve(__dirname, "src/mock/core.ts"),
+            "@tauri-apps/api/event": path.resolve(__dirname, "src/mock/event.ts"),
+            "@tauri-apps/api/path": path.resolve(__dirname, "src/mock/path.ts"),
+            "@tauri-apps/api/window": path.resolve(__dirname, "src/mock/window.ts"),
+          }
+        : {}),
     },
+  },
+  define: {
+    "import.meta.env.VITE_MOCK": JSON.stringify(mode === "mock"),
   },
   clearScreen: false,
   server: {

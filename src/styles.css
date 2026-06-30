@@ -140,6 +140,226 @@
   color-scheme: dark;
 }
 
+[data-theme="gruvbox"] {
+  --bg: 40 40 40;
+  --bg-panel: 50 48 47;
+  --bg-subtle: 60 56 54;
+  --bg-hover: 80 73 69;
+  --border: 80 73 69;
+  --border-subtle: 60 56 54;
+  --text: 235 219 178;
+  --text-muted: 213 196 161;
+  --text-dim: 168 153 132;
+  --accent: 254 128 25;
+  --accent-hover: 245 116 24;
+  --accent-strong: 175 58 3;
+  --accent-glow: 254 128 25;
+  --danger: 251 73 52;
+  --success: 184 187 38;
+  --warning: 250 189 47;
+  --info: 131 165 152;
+  --shadow: 0 0 0;
+  color-scheme: dark;
+}
+
+[data-theme="solarized"] {
+  --bg: 0 43 54;
+  --bg-panel: 7 54 66;
+  --bg-subtle: 10 66 80;
+  --bg-hover: 19 78 92;
+  --border: 28 91 105;
+  --border-subtle: 10 66 80;
+  --text: 147 161 161;
+  --text-muted: 131 148 150;
+  --text-dim: 101 123 131;
+  --accent: 38 139 210;
+  --accent-hover: 31 126 192;
+  --accent-strong: 27 102 153;
+  --accent-glow: 38 139 210;
+  --danger: 220 50 47;
+  --success: 133 153 0;
+  --warning: 181 137 0;
+  --info: 42 161 152;
+  --shadow: 0 0 0;
+  color-scheme: dark;
+}
+
+[data-theme="onedark"] {
+  --bg: 40 44 52;
+  --bg-panel: 44 49 58;
+  --bg-subtle: 51 56 66;
+  --bg-hover: 62 68 81;
+  --border: 62 68 81;
+  --border-subtle: 51 56 66;
+  --text: 171 178 191;
+  --text-muted: 157 165 180;
+  --text-dim: 127 132 142;
+  --accent: 97 175 239;
+  --accent-hover: 79 159 229;
+  --accent-strong: 47 109 181;
+  --accent-glow: 97 175 239;
+  --danger: 224 108 117;
+  --success: 152 195 121;
+  --warning: 229 192 123;
+  --info: 86 182 194;
+  --shadow: 0 0 0;
+  color-scheme: dark;
+}
+
+[data-theme="rosepine"] {
+  --bg: 25 23 36;
+  --bg-panel: 31 29 46;
+  --bg-subtle: 38 35 58;
+  --bg-hover: 57 53 82;
+  --border: 64 61 82;
+  --border-subtle: 38 35 58;
+  --text: 224 222 244;
+  --text-muted: 144 140 170;
+  --text-dim: 110 106 134;
+  --accent: 196 167 231;
+  --accent-hover: 178 148 220;
+  --accent-strong: 110 80 155;
+  --accent-glow: 196 167 231;
+  --danger: 235 111 146;
+  --success: 156 207 216;
+  --warning: 246 193 119;
+  --info: 49 116 143;
+  --shadow: 0 0 0;
+  color-scheme: dark;
+}
+
+[data-theme="everforest"] {
+  --bg: 45 53 59;
+  --bg-panel: 52 63 68;
+  --bg-subtle: 61 72 77;
+  --bg-hover: 71 82 88;
+  --border: 79 88 94;
+  --border-subtle: 61 72 77;
+  --text: 211 198 170;
+  --text-muted: 157 169 160;
+  --text-dim: 133 146 137;
+  --accent: 167 192 128;
+  --accent-hover: 151 176 111;
+  --accent-strong: 79 107 63;
+  --accent-glow: 167 192 128;
+  --danger: 230 126 128;
+  --success: 167 192 128;
+  --warning: 219 188 127;
+  --info: 127 187 179;
+  --shadow: 0 0 0;
+  color-scheme: dark;
+}
+
+[data-theme="github-light"] {
+  --bg: 246 248 250;
+  --bg-panel: 255 255 255;
+  --bg-subtle: 240 243 246;
+  --bg-hover: 234 238 242;
+  --border: 208 215 222;
+  --border-subtle: 225 228 232;
+  --text: 31 35 40;
+  --text-muted: 87 96 106;
+  --text-dim: 110 119 129;
+  --accent: 9 105 218;
+  --accent-hover: 8 91 192;
+  --accent-strong: 8 96 200;
+  --accent-glow: 9 105 218;
+  --danger: 207 34 46;
+  --success: 26 127 55;
+  --warning: 154 103 0;
+  --info: 9 105 218;
+  --shadow: 30 41 59;
+  color-scheme: light;
+}
+
+[data-theme="monokai"] {
+  --bg: 39 40 34;
+  --bg-panel: 45 46 40;
+  --bg-subtle: 52 53 46;
+  --bg-hover: 62 63 55;
+  --border: 73 72 62;
+  --border-subtle: 52 53 46;
+  --text: 248 248 242;
+  --text-muted: 201 202 188;
+  --text-dim: 144 138 122;
+  --accent: 249 38 114;
+  --accent-hover: 226 30 104;
+  --accent-strong: 176 18 80;
+  --accent-glow: 249 38 114;
+  --danger: 255 97 136;
+  --success: 166 226 46;
+  --warning: 230 219 116;
+  --info: 102 217 239;
+  --shadow: 0 0 0;
+  color-scheme: dark;
+}
+
+[data-theme="ayu"] {
+  --bg: 31 36 48;
+  --bg-panel: 35 40 52;
+  --bg-subtle: 42 49 64;
+  --bg-hover: 51 60 82;
+  --border: 61 71 96;
+  --border-subtle: 42 49 64;
+  --text: 204 202 194;
+  --text-muted: 165 174 184;
+  --text-dim: 112 122 140;
+  --accent: 255 167 89;
+  --accent-hover: 240 151 74;
+  --accent-strong: 181 83 26;
+  --accent-glow: 255 167 89;
+  --danger: 255 102 102;
+  --success: 166 204 112;
+  --warning: 255 204 102;
+  --info: 92 207 230;
+  --shadow: 0 0 0;
+  color-scheme: dark;
+}
+
+[data-theme="palenight"] {
+  --bg: 41 45 62;
+  --bg-panel: 47 52 71;
+  --bg-subtle: 53 59 82;
+  --bg-hover: 62 69 101;
+  --border: 68 74 107;
+  --border-subtle: 53 59 82;
+  --text: 166 172 205;
+  --text-muted: 143 150 179;
+  --text-dim: 103 110 149;
+  --accent: 130 170 255;
+  --accent-hover: 111 155 245;
+  --accent-strong: 63 95 181;
+  --accent-glow: 130 170 255;
+  --danger: 240 113 120;
+  --success: 195 232 141;
+  --warning: 255 203 107;
+  --info: 137 221 255;
+  --shadow: 0 0 0;
+  color-scheme: dark;
+}
+
+[data-theme="github-dark"] {
+  --bg: 13 17 23;
+  --bg-panel: 22 27 34;
+  --bg-subtle: 28 33 40;
+  --bg-hover: 33 38 45;
+  --border: 48 54 61;
+  --border-subtle: 33 38 45;
+  --text: 230 237 243;
+  --text-muted: 139 148 158;
+  --text-dim: 110 119 129;
+  --accent: 47 129 247;
+  --accent-hover: 40 114 224;
+  --accent-strong: 17 88 199;
+  --accent-glow: 47 129 247;
+  --danger: 248 81 73;
+  --success: 63 185 80;
+  --warning: 210 153 34;
+  --info: 47 129 247;
+  --shadow: 0 0 0;
+  color-scheme: dark;
+}
+
 /* Motion system. Theme-independent. Exponential ease-out curves read as
    "confident and decisive" — they decelerate hard at the end, which suits a
    tool that should feel instant. Durations stay in the product range (snappy,
@@ -232,7 +452,8 @@ body::after {
   background-image: url("data:image/svg+xml;utf8,<svg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
   background-size: 256px 256px;
 }
-[data-theme="light"] body::after {
+[data-theme="light"] body::after,
+[data-theme="github-light"] body::after {
   opacity: 0.06;
 }
 

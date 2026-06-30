@@ -25,6 +25,88 @@ Faro is what you'd get if you let FileZilla, PuTTY, and a half-dozen cloud-stora
 
 And when you want an AI agent to actually *do* something on a box, the **[Agent Bridge](#-agent-bridge)** lets it run commands through the session you already opened — no remote install, no keys handed over, every command gated behind your approval.
 
+<!-- FARO:SHOTS:START -->
+## 📸 Screenshots
+
+> Captured from a mock-data build — every hostname, IP, username, and path below is fictional. See [`docs/screenshots/CAPTURE.md`](docs/screenshots/CAPTURE.md) for the shot list and how to reproduce them.
+
+<details open>
+<summary><strong>Dual-pane browser</strong> — Local and remote side by side, drag-and-drop transfers between them</summary>
+
+![Dual-pane browser](docs/screenshots/overview.png)
+
+</details>
+
+<details>
+<summary><strong>Server rail</strong> — Discord-style connection bubbles, with an expandable labeled mode for spotting servers fast</summary>
+
+![Server rail](docs/screenshots/server-rail.png)
+
+</details>
+
+<details>
+<summary><strong>Integrated terminal</strong> — A real SSH shell tab against the same session you're browsing</summary>
+
+![Integrated terminal](docs/screenshots/terminal.png)
+
+</details>
+
+<details>
+<summary><strong>File actions</strong> — Right-click for duplicate, properties, "download folder as .tar.gz/.zip", and "open terminal here"</summary>
+
+![File actions context menu](docs/screenshots/context-menu.png)
+
+</details>
+
+<details>
+<summary><strong>Transfers</strong> — Queued downloads/uploads with progress and FileZilla-style overwrite prompts</summary>
+
+![Transfers panel](docs/screenshots/transfers.png)
+
+</details>
+
+<details>
+<summary><strong>Directory sync</strong> — Preview a one-way sync plan before anything moves</summary>
+
+![Directory sync](docs/screenshots/sync.png)
+
+</details>
+
+<details>
+<summary><strong>Agent Bridge</strong> — Approve (or auto-approve) each command an AI agent runs on a live session</summary>
+
+The headline feature: lend an AI agent your *already-authenticated* SSH session over a guarded localhost endpoint — no remote install, no keys shared, every command gated behind your approval.
+
+![Agent Bridge panel](docs/screenshots/agent-bridge.png)
+
+When an agent asks to run something, Faro prompts you with the exact command before anything touches the server:
+
+![Agent Bridge approval prompt](docs/screenshots/agent-bridge-approve.png)
+
+</details>
+
+<details>
+<summary><strong>S3 / object storage</strong> — Browse buckets like a filesystem alongside your SFTP and FTP servers</summary>
+
+![Object storage](docs/screenshots/object-storage.png)
+
+</details>
+
+<details>
+<summary><strong>New connection</strong> — One profile editor for SFTP, FTP/FTPS, and S3-compatible storage</summary>
+
+![New connection](docs/screenshots/new-connection.png)
+
+</details>
+
+<details>
+<summary><strong>Settings</strong> — Themes, terminal behavior (copy-on-select, scrollback), transfers, and the default editor</summary>
+
+![Settings](docs/screenshots/settings.png)
+
+</details>
+<!-- FARO:SHOTS:END -->
+
 ## Download
 
 Grab the latest installer from the [**Releases**](https://github.com/jhd3197/faro/releases/latest) page — every push to `main` publishes fresh builds for all three desktop platforms plus the standalone `faro-cli`.

@@ -15,6 +15,8 @@ import {
   Cloud,
   Server,
   HardDrive,
+  ChevronsLeft,
+  ChevronsRight,
 } from "lucide-react";
 import { useConnections } from "@/stores/connectionsStore";
 import { useBridge } from "@/stores/bridgeStore";
@@ -73,6 +75,10 @@ export function ServerRail() {
   const browseLocal = useLayout((s) => s.browseLocal);
   const setBrowseLocal = useLayout((s) => s.setBrowseLocal);
   const browserLayout = useSettings((s) => s.browserLayout);
+  // `pinned` is the persisted "keep it open" choice; the rail also flies open on
+  // hover (Edge vertical-tabs style) — see `expanded` below.
+  const pinned = useSettings((s) => s.railExpanded);
+  const setRailExpanded = useSettings((s) => s.setRailExpanded);
 
   const enabledSessions = useBridge((s) => s.status.enabledSessions);
   const bridgeRunning = useBridge((s) => s.status.running);
@@ -91,6 +97,29 @@ export function ServerRail() {
     y: number;
     items: MenuItem[];
   } | null>(null);
+  const [hovering, setHovering] = useState(false);
+  const hoverTimer = useRef<number | null>(null);
+
+  // Effective expanded state. Open when pinned, while hovering the collapsed
+  // rail, or while a rail menu / search popover is up (so the flyout doesn't
+  // collapse out from under what you're clicking).
+  const expanded = pinned || hovering || !!menu || searchOpen;
+
+  const onRailEnter = () => {
+    if (pinned) return;
+    if (hoverTimer.current) window.clearTimeout(hoverTimer.current);
+    hoverTimer.current = window.setTimeout(() => setHovering(true), 120);
+  };
+  const onRailLeave = () => {
+    if (hoverTimer.current) window.clearTimeout(hoverTimer.current);
+    hoverTimer.current = window.setTimeout(() => setHovering(false), 140);
+  };
+  useEffect(
+    () => () => {
+      if (hoverTimer.current) window.clearTimeout(hoverTimer.current);
+    },
+    []
+  );
 
   // Load profiles once, then auto-connect any flagged servers in sequence so
   // host-key prompts queue through the always-mounted HostKeyModal rather than
@@ -328,12 +357,28 @@ export function ServerRail() {
   };
 
   return (
-    <div className="relative flex h-full w-[68px] shrink-0 flex-col border-r border-border bg-bg">
+    // Outer spacer reserves the rail's *layout* width (collapsed unless pinned),
+    // so a hover flyout overlays the file panes instead of shoving them aside.
+    <div className={cn("relative h-full shrink-0", pinned ? "w-56" : "w-[68px]")}>
+      <div
+        onMouseEnter={onRailEnter}
+        onMouseLeave={onRailLeave}
+        className={cn(
+          "absolute inset-y-0 left-0 z-dropdown flex flex-col border-r border-border bg-bg transition-[width] duration-150 motion-reduce:transition-none",
+          expanded ? "w-56" : "w-[68px]",
+          !pinned && expanded && "shadow-elev-3"
+        )}
+      >
       <div className="flex-1 overflow-y-auto overflow-x-hidden py-2 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {/* Local files (single-pane layout only) */}
         {browserLayout === "single" && (
           <div className="mb-2 flex flex-col items-center gap-1.5">
-            <div className="group relative flex w-full items-center justify-center">
+            <div
+              className={cn(
+                "group relative flex w-full items-center",
+                expanded ? "justify-start pr-2" : "justify-center"
+              )}
+            >
               <span
                 aria-hidden
                 className={cn(
@@ -343,37 +388,51 @@ export function ServerRail() {
                     : "h-0 bg-text group-hover:h-3"
                 )}
               />
-              <Tooltip portal side="right" label="Local files">
-                <button
-                  onClick={() => setBrowseLocal(true)}
-                  aria-label="Local files"
-                  className={cn(
-                    "flex h-11 w-11 items-center justify-center rounded-2xl transition-colors",
-                    browseLocal
-                      ? "glow-accent bg-accent-soft text-accent"
-                      : "bg-bg-subtle text-text-muted hover:bg-bg-hover hover:text-text"
-                  )}
-                >
-                  <HardDrive size={19} />
-                </button>
-              </Tooltip>
+              <RailRow
+                expanded={expanded}
+                tooltip="Local files"
+                onClick={() => setBrowseLocal(true)}
+                ariaLabel="Local files"
+                bubble={
+                  <span
+                    className={cn(
+                      "flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl transition-colors",
+                      browseLocal
+                        ? "glow-accent bg-accent-soft text-accent"
+                        : "bg-bg-subtle text-text-muted group-hover:bg-bg-hover group-hover:text-text"
+                    )}
+                  >
+                    <HardDrive size={19} />
+                  </span>
+                }
+                label={<span className="text-[13px] font-medium text-text">Local files</span>}
+              />
             </div>
-            <span className="h-px w-7 rounded-full bg-border" />
+            <span className={cn("h-px rounded-full bg-border", expanded ? "w-full" : "w-7")} />
           </div>
         )}
         {/* Connections */}
         <div className="flex flex-col items-center gap-1.5">
           {ordered.length === 0 ? (
-            <Tooltip portal
-          side="right" label="Add your first server">
-              <button
+            <div
+              className={cn(
+                "group flex w-full items-center",
+                expanded ? "justify-start px-2" : "justify-center"
+              )}
+            >
+              <RailRow
+                expanded={expanded}
+                tooltip="Add your first server"
                 onClick={() => setEditing("new")}
-                className="flex h-11 w-11 items-center justify-center rounded-2xl border border-dashed border-border text-text-dim transition-colors hover:border-accent hover:text-accent"
-                aria-label="Add a server"
-              >
-                <Plus size={20} />
-              </button>
-            </Tooltip>
+                ariaLabel="Add a server"
+                bubble={
+                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-dashed border-border text-text-dim transition-colors group-hover:border-accent group-hover:text-accent">
+                    <Plus size={20} />
+                  </span>
+                }
+                label={<span className="text-[13px] text-text-dim">Add your first server</span>}
+              />
+            </div>
           ) : (
             ordered.map((p) => (
               <RailBubble
@@ -381,6 +440,7 @@ export function ServerRail() {
                 profile={p}
                 state={rowState(p)}
                 bridged={bridgedIds.has(p.id)}
+                expanded={expanded}
                 onClick={(e) => onBubbleClick(e, p)}
                 onContextMenu={(e) => {
                   e.preventDefault();
@@ -393,33 +453,47 @@ export function ServerRail() {
 
         {/* Divider + Agent Bridge */}
         <div className="mt-3 flex flex-col items-center gap-1.5">
-          <span className="mb-1 h-px w-7 rounded-full bg-border" />
-          <Tooltip
-            portal
-          side="right"
-            label={`Agent Bridge — ${bridgeRunning ? "running" : "stopped"}`}
+          <span className={cn("mb-1 h-px rounded-full bg-border", expanded ? "w-full" : "w-7")} />
+          <div
+            className={cn(
+              "group relative flex w-full items-center",
+              expanded ? "justify-start pr-2" : "justify-center"
+            )}
           >
-            <button
+            <RailRow
+              expanded={expanded}
+              tooltip={`Agent Bridge — ${bridgeRunning ? "running" : "stopped"}`}
               onClick={() => openDialog("agentBridge")}
               onContextMenu={masterBridgeMenu}
-              aria-label="Agent Bridge"
-              className={cn(
-                "relative flex h-11 w-11 items-center justify-center rounded-2xl bg-bg-subtle transition-colors hover:bg-bg-hover",
-                bridgeRunning ? "text-success" : "text-text-dim hover:text-text"
-              )}
-            >
-              <Radio size={19} />
-              <StatusDot
-                kind={bridgeRunning ? "connected" : "idle"}
-              />
-            </button>
-          </Tooltip>
+              ariaLabel="Agent Bridge"
+              bubble={
+                <span
+                  className={cn(
+                    "relative flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-bg-subtle transition-colors group-hover:bg-bg-hover",
+                    bridgeRunning ? "text-success" : "text-text-dim group-hover:text-text"
+                  )}
+                >
+                  <Radio size={19} />
+                  <StatusDot kind={bridgeRunning ? "connected" : "idle"} />
+                </span>
+              }
+              label={
+                <span className="flex flex-col text-left">
+                  <span className="text-[13px] font-medium text-text">Agent Bridge</span>
+                  <span className="text-[10px] text-text-dim">
+                    {bridgeRunning ? "running" : "stopped"}
+                  </span>
+                </span>
+              }
+            />
+          </div>
 
           {bridgeSessions.map(({ sid, profile }) => (
             <BridgeBubble
               key={sid}
               profile={profile}
               focused={sid === activeSessionId}
+              expanded={expanded}
               onClick={() => setActiveSession(sid)}
               onContextMenu={(e) => bridgeSessionMenu(e, sid)}
             />
@@ -430,20 +504,34 @@ export function ServerRail() {
       {/* Pinned controls */}
       <div className="relative flex flex-col items-center gap-1 border-t border-border py-2">
         <RailIconButton
+          expanded={expanded}
           label="Search servers  ·  /"
           active={searchOpen}
           onClick={() => setSearchOpen((v) => !v)}
         >
           <Search size={17} />
         </RailIconButton>
-        <RailIconButton label="New connection" onClick={() => setEditing("new")}>
+        <RailIconButton
+          expanded={expanded}
+          label="New connection"
+          onClick={() => setEditing("new")}
+        >
           <Plus size={19} />
         </RailIconButton>
         <RailIconButton
+          expanded={expanded}
           label="Import from PuTTY, OpenSSH, FileZilla…"
           onClick={() => setImporting(true)}
         >
           <Download size={16} />
+        </RailIconButton>
+        <RailIconButton
+          expanded={expanded}
+          label={pinned ? "Collapse rail" : "Keep rail expanded"}
+          active={pinned}
+          onClick={() => setRailExpanded(!pinned)}
+        >
+          {pinned ? <ChevronsLeft size={18} /> : <ChevronsRight size={18} />}
         </RailIconButton>
 
         {searchOpen && (
@@ -471,7 +559,52 @@ export function ServerRail() {
         />
       )}
       {importing && <ImportDialog onClose={() => setImporting(false)} />}
+      </div>
     </div>
+  );
+}
+
+// Shared rail row: in compact mode it's a tooltip-wrapped icon button; in
+// expanded mode the tooltip is dropped and a name/label column is shown to the
+// right of the bubble (so you can actually read which server is which).
+function RailRow({
+  expanded,
+  tooltip,
+  onClick,
+  onContextMenu,
+  ariaLabel,
+  bubble,
+  label,
+}: {
+  expanded: boolean;
+  tooltip: React.ReactNode;
+  onClick: (e: React.MouseEvent) => void;
+  onContextMenu?: (e: React.MouseEvent) => void;
+  ariaLabel: string;
+  bubble: React.ReactNode;
+  label: React.ReactNode;
+}) {
+  const btn = (
+    <button
+      onClick={onClick}
+      onContextMenu={onContextMenu}
+      aria-label={ariaLabel}
+      className={cn(
+        "relative flex items-center rounded-2xl",
+        expanded && "w-full gap-2.5 px-2 py-1 text-left transition-colors hover:bg-bg-hover"
+      )}
+    >
+      {bubble}
+      {expanded && (
+        <span className="min-w-0 flex-1 overflow-hidden">{label}</span>
+      )}
+    </button>
+  );
+  if (expanded) return btn;
+  return (
+    <Tooltip portal side="right" label={tooltip}>
+      {btn}
+    </Tooltip>
   );
 }
 
@@ -479,12 +612,14 @@ function RailBubble({
   profile: p,
   state,
   bridged,
+  expanded,
   onClick,
   onContextMenu,
 }: {
   profile: ConnectionProfile;
   state: RowState;
   bridged: boolean;
+  expanded: boolean;
   onClick: (e: React.MouseEvent) => void;
   onContextMenu: (e: React.MouseEvent) => void;
 }) {
@@ -496,8 +631,45 @@ function RailBubble({
   const color = p.color || fallbackColor;
   const addr = profileAddress(p);
 
+  const bubble = (
+    <span
+      className={cn(
+        // Rounded-square tile (not a circle) so it sits as a tidy list item when
+        // the rail expands; a touch rounder when active for emphasis.
+        "relative flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-bg-subtle text-[13px] font-bold leading-none transition-[border-radius,box-shadow] duration-150 motion-reduce:transition-none",
+        (focused || connected) && "rounded-2xl",
+        focused && "glow-accent",
+        isError && "ring-1 ring-danger",
+        plaintext && !isError && "ring-1 ring-warning/50"
+      )}
+    >
+      <span style={{ color }}>{monogram(p.name)}</span>
+      <StatusDot
+        kind={
+          connected
+            ? "connected"
+            : connecting
+              ? "connecting"
+              : isError
+                ? "error"
+                : "idle"
+        }
+      />
+      {bridged && (
+        <span className="absolute -right-0.5 -top-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-bg text-success">
+          <Shield size={9} />
+        </span>
+      )}
+    </span>
+  );
+
   return (
-    <div className="group relative flex w-full items-center justify-center">
+    <div
+      className={cn(
+        "group relative flex w-full items-center",
+        expanded ? "justify-start pr-2" : "justify-center"
+      )}
+    >
       {/* Active / connected pill on the rail's left edge. */}
       <span
         aria-hidden
@@ -510,10 +682,12 @@ function RailBubble({
               : "h-0 bg-text group-hover:h-3"
         )}
       />
-      <Tooltip
-        portal
-          side="right"
-        label={
+      <RailRow
+        expanded={expanded}
+        onClick={onClick}
+        onContextMenu={onContextMenu}
+        ariaLabel={p.name}
+        tooltip={
           <span className="flex flex-col gap-0.5 text-left">
             <span className="font-semibold text-text">{p.name}</span>
             <span className="font-mono text-[10px] text-text-dim">{addr}</span>
@@ -523,39 +697,18 @@ function RailBubble({
             </span>
           </span>
         }
-      >
-        <button
-          onClick={onClick}
-          onContextMenu={onContextMenu}
-          aria-label={p.name}
-          title=""
-          className={cn(
-            "relative flex h-11 w-11 items-center justify-center rounded-full bg-bg-subtle text-[13px] font-bold leading-none transition-[border-radius,box-shadow] duration-150 hover:rounded-2xl motion-reduce:transition-none",
-            (focused || connected) && "rounded-2xl",
-            focused && "glow-accent",
-            isError && "ring-1 ring-danger",
-            plaintext && !isError && "ring-1 ring-warning/50"
-          )}
-        >
-          <span style={{ color }}>{monogram(p.name)}</span>
-          <StatusDot
-            kind={
-              connected
-                ? "connected"
-                : connecting
-                  ? "connecting"
-                  : isError
-                    ? "error"
-                    : "idle"
-            }
-          />
-          {bridged && (
-            <span className="absolute -right-0.5 -top-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-bg text-success">
-              <Shield size={9} />
+        bubble={bubble}
+        label={
+          <span className="flex flex-col">
+            <span className="truncate text-[13px] font-medium text-text">
+              {p.name}
             </span>
-          )}
-        </button>
-      </Tooltip>
+            <span className="truncate font-mono text-[10px] text-text-dim">
+              {addr}
+            </span>
+          </span>
+        }
+      />
     </div>
   );
 }
@@ -566,16 +719,31 @@ function RailBubble({
 function BridgeBubble({
   profile: p,
   focused,
+  expanded,
   onClick,
   onContextMenu,
 }: {
   profile: ConnectionProfile;
   focused: boolean;
+  expanded: boolean;
   onClick: () => void;
   onContextMenu: (e: React.MouseEvent) => void;
 }) {
+  const bubble = (
+    <span className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-bg-subtle text-[12px] font-bold leading-none ring-1 ring-success transition-colors group-hover:bg-bg-hover">
+      <span className="text-success">{monogram(p.name)}</span>
+      <span className="absolute -right-0.5 -top-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-bg text-success">
+        <Shield size={9} />
+      </span>
+    </span>
+  );
   return (
-    <div className="group relative flex w-full items-center justify-center">
+    <div
+      className={cn(
+        "group relative flex w-full items-center",
+        expanded ? "justify-start pr-2" : "justify-center"
+      )}
+    >
       <span
         aria-hidden
         className={cn(
@@ -583,28 +751,27 @@ function BridgeBubble({
           focused ? "h-6" : "h-2 group-hover:h-4"
         )}
       />
-      <Tooltip
-        portal
-          side="right"
-        label={
+      <RailRow
+        expanded={expanded}
+        onClick={onClick}
+        onContextMenu={onContextMenu}
+        ariaLabel={`${p.name} (bridged)`}
+        tooltip={
           <span className="flex flex-col gap-0.5 text-left">
             <span className="font-semibold text-text">{p.name}</span>
             <span className="text-[10px] text-success">· bridged</span>
           </span>
         }
-      >
-        <button
-          onClick={onClick}
-          onContextMenu={onContextMenu}
-          aria-label={`${p.name} (bridged)`}
-          className="relative flex h-10 w-10 items-center justify-center rounded-lg bg-bg-subtle text-[12px] font-bold leading-none ring-1 ring-success transition-colors hover:bg-bg-hover"
-        >
-          <span className="text-success">{monogram(p.name)}</span>
-          <span className="absolute -right-0.5 -top-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-bg text-success">
-            <Shield size={9} />
+        bubble={bubble}
+        label={
+          <span className="flex flex-col">
+            <span className="truncate text-[13px] font-medium text-text">
+              {p.name}
+            </span>
+            <span className="text-[10px] text-success">bridged</span>
           </span>
-        </button>
-      </Tooltip>
+        }
+      />
     </div>
   );
 }
@@ -638,28 +805,44 @@ function RailIconButton({
   children,
   label,
   active,
+  expanded,
   onClick,
 }: {
   children: React.ReactNode;
   label: string;
   active?: boolean;
+  expanded?: boolean;
   onClick: () => void;
 }) {
-  return (
-    <Tooltip portal
-          side="right" label={label}>
-      <button
-        onClick={onClick}
-        aria-label={label}
+  const btn = (
+    <button
+      onClick={onClick}
+      aria-label={label}
+      className={cn(
+        "flex items-center rounded-xl transition-colors",
+        expanded ? "w-full gap-2.5 px-2 py-1.5 text-left" : "h-9 w-9 justify-center",
+        active
+          ? "bg-accent-soft text-accent"
+          : "text-text-muted hover:bg-bg-hover hover:text-text"
+      )}
+    >
+      <span
         className={cn(
-          "flex h-9 w-9 items-center justify-center rounded-xl transition-colors",
-          active
-            ? "bg-accent-soft text-accent"
-            : "text-text-muted hover:bg-bg-hover hover:text-text"
+          "flex shrink-0 items-center justify-center",
+          expanded && "w-9"
         )}
       >
         {children}
-      </button>
+      </span>
+      {expanded && (
+        <span className="min-w-0 flex-1 truncate text-[12px]">{label}</span>
+      )}
+    </button>
+  );
+  if (expanded) return btn;
+  return (
+    <Tooltip portal side="right" label={label}>
+      {btn}
     </Tooltip>
   );
 }
