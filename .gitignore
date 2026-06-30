@@ -36,3 +36,7 @@ Thumbs.db
 .eslintcache
 *.png
 /.claude/skills
+
+# Generated demo screenshots — rebuild with `npm run shots` (already covered by
+# the global *.png rule above; listed explicitly so the intent is clear).
+docs/screenshots/*.png
