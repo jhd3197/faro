@@ -857,7 +857,7 @@ async fn handle_sessions(app: &AppHandle, state: &Arc<BridgeState>) -> (u16, Val
                 "name": p.name,
                 "host": p.host,
                 "protocol": sess.protocol(),
-                "canExec": matches!(&*sess, Session::Ssh(_)),
+                "canExec": matches!(&*sess, Session::Ssh(_) | Session::Agent(_)),
             }));
         }
     }
@@ -1081,7 +1081,7 @@ async fn handle_history(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) 
 
 // ---- Operation cores (shared by REST routes and MCP tools) ----
 
-/// Run a non-interactive shell command (SSH only).
+/// Run a non-interactive shell command on an SSH server or a Faro Agent machine.
 pub(crate) async fn exec_on(
     app: &AppHandle,
     state: &Arc<BridgeState>,
@@ -1090,13 +1090,19 @@ pub(crate) async fn exec_on(
     dry_run: bool,
 ) -> (u16, Value) {
     let manager = app.state::<AppState>().sessions.clone();
-    let Some(ssh) = manager.get_ssh(session_id).await else {
+
+    // Resolve which execable backend this session is. Both SSH servers and
+    // paired Faro Agent machines can run commands; other protocols cannot.
+    let (session_name, is_agent) = if let Some(ssh) = manager.get_ssh(session_id).await {
+        (ssh.profile.name.clone(), false)
+    } else if let Some(agent) = manager.get_agent(session_id).await {
+        (agent.profile.name.clone(), true)
+    } else {
         return (
             400,
-            json!({"error": "the requested connection is not an SSH session. Commands can only run on SSH/SFTP connections; use list_dir/read/download/upload for other protocols."}),
+            json!({"error": "the requested connection can't run commands. Exec works on SSH/SFTP and Faro Agent connections; use list_dir/read/download/upload for other protocols."}),
         );
     };
-    let session_name = ssh.profile.name.clone();
 
     if !state.is_enabled(session_id).await {
         return (403, json!({
@@ -1141,7 +1147,143 @@ pub(crate) async fn exec_on(
         return resp;
     }
 
-    exec_core(app, state, &ssh, session_id, &session_name, command, command).await
+    if is_agent {
+        let Some(agent) = manager.get_agent(session_id).await else {
+            return (400, json!({"error": "session went away"}));
+        };
+        exec_core_agent(app, state, &agent, session_id, &session_name, command).await
+    } else {
+        let Some(ssh) = manager.get_ssh(session_id).await else {
+            return (400, json!({"error": "session went away"}));
+        };
+        exec_core(app, state, &ssh, session_id, &session_name, command, command).await
+    }
+}
+
+/// Exec on a Faro Agent machine. The daemon runs the command natively (and
+/// enforces its own policy), so there's no PTY/pgid/streaming as with SSH — we
+/// emit the same live-console events (`exec-start` → `output` → terminal `job`)
+/// around a single request so the UI renders it identically, then log the audit
+/// line.
+async fn exec_core_agent(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    agent: &Arc<crate::session::AgentSession>,
+    session_id: &str,
+    session_name: &str,
+    command: &str,
+) -> (u16, Value) {
+    let op_id = Uuid::new_v4().to_string();
+    let started_at = now_millis();
+    let _ = app.emit(
+        "agent://exec-start",
+        json!({
+            "opId": op_id,
+            "sessionId": session_id,
+            "sessionName": session_name,
+            "command": command,
+        }),
+    );
+
+    let result = agent
+        .exec(command, MAX_EXEC_BYTES, EXEC_TIMEOUT.as_millis() as u64)
+        .await;
+
+    match result {
+        Ok(out) => {
+            if !out.stdout.is_empty() {
+                let _ = app.emit(
+                    "agent://output",
+                    json!({ "opId": op_id, "stream": "stdout", "chunk": out.stdout }),
+                );
+            }
+            if !out.stderr.is_empty() {
+                let _ = app.emit(
+                    "agent://output",
+                    json!({ "opId": op_id, "stream": "stderr", "chunk": out.stderr }),
+                );
+            }
+            let ok = !out.timed_out && out.exit_code.unwrap_or(0) == 0;
+            let status = if out.timed_out {
+                "timedout"
+            } else if ok {
+                "completed"
+            } else {
+                "failed"
+            };
+            // Finalize the live-console row.
+            let _ = app.emit(
+                "agent://job",
+                json!({
+                    "opId": op_id,
+                    "sessionId": session_id,
+                    "label": command,
+                    "pgid": Value::Null,
+                    "startedAt": started_at,
+                    "status": status,
+                    "exitCode": out.exit_code,
+                }),
+            );
+            let mut detail = command.to_string();
+            if out.truncated {
+                detail.push_str("  [output truncated]");
+            }
+            if out.timed_out {
+                detail.push_str("  [timed out]");
+            }
+            state
+                .log(
+                    app,
+                    ActivityEntry {
+                        id: op_id,
+                        session_id: session_id.to_string(),
+                        kind: "exec".into(),
+                        detail,
+                        ok,
+                        at: now_millis(),
+                    },
+                )
+                .await;
+            (
+                200,
+                json!({
+                    "stdout": out.stdout,
+                    "stderr": out.stderr,
+                    "exitCode": out.exit_code,
+                    "truncated": out.truncated,
+                    "timedOut": out.timed_out,
+                }),
+            )
+        }
+        Err(e) => {
+            let _ = app.emit(
+                "agent://job",
+                json!({
+                    "opId": op_id,
+                    "sessionId": session_id,
+                    "label": command,
+                    "pgid": Value::Null,
+                    "startedAt": started_at,
+                    "status": "failed",
+                    "exitCode": Value::Null,
+                }),
+            );
+            state
+                .log(
+                    app,
+                    ActivityEntry {
+                        id: op_id,
+                        session_id: session_id.to_string(),
+                        kind: "error".into(),
+                        detail: format!("{command} — {e}"),
+                        ok: false,
+                        at: now_millis(),
+                    },
+                )
+                .await;
+            (500, json!({"error": e.to_string()}))
+        }
+    }
 }
 
 /// Run a user-defined saved command by name. Pre-approved: it still requires the
@@ -1356,6 +1498,50 @@ pub(crate) async fn op_list_dir(
     }
 }
 
+/// Read a (text) file from a Faro Agent machine via the daemon, capped like the
+/// SFTP path. The gate has already run in `op_read_file`.
+async fn op_read_file_agent(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    agent: &Arc<crate::session::AgentSession>,
+    session_id: &str,
+    path: &str,
+) -> (u16, Value) {
+    use base64::Engine as _;
+    use faro_agent_proto::msg::{Request, Response};
+    let resp = agent
+        .request(Request::ReadFile { path: path.to_string(), max_bytes: MAX_READ_FILE as u64 })
+        .await;
+    match resp {
+        Ok(Response::File { data, bytes, truncated }) => {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(&data)
+                .unwrap_or_default();
+            let content = String::from_utf8_lossy(&decoded).to_string();
+            state
+                .log(
+                    app,
+                    activity("read", session_id, format!("read {path} ({bytes} bytes)"), true),
+                )
+                .await;
+            (200, json!({ "content": content, "bytes": bytes, "truncated": truncated }))
+        }
+        Ok(Response::Error { message, .. }) => {
+            state
+                .log(app, activity("error", session_id, format!("read {path} — {message}"), false))
+                .await;
+            (500, json!({"error": message}))
+        }
+        Ok(other) => (500, json!({"error": format!("unexpected reply: {other:?}")})),
+        Err(e) => {
+            state
+                .log(app, activity("error", session_id, format!("read {path} — {e}"), false))
+                .await;
+            (500, json!({"error": e.to_string()}))
+        }
+    }
+}
+
 pub(crate) async fn op_read_file(
     app: &AppHandle,
     state: &Arc<BridgeState>,
@@ -1363,10 +1549,25 @@ pub(crate) async fn op_read_file(
     path: &str,
 ) -> (u16, Value) {
     let manager = app.state::<AppState>().sessions.clone();
+
+    // A Faro Agent machine reads via the daemon; SSH via SFTP. Handle the agent
+    // case up front, then fall through to the SFTP path.
+    if let Some(agent) = manager.get_agent(session_id).await {
+        let name = agent.profile.name.clone();
+        if let Err(resp) = gate(
+            app, state, session_id, &name, OpClass::Read, "read", &format!("read {path}"), None,
+        )
+        .await
+        {
+            return resp;
+        }
+        return op_read_file_agent(app, state, &agent, session_id, path).await;
+    }
+
     let Some(ssh) = manager.get_ssh(session_id).await else {
         return (
             400,
-            json!({"error": "read_file currently supports SSH/SFTP sessions — use download for other protocols"}),
+            json!({"error": "read_file supports SSH/SFTP and Faro Agent sessions — use download for other protocols"}),
         );
     };
     let name = ssh.profile.name.clone();
@@ -2029,6 +2230,17 @@ async fn op_history(
 /// for the agent; failures are silently ignored and returned as null.
 async fn remote_context(app: &AppHandle, session_id: &str) -> Value {
     let manager = app.state::<AppState>().sessions.clone();
+    // A Faro Agent machine already reported its OS/shell/home at connect — hand
+    // those back directly so the AI writes commands for the right platform.
+    if let Some(agent) = manager.get_agent(session_id).await {
+        let info = &agent.system_info;
+        return json!({
+            "home": (!info.home_dir.is_empty()).then(|| info.home_dir.clone()),
+            "cwd": null,
+            "shell": (!info.shell.is_empty()).then(|| info.shell.clone()),
+            "os": (!info.os.is_empty()).then(|| info.os.clone()),
+        });
+    }
     let Some(ssh) = manager.get_ssh(session_id).await else {
         return json!({ "home": null, "cwd": null, "shell": null, "os": null });
     };
@@ -2086,7 +2298,8 @@ pub(crate) async fn op_server_info(
         return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
     };
     let p = sess.profile();
-    let remote = if matches!(&*sess, Session::Ssh(_)) {
+    let can_exec = matches!(&*sess, Session::Ssh(_) | Session::Agent(_));
+    let remote = if can_exec {
         remote_context(app, session_id).await
     } else {
         json!({ "home": null, "cwd": null, "shell": null, "os": null })
@@ -2100,7 +2313,7 @@ pub(crate) async fn op_server_info(
             "host": p.host,
             "port": p.port,
             "username": p.username,
-            "canExec": matches!(&*sess, Session::Ssh(_)),
+            "canExec": can_exec,
             "defaultRemotePath": p.default_remote_path,
             "remote": remote,
         }),
@@ -2122,7 +2335,7 @@ pub(crate) async fn op_context(app: &AppHandle, state: &Arc<BridgeState>) -> (u1
                 "name": p.name,
                 "protocol": sess.protocol(),
                 "host": p.host,
-                "canExec": matches!(&*sess, Session::Ssh(_)),
+                "canExec": matches!(&*sess, Session::Ssh(_) | Session::Agent(_)),
             }));
         }
     }
@@ -2271,7 +2484,7 @@ fn mcp_tools_list() -> Value {
             },
             {
                 "name": "faro_exec",
-                "description": "Run a diagnostic or status command on a connected SSH server in Faro — the user's own machine, which they have already authenticated to and authorized for agent access. This is equivalent to the user typing the command into Faro's built-in terminal. The user approves each command in Faro (or has pre-approved this kind in their settings). Returns stdout, stderr and exit code. SSH sessions only. Set dryRun=true to preview whether the command would need approval without running it.",
+                "description": "Run a diagnostic or status command on a connected computer in Faro — the user's own machine, which they have already authenticated to and authorized for agent access. Works on SSH servers and on Faro Agent machines (a paired Windows/macOS/Linux box running faro-agentd); on a Faro Agent machine the command runs in the daemon's native shell (PowerShell on Windows, sh elsewhere), so write commands for that OS — check faro_server_info for which. This is equivalent to the user typing the command into Faro's built-in terminal. The user approves each command in Faro (or has pre-approved this kind in their settings). Returns stdout, stderr and exit code. Set dryRun=true to preview whether the command would need approval without running it.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
