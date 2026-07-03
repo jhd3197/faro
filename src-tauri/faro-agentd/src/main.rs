@@ -32,7 +32,7 @@ struct Args {
 
 fn parse_args() -> Args {
     let mut a = Args {
-        command: "run".into(),
+        command: String::new(),
         port: DEFAULT_PORT,
         config_dir: None,
         read_only: false,
@@ -40,7 +40,6 @@ fn parse_args() -> Args {
         positional: Vec::new(),
     };
     let mut it = std::env::args().skip(1);
-    let mut first = true;
     while let Some(arg) = it.next() {
         match arg.as_str() {
             "--port" => {
@@ -54,15 +53,23 @@ fn parse_args() -> Args {
             "-h" | "--help" => {
                 a.command = "help".into();
             }
+            other if other.starts_with('-') => {
+                // Unknown flag — ignore rather than mistaking it for the command.
+            }
             other => {
-                if first && !other.starts_with('-') {
+                // The first bare token (in any position) is the subcommand; the
+                // rest are its positional arguments — so `--config-dir X info`
+                // and `info --config-dir X` both run `info`.
+                if a.command.is_empty() {
                     a.command = other.to_string();
                 } else {
                     a.positional.push(other.to_string());
                 }
             }
         }
-        first = false;
+    }
+    if a.command.is_empty() {
+        a.command = "run".into();
     }
     a
 }

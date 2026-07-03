@@ -167,6 +167,38 @@ Surface: `GET /health`, `GET /sessions`, `POST /exec`, and `POST /mcp` (MCP Stre
 | **Cloudflare R2** | ✓ | ✓ | ✓ | — |
 | **Backblaze B2** | ✓ | ✓ | ✓ | — |
 | **Azure Blob** | ✓ | ✓ | ✓ | — |
+| **Faro Agent** | ✓ | ✓ | ✓ | exec |
+
+## 🖥️ Faro Agent — control another machine
+
+Reach a whole computer — Windows, macOS, or Linux — the way you already drive a
+remote server, but **without setting up an SSH server** on it. Run the tiny
+headless daemon `faro-agentd` on the machine you want to control, pair it once
+with a 6-digit code (RustDesk-style), and it appears in Faro as a connection you
+can browse, transfer files through, and run native commands on. And because the
+[Agent Bridge](#-agent-bridge) brokers Faro's sessions to a local AI, this lets
+Claude Code run **PowerShell on your Windows box or `sh` on your Mac, from
+anywhere** — through one encrypted, pinned, policy-gated link.
+
+```bash
+# On the machine you want to control:
+faro-agentd pair          # prints a 6-digit code; keep it open
+# then in Faro: New Connection → Faro Agent → Scan local network (or type the IP)
+#               → enter the code → Pair.  Done — it's pinned; no code next time.
+
+faro-agentd run           # normal operation: serve paired controllers
+faro-agentd run --read-only   # browse + read + report, but no exec/writes
+faro-agentd info          # this machine's identity + who's paired
+```
+
+**How it's secured** — the link is a [Noise](https://noiseprotocol.org/)
+handshake (X25519 + ChaCha20-Poly1305), end-to-end encrypted independent of any
+relay. Pairing mixes the code in as a PSK so an active man-in-the-middle can't
+complete it; afterward both sides **pin each other's static key** and an
+unrecognised peer is refused. The controlled machine keeps its **own** policy
+(exec/write/read-only) and audit log, so a paired controller can never do more
+than its owner allowed. LAN discovery is mDNS; internet-wide reach (rendezvous +
+relay) is a later phase. See [`docs/remote-agent.md`](docs/remote-agent.md).
 
 ## Highlights
 
@@ -252,8 +284,8 @@ src-tauri/src/
   commands.rs              Tauri command surface
   bridge.rs                Agent Bridge — localhost MCP/HTTP server,
                            per-command approval, audit log
-  remotefs/                RemoteFs trait + Local / Sftp / Ftp / Object
-  session/                 SshSession, FtpSession, ObjectSession,
+  remotefs/                RemoteFs trait + Local / Sftp / Ftp / Object / Agent
+  session/                 SshSession, FtpSession, ObjectSession, AgentSession,
                            HostKeyVerifier trait, SessionManager
   terminal.rs              PTY over russh, emits events
   transfer.rs              Per-backend streaming transfers + progress
@@ -263,6 +295,11 @@ src-tauri/src/
 
 src-tauri/faro-cli/        Standalone CLI crate — path-depends on faro_lib
   src/main.rs              clap + indicatif: ls·cp·mv·rm·mkdir·sync·profiles
+
+src-tauri/faro-agent-proto/  Faro Agent wire protocol (Noise channel, msg set,
+                             identity/pairing) — Tauri-free, shared by both ends
+src-tauri/faro-agentd/       Headless daemon run on a controlled machine:
+  src/{server,ops,config,discovery}.rs  handshake·pin·policy·native exec+fs·mDNS
 ```
 
 ## Windows PATH gotcha
@@ -292,8 +329,8 @@ npm run tauri icon src-tauri/icons/source.png
 - **v1.1** — `faro-cli` binary
 - **v1.2** — edit-in-place external editor
 - **v1.3** — custom title bar with File/Edit/View/Help menus + integrated window controls; GitHub Actions release pipeline + CI
-- **unreleased** — UI density pass (named themes, command palette, sortable detail columns, breadcrumbs, in-pane filter, toasts) and the **🤖 Agent Bridge**: AI-agent command access over native MCP *(this)*
-- **next** — transfer speed limits, queue editing (priority/retry/pause), filename filters (`.gitignore`-style), WebDAV backend, search/filter
+- **unreleased** — UI density pass (named themes, command palette, sortable detail columns, breadcrumbs, in-pane filter, toasts); the **🤖 Agent Bridge** (AI-agent command access over native MCP); and **🖥️ Faro Agent** — control a paired Windows/macOS/Linux machine (browse, transfer, native exec) over an encrypted, pinned link, no SSH server required *(this)*
+- **next** — Faro Agent internet reach (rendezvous + NAT hole-punch + relay fallback), transfer speed limits, queue editing (priority/retry/pause), filename filters (`.gitignore`-style), WebDAV backend, search/filter
 - **release polish** — code signing (Apple Developer / Windows EV cert), Tauri auto-updater, landing page
 
 ## License

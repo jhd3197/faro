@@ -74,6 +74,8 @@ jobs:
           # Only the first version line of each manifest (the [package] one).
           sed -i '0,/^version = ".*"/s//version = "'"$version"'"/' src-tauri/Cargo.toml
           sed -i '0,/^version = ".*"/s//version = "'"$version"'"/' src-tauri/faro-cli/Cargo.toml
+          sed -i '0,/^version = ".*"/s//version = "'"$version"'"/' src-tauri/faro-agent-proto/Cargo.toml
+          sed -i '0,/^version = ".*"/s//version = "'"$version"'"/' src-tauri/faro-agentd/Cargo.toml
           sed -i -E "s/version-[0-9]+\.[0-9]+\.[0-9]+-/version-${version}-/" README.md || true
 
       - name: Commit, tag, push
@@ -259,9 +261,69 @@ jobs:
           gh release upload "${{ needs.prepare.outputs.tag }}" "dist/${{ matrix.asset }}" \
             --repo "${{ github.repository }}" --clobber
 
+  # ---- 3b. Faro Agent daemon binary (all platforms) -----------------------
+  daemon:
+    needs: [prepare, gui]
+    name: daemon (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            asset: faro-agentd-macos-arm64
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            asset: faro-agentd-macos-x86_64
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: faro-agentd-linux-x86_64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: faro-agentd-windows-x86_64.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      # faro-agentd depends ONLY on faro-agent-proto (no faro_lib / tauri), so
+      # unlike the cli job it needs no webkit/gtk system libs and no dist stub.
+      - name: Build faro-agentd
+        working-directory: src-tauri
+        run: cargo build --release -p faro-agentd --bin faro-agentd --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [ "${{ matrix.runner }}" = "windows-latest" ]; then
+            cp "src-tauri/target/${{ matrix.target }}/release/faro-agentd.exe" "dist/${{ matrix.asset }}"
+          else
+            cp "src-tauri/target/${{ matrix.target }}/release/faro-agentd" "dist/${{ matrix.asset }}"
+          fi
+
+      - name: Upload to draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release upload "${{ needs.prepare.outputs.tag }}" "dist/${{ matrix.asset }}" \
+            --repo "${{ github.repository }}" --clobber
+
   # ---- 4. Write the final notes and publish the release -------------------
   publish:
-    needs: [prepare, gui, cli]
+    needs: [prepare, gui, cli, daemon]
     runs-on: ubuntu-latest
     steps:
       - name: Compose download notes & publish
@@ -275,7 +337,7 @@ jobs:
           version="${{ needs.prepare.outputs.version }}"
           base="https://github.com/${REPO}/releases/download/${tag}"
 
-          mac=""; win=""; lin=""; cli=""
+          mac=""; win=""; lin=""; cli=""; daemon=""
           while IFS=$'\t' read -r name size; do
             [ -z "$name" ] && continue
             # human-readable size
@@ -288,6 +350,7 @@ jobs:
               *.dmg|*.app.tar.gz)      mac="${mac}${row}" ;;
               *-setup.exe|*.msi)       win="${win}${row}" ;;
               *.AppImage|*.deb|*.rpm)  lin="${lin}${row}" ;;
+              faro-agentd-*)           daemon="${daemon}${row}" ;;
               faro-cli-*)              cli="${cli}${row}" ;;
             esac
           done < <(gh release view "$tag" --repo "$REPO" \
@@ -337,6 +400,16 @@ jobs:
             printf '%s' "$cli"
             echo
             echo "> macOS CLI binary is unsigned too — \`xattr -c ./faro-cli-macos-arm64\` before the first run."
+            echo
+            echo "### 🖥️ Faro Agent daemon — \`faro-agentd\`"
+            echo
+            echo "Run this on a machine you want to control from Faro (Windows/macOS/Linux) — no SSH server needed. \`faro-agentd pair\` prints a code; enter it in Faro → New Connection → Faro Agent. Rename to \`faro-agentd\` (\`.exe\` on Windows), \`chmod +x\` on macOS/Linux."
+            echo
+            echo "| File | Size |"
+            echo "|------|------|"
+            printf '%s' "$daemon"
+            echo
+            echo "> Same unsigned-binary caveats as the CLI (macOS \`xattr -c\`, Windows SmartScreen). The link is end-to-end encrypted and key-pinned; the daemon keeps its own exec/write policy — see the [Faro Agent docs](https://github.com/${REPO}/blob/main/docs/remote-agent.md)."
             echo
             echo "---"
             echo "See the [README](https://github.com/${REPO}/blob/main/README.md) for the full feature tour and the Agent Bridge setup."
