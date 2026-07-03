@@ -12,7 +12,7 @@ license = "MIT"
 # main binary into the universal target dir, then the bundler fails trying to
 # copy the un-lipo'd second binary into Faro.app.
 [workspace]
-members = ["faro-cli"]
+members = ["faro-cli", "faro-agent-proto"]
 resolver = "2"
 
 [lib]

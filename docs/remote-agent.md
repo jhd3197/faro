@@ -1,0 +1,82 @@
+# Faro Remote Agent (Faro-to-Faro bridge)
+
+Control another machine — Windows, macOS, or Linux — from Faro, the way you
+already drive a remote server over SFTP/SSH, but **without installing or
+configuring an SSH server** on the target. You run a tiny headless daemon
+(`faro-agentd`) on the machine you want to reach, pair it once with a short code
+(RustDesk-style), and it shows up in Faro as a connection you can browse, run
+commands on, and transfer files through. Because Faro already brokers its live
+sessions to a local AI agent over the Agent Bridge, this immediately lets an AI
+model run Windows/macOS commands on any paired machine, from anywhere.
+
+## Pieces
+
+```
+┌───────────────────────┐         paired, end-to-end encrypted          ┌────────────────────────┐
+│  Faro (controller)    │◄────────── Noise XX / XXpsk3 over TCP ───────►│  faro-agentd (target)   │
+│  Session::Agent        │   len-prefixed, ChaChaPoly-encrypted frames   │  native exec + fs        │
+│  AgentFs : RemoteFs    │                                               │  own policy + audit log  │
+└─────────┬─────────────┘                                               └────────────────────────┘
+          │ Agent Bridge (localhost, existing)
+          ▼
+   local AI agent (Claude Code, Cursor, …)
+```
+
+Three new units, plus wiring into the existing app:
+
+1. **`faro-agent-proto`** — a dependency-light shared crate (no Tauri) with the
+   wire protocol: length-prefixed frames, the `Request`/`Response` message set,
+   an encrypted `SecureChannel` (Noise via `snow`), a persistent static-key
+   `Identity`, and the pairing handshake. Both the daemon and Faro depend on it.
+2. **`faro-agentd`** — the headless daemon binary that runs on the target
+   machine: loads/creates an identity, advertises over mDNS, accepts paired
+   peers, executes requests natively (PowerShell/cmd on Windows, `sh` elsewhere),
+   and enforces its **own** local policy + audit log so a compromised controller
+   can't silently do more than the machine's owner allowed.
+3. **`Session::Agent`** — a new session backend in Faro that speaks the protocol
+   as a client, plus `AgentFs : RemoteFs`, transfer arms, and bridge exec
+   routing, so the rest of the app treats a paired machine like any other
+   connection. A new `"faro-agent"` protocol appears in the connection UI with a
+   discovery list + 6-digit pairing flow.
+
+## Security model
+
+- **End-to-end encryption independent of any relay.** The channel is a Noise
+  handshake (`snow`, ChaChaPoly + SHA256 + X25519). A future rendezvous/relay
+  server can move bytes but can never read or inject commands.
+- **Pairing is an explicit consent ceremony.** The daemon prints a 6-digit code;
+  the controller must prove knowledge of it. The code is mixed into the handshake
+  as a PSK (`Noise_XXpsk3`) so it authenticates the channel (an active
+  man-in-the-middle has a different handshake hash and the PSK check fails).
+  After pairing, **both sides pin each other's static public key**; subsequent
+  connections use plain `Noise_XX` and verify the remote key equals the pin —
+  the code is never needed again and an unpinned peer is refused.
+- **The controlled machine keeps its own policy.** `faro-agentd` decides what it
+  will do (read-only, allow-exec, allow-write) regardless of what the controller
+  asks, and logs every operation. Pinned keys, policy, and the audit log persist
+  in the daemon's config dir.
+- **Transport still starts on the LAN.** v1 discovers peers over mDNS
+  (`_faro-agent._tcp`) and connects directly by IP:port — no servers, no port
+  forwarding for same-network machines. Internet-wide reach (rendezvous + NAT
+  hole-punch + relay fallback) is a later phase and a natural ServerKit upsell;
+  nothing in the crypto or message layer changes when it lands.
+
+## Message set (`faro-agent-proto`)
+
+`Request`/`Response` are serde-tagged enums exchanged as encrypted frames:
+
+| Request            | Does                                             |
+|--------------------|-------------------------------------------------|
+| `Ping`             | liveness                                         |
+| `SystemInfo`       | os, hostname, arch, shell, cwd                   |
+| `ListDir{path}`    | directory entries (name/kind/size/mtime/mode)    |
+| `Stat{path}`       | one entry's metadata                             |
+| `ReadFile{path,max}`| capped whole-file read (text preview)           |
+| `ReadChunk{path,offset,len}` | ranged read (download streaming)       |
+| `WriteChunk{path,offset,data,truncate,done}` | ranged write (upload)  |
+| `Delete{path,recursive}` / `CreateDir` / `Rename` / `Chmod` | fs mutations |
+| `Exec{command,timeoutMs,maxBytes}` | run a native shell command       |
+
+Every logical message is JSON, split into ≤64 KiB Noise segments (each with a
+continuation flag) so large directory listings and file chunks stream safely
+under Noise's per-message size limit.
