@@ -29,6 +29,8 @@ import type {
   AgentExecStart,
   AgentOutput,
   SavedCommand,
+  DiscoveredAgent,
+  AgentPairResult,
 } from "./types";
 
 // Typed wrappers around the Tauri command surface. The string names must match
@@ -47,6 +49,19 @@ export const ipc = {
 
   disconnect: (sessionId: SessionId) =>
     invoke<void>("disconnect", { sessionId }),
+
+  // ---- Faro Agent (Faro-to-Faro remote control) ----
+
+  /** Browse the LAN for faro-agentd daemons over mDNS (best-effort). */
+  discoverAgents: () => invoke<DiscoveredAgent[]>("discover_agents"),
+
+  /** This controller's own agent public key, for the pairing UI. */
+  agentPublicKey: () => invoke<string>("agent_public_key"),
+
+  /** Pair a Faro Agent profile with a one-time 6-digit code, pinning the
+   *  daemon's key into the profile. */
+  pairAgent: (profileId: string, code: string) =>
+    invoke<AgentPairResult>("pair_agent", { profileId, code }),
 
   listDirectory: (sessionId: SessionId, path: string) =>
     invoke<DirEntry[]>("list_directory", { sessionId, path }),

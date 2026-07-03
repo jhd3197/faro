@@ -6,7 +6,7 @@ export type AuthMethod =
   | { kind: "key"; path: string; passphrase?: string }
   | { kind: "agent" };
 
-export type Protocol = "sftp" | "ftp" | "ftps" | "s3" | "azure";
+export type Protocol = "sftp" | "ftp" | "ftps" | "s3" | "azure" | "faro-agent";
 
 export interface ConnectionProfile {
   id: string;
@@ -25,6 +25,9 @@ export interface ConnectionProfile {
   region?: string;
   endpoint?: string;
   account?: string; // Azure storage account name
+  // Faro Agent (protocol === "faro-agent"): the paired daemon's pinned public
+  // key (base64). Present === paired; absent === still needs a pairing code.
+  agentKey?: string;
 }
 
 export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {
@@ -33,6 +36,7 @@ export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {
   ftps: 21,
   s3: 443,
   azure: 443,
+  "faro-agent": 8722,
 };
 
 export const PROTOCOL_LABEL: Record<Protocol, string> = {
@@ -41,10 +45,34 @@ export const PROTOCOL_LABEL: Record<Protocol, string> = {
   ftps: "FTPS",
   s3: "S3",
   azure: "Azure",
+  "faro-agent": "Faro Agent",
 };
 
 export function isObjectProtocol(p: Protocol): boolean {
   return p === "s3" || p === "azure";
+}
+
+/** A Faro Agent connection controls a whole remote machine, not a login on a
+ *  server — it has no username/auth, and is paired with a code instead. */
+export function isAgentProtocol(p: Protocol): boolean {
+  return p === "faro-agent";
+}
+
+/** A daemon found on the LAN by mDNS discovery (mirrors Discovered in Rust). */
+export interface DiscoveredAgent {
+  hostname: string;
+  host: string;
+  port: number;
+  fingerprint: string;
+  os: string;
+  version: string;
+}
+
+/** Result of a successful pairing (mirrors AgentPairResult in Rust). */
+export interface AgentPairResult {
+  fingerprint: string;
+  hostname: string;
+  os: string;
 }
 
 // ---- Importers ----

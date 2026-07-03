@@ -7,10 +7,12 @@ import {
   PROTOCOL_LABEL,
   S3_PROVIDER_PRESETS,
   isObjectProtocol,
+  isAgentProtocol,
   type AuthMethod,
   type ConnectionProfile,
   type Protocol,
   type S3Provider,
+  type DiscoveredAgent,
 } from "@/lib/types";
 import {
   ShieldCheck,
@@ -21,9 +23,15 @@ import {
   EyeOff,
   Wand2,
   Check,
+  MonitorSmartphone,
+  Radar,
+  Loader2,
+  Link2,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { generatePassword } from "@/lib/password";
+import { ipc } from "@/lib/ipc";
+import { toast } from "@/stores/toastStore";
 
 interface Props {
   profile: ConnectionProfile | null;
@@ -48,8 +56,13 @@ export function ProfileEditor({ profile, onClose }: Props) {
   const saveProfile = useConnections((s) => s.saveProfile);
   const defaultPort = useSettings((s) => s.defaultPort);
 
+  // Stable id for the lifetime of the editor, so pairing (which persists to this
+  // id) and a later Save target the same profile.
+  const [id] = useState(profile?.id ?? genId());
   const [name, setName] = useState(profile?.name ?? "");
   const [protocol, setProtocol] = useState<Protocol>(profile?.protocol ?? "sftp");
+  // Faro Agent: the pinned daemon key. Set by pairing; carried through Save.
+  const [agentKey, setAgentKey] = useState<string | undefined>(profile?.agentKey);
   const [host, setHost] = useState(profile?.host ?? "");
   const [port, setPort] = useState(profile?.port ?? defaultPort);
   const [portTouched, setPortTouched] = useState<boolean>(!!profile?.port);
@@ -112,8 +125,11 @@ export function ProfileEditor({ profile, onClose }: Props) {
   const isS3 = protocol === "s3";
   const isAzure = protocol === "azure";
   const isObject = isObjectProtocol(protocol);
+  const isAgent = isAgentProtocol(protocol);
 
-  const save = async () => {
+  /// Build the profile from the current form state. Shared by Save and by the
+  /// pairing flow (which must persist the profile before it can pair by id).
+  const buildProfile = (): ConnectionProfile => {
     let auth: AuthMethod;
     if (authKind === "password") {
       auth = { kind: "password", password };
@@ -122,21 +138,22 @@ export function ProfileEditor({ profile, onClose }: Props) {
     } else {
       auth = { kind: "agent" };
     }
-
-    const next: ConnectionProfile = {
-      id: profile?.id ?? genId(),
+    return {
+      id,
       name:
         name ||
         (isS3
           ? `${bucket}@${s3Provider}`
           : isAzure
             ? `${azureAccount}/${bucket}`
-            : `${username}@${host}`),
+            : isAgent
+              ? `Agent @ ${host}`
+              : `${username}@${host}`),
       protocol,
       host: isObject ? endpoint || (isAzure ? "blob.core.windows.net" : "s3.amazonaws.com") : host,
       port,
-      username: isAzure ? azureAccount : username,
-      auth,
+      username: isAzure ? azureAccount : isAgent ? "" : username,
+      auth: isAgent ? { kind: "password", password: "" } : auth,
       defaultRemotePath: defaultRemotePath || undefined,
       color: profile?.color,
       autoConnect: autoConnect || undefined,
@@ -144,23 +161,45 @@ export function ProfileEditor({ profile, onClose }: Props) {
       region: isS3 ? region : undefined,
       endpoint: isObject ? endpoint || undefined : undefined,
       account: isAzure ? azureAccount : undefined,
+      agentKey: isAgent ? agentKey : undefined,
     };
-    await saveProfile(next);
+  };
+
+  const save = async () => {
+    await saveProfile(buildProfile());
     onClose();
+  };
+
+  /// Pair with the daemon at host:port using a 6-digit code. Persists the profile
+  /// first (pairing pins the key onto this id server-side), then re-reads the
+  /// stored key so a later Save keeps it.
+  const pair = async (code: string): Promise<void> => {
+    await saveProfile(buildProfile());
+    const res = await ipc.pairAgent(id, code);
+    const saved = (await ipc.listProfiles()).find((p) => p.id === id);
+    setAgentKey(saved?.agentKey);
+    toast.success(
+      `Paired with ${res.hostname || host}`,
+      `${res.os} · ${res.fingerprint}`
+    );
   };
 
   const canSave = isS3
     ? !!bucket && !!username && !!password
     : isAzure
       ? !!azureAccount && !!bucket && !!password
-      : !!host && !!username;
+      : isAgent
+        ? !!host && !!agentKey
+        : !!host && !!username;
   // Name what's still required so a disabled Save isn't a dead end.
   const missing = (
     isS3
       ? [!bucket && "bucket", !username && "access key ID", !password && "secret key"]
       : isAzure
         ? [!azureAccount && "account", !bucket && "container", !password && "access key"]
-        : [!host && "host", !username && "username"]
+        : isAgent
+          ? [!host && "host", !agentKey && "pairing"]
+          : [!host && "host", !username && "username"]
   ).filter(Boolean);
 
   return (
@@ -186,8 +225,8 @@ export function ProfileEditor({ profile, onClose }: Props) {
         </Field>
 
         <Field label="Protocol">
-          <div className="grid grid-cols-5 gap-1 rounded-md border border-border bg-bg-subtle p-1">
-            {(["sftp", "ftp", "ftps", "s3", "azure"] as Protocol[]).map((p) => (
+          <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-bg-subtle p-1">
+            {(["sftp", "ftp", "ftps", "s3", "azure", "faro-agent"] as Protocol[]).map((p) => (
               <ProtocolButton
                 key={p}
                 active={protocol === p}
@@ -224,6 +263,17 @@ export function ProfileEditor({ profile, onClose }: Props) {
             setAccessKey={setPassword}
             endpoint={endpoint}
             setEndpoint={setEndpoint}
+          />
+        ) : isAgent ? (
+          <AgentSection
+            host={host}
+            setHost={setHost}
+            port={port}
+            setPort={setPort}
+            setPortTouched={setPortTouched}
+            paired={!!agentKey}
+            onPair={pair}
+            onUnpair={() => setAgentKey(undefined)}
           />
         ) : (
           <>
@@ -379,6 +429,182 @@ export function ProfileEditor({ profile, onClose }: Props) {
         </div>
       </div>
     </div>
+  );
+}
+
+/// Faro Agent connection editor: host/port, LAN discovery, and the pairing
+/// ceremony. Controls a whole remote machine (no login/auth) — it's paired once
+/// with a 6-digit code the daemon prints, then keyed by the pinned daemon key.
+function AgentSection({
+  host,
+  setHost,
+  port,
+  setPort,
+  setPortTouched,
+  paired,
+  onPair,
+  onUnpair,
+}: {
+  host: string;
+  setHost: (v: string) => void;
+  port: number;
+  setPort: (v: number) => void;
+  setPortTouched: (v: boolean) => void;
+  paired: boolean;
+  onPair: (code: string) => Promise<void>;
+  onUnpair: () => void;
+}) {
+  const [code, setCode] = useState("");
+  const [pairing, setPairing] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [found, setFound] = useState<DiscoveredAgent[] | null>(null);
+
+  const scan = async () => {
+    setScanning(true);
+    try {
+      setFound(await ipc.discoverAgents());
+    } catch (e) {
+      toast.error("Scan failed", String(e));
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  const doPair = async () => {
+    setPairing(true);
+    try {
+      await onPair(code.trim());
+      setCode("");
+    } catch (e) {
+      toast.error("Pairing failed", String(e));
+    } finally {
+      setPairing(false);
+    }
+  };
+
+  const codeValid = /^\d{6}$/.test(code.trim());
+
+  return (
+    <>
+      <div className="flex gap-2">
+        <Field label="Host / IP" className="flex-1">
+          <input
+            value={host}
+            onChange={(e) => setHost(e.target.value)}
+            placeholder="192.168.1.42"
+            className={inputCls}
+          />
+        </Field>
+        <Field label="Port" className="w-24">
+          <input
+            type="number"
+            value={port}
+            onChange={(e) => {
+              setPort(parseInt(e.target.value) || PROTOCOL_DEFAULT_PORT["faro-agent"]);
+              setPortTouched(true);
+            }}
+            className={inputCls}
+          />
+        </Field>
+      </div>
+
+      {/* LAN discovery */}
+      <div className="mb-3">
+        <button
+          type="button"
+          onClick={scan}
+          disabled={scanning}
+          className="flex items-center gap-1.5 rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-xs text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-50"
+        >
+          {scanning ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : (
+            <Radar size={12} />
+          )}
+          {scanning ? "Scanning…" : "Scan local network"}
+        </button>
+        {found && found.length === 0 && (
+          <div className="mt-1.5 text-[11px] text-text-dim">
+            No Faro Agents found. Make sure <span className="font-mono">faro-agentd</span>{" "}
+            is running on the target machine, or enter its IP above.
+          </div>
+        )}
+        {found && found.length > 0 && (
+          <div className="mt-1.5 flex flex-col gap-1">
+            {found.map((d) => (
+              <button
+                key={d.fingerprint + d.host}
+                type="button"
+                onClick={() => {
+                  setHost(d.host);
+                  setPort(d.port);
+                  setPortTouched(true);
+                }}
+                className="flex items-center justify-between rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-left text-xs hover:bg-bg-hover"
+              >
+                <span className="min-w-0">
+                  <span className="block truncate font-medium text-text">
+                    {d.hostname || d.host}
+                  </span>
+                  <span className="block truncate text-[10px] text-text-dim">
+                    {d.os} · {d.host}:{d.port} · {d.fingerprint}
+                  </span>
+                </span>
+                <MonitorSmartphone size={13} className="shrink-0 text-text-dim" />
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Pairing */}
+      {paired ? (
+        <div className="mb-3 flex items-center justify-between rounded-md border border-success/30 bg-success/10 px-2.5 py-2">
+          <span className="flex items-center gap-1.5 text-xs text-text">
+            <Check size={13} className="text-success" />
+            Paired — the daemon's key is pinned.
+          </span>
+          <button
+            type="button"
+            onClick={onUnpair}
+            className="text-[11px] text-text-dim underline hover:text-text"
+          >
+            Re-pair
+          </button>
+        </div>
+      ) : (
+        <div className="mb-3 rounded-md border border-border bg-bg-subtle p-2.5">
+          <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-text">
+            <Link2 size={13} className="text-accent" />
+            Pair with this machine
+          </div>
+          <div className="mb-2 text-[11px] leading-relaxed text-text-dim">
+            On the target machine run{" "}
+            <span className="font-mono text-text-muted">faro-agentd pair</span> and
+            type the 6-digit code it prints below. Pairing sets up an end-to-end
+            encrypted link and pins the machine's key — you won't need the code again.
+          </div>
+          <div className="flex gap-2">
+            <input
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+              placeholder="000000"
+              inputMode="numeric"
+              className={cn(inputCls, "flex-1 text-center font-mono tracking-[0.3em]")}
+            />
+            <button
+              type="button"
+              onClick={doPair}
+              disabled={!codeValid || !host || pairing}
+              className="btn-accent flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {pairing && <Loader2 size={13} className="animate-spin" />}
+              Pair
+            </button>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -567,6 +793,8 @@ function protocolHint(p: Protocol): string {
       return "Object · :443";
     case "azure":
       return "Blob · :443";
+    case "faro-agent":
+      return "Machine · :8722";
   }
 }
 
@@ -585,6 +813,7 @@ function ProtocolButton({
   if (label === "FTPS") Icon = ShieldCheck;
   else if (label === "FTP") Icon = ShieldOff;
   else if (label === "S3" || label === "Azure") Icon = Cloud;
+  else if (label === "Faro Agent") Icon = MonitorSmartphone;
   return (
     <button
       type="button"

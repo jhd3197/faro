@@ -558,6 +558,8 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
                 {liveSessions.map(({ sessionId, profile }) => {
                   const p = profile!;
                   const isSsh = p.protocol === "sftp";
+                  const isAgent = p.protocol === "faro-agent";
+                  const canExec = isSsh || isAgent;
                   const isObject = p.protocol === "s3" || p.protocol === "azure";
                   return (
                     <div
@@ -580,12 +582,20 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
                         <div className="truncate font-mono text-[11px] text-text-dim">
                           {isObject
                             ? `${p.protocol}://${p.bucket ?? "?"}`
-                            : `${p.username}@${p.host}`}
+                            : isAgent
+                              ? p.host
+                              : `${p.username}@${p.host}`}
                         </div>
-                        {!isSsh && (
+                        {isAgent ? (
                           <div className="mt-0.5 text-[11px] text-text-dim">
-                            File ops only — exec needs an SSH session.
+                            Full machine — the agent can run commands here.
                           </div>
+                        ) : (
+                          !canExec && (
+                            <div className="mt-0.5 text-[11px] text-text-dim">
+                              File ops only — exec needs an SSH or Faro Agent session.
+                            </div>
+                          )
                         )}
                       </div>
                       <Toggle

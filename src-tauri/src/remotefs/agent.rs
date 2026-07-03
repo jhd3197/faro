@@ -102,15 +102,19 @@ impl RemoteFs for AgentFs {
     }
 
     fn capabilities(&self) -> Capabilities {
-        // A Faro Agent runs native shell commands — that's the whole point — so
-        // `has_shell` is true. chmod only means something on a POSIX daemon.
+        // `has_shell` gates *interactive* UI affordances — the "open terminal
+        // here" PTY and server-side archiving — which the daemon doesn't
+        // implement (there's no PTY channel). It's false so those buttons don't
+        // appear and fail. This does NOT affect the AI's exec: the Agent Bridge
+        // runs commands through the daemon's own exec path, gated by `canExec`,
+        // independent of this flag. chmod only means something on a POSIX daemon.
         let is_unix = self.session.system_info.os != "windows";
         Capabilities {
             can_chmod: is_unix,
             can_symlink: false,
             can_rename: true,
             has_directories: true,
-            has_shell: true,
+            has_shell: false,
         }
     }
 }

@@ -39,7 +39,7 @@ type RowState = "focused" | "connected" | "connecting" | "error" | "idle";
 
 // Servers sort by protocol (SFTP first — the primary use), then by name, so the
 // rail order stays learnable as connections come and go.
-const GROUP_ORDER: Protocol[] = ["sftp", "ftps", "ftp", "s3", "azure"];
+const GROUP_ORDER: Protocol[] = ["sftp", "ftps", "ftp", "s3", "azure", "faro-agent"];
 
 const fallbackColor = "rgb(var(--accent))";
 
@@ -48,6 +48,8 @@ function profileAddress(p: ConnectionProfile): string {
   if (p.protocol === "azure") return `az://${p.account ?? "?"}/${p.bucket ?? "?"}`;
   const port =
     p.port !== PROTOCOL_DEFAULT_PORT[p.protocol] ? `:${p.port}` : "";
+  // A Faro Agent connection controls a machine, not a login — no username.
+  if (p.protocol === "faro-agent") return `${p.host}${port}`;
   return `${p.username}@${p.host}${port}`;
 }
 
