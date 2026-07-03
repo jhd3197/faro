@@ -75,6 +75,7 @@ impl ProfilePreview {
             region: None,
             endpoint: None,
             account: None,
+            agent_key: None,
         }
     }
 }

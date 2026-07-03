@@ -47,6 +47,11 @@ pub struct ConnectionProfile {
     // and `bucket` doubles as the container. For S3, both stay absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    // Faro Agent (protocol "faro-agent") specific: the daemon's pinned static
+    // public key (base64), learned at pairing time. Its presence means this
+    // profile is paired; absence means the user still needs to pair with a code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_key: Option<String>,
 }
 
 // Plain JSON file in the app data dir. v0.2 moves secrets into the OS

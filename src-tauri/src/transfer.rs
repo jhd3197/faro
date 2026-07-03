@@ -243,11 +243,74 @@ impl TransferManager {
                     )
                     .await
                 }
+                Session::Agent(agent) => {
+                    mgr.run_agent_download(
+                        &id_for_task,
+                        agent.clone(),
+                        &remote_path,
+                        &final_path,
+                        &app,
+                    )
+                    .await
+                }
             };
             finalize(&mgr, &id_for_task, &app, res).await;
         });
         self.tasks.lock().await.insert(id.clone(), task);
         Ok(id)
+    }
+
+    /// Stream a download from a Faro Agent daemon by ranged `ReadChunk`s. The
+    /// daemon caps each chunk; we advance the offset until it reports EOF.
+    async fn run_agent_download(
+        &self,
+        id: &str,
+        session: Arc<crate::session::AgentSession>,
+        remote_path: &str,
+        local_path: &Path,
+        app: &AppHandle,
+    ) -> Result<()> {
+        use base64::Engine as _;
+        use faro_agent_proto::msg::{Request, Response};
+        self.update(id, |t| t.status = TransferStatus::Transferring).await;
+
+        let mut local_file = tokio::fs::File::create(local_path)
+            .await
+            .with_context(|| format!("create {}", local_path.display()))?;
+        let mut offset: u64 = 0;
+        let mut last_emit = Instant::now();
+        loop {
+            let resp = session
+                .request(Request::ReadChunk { path: remote_path.to_string(), offset, len: 0 })
+                .await?;
+            let (data_b64, eof) = match resp {
+                Response::Chunk { data, eof } => (data, eof),
+                Response::Error { message, .. } => {
+                    return Err(anyhow::anyhow!("download {remote_path}: {message}"))
+                }
+                other => return Err(anyhow::anyhow!("download {remote_path}: unexpected {other:?}")),
+            };
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(&data_b64)
+                .context("decode chunk")?;
+            if !bytes.is_empty() {
+                local_file.write_all(&bytes).await?;
+                offset += bytes.len() as u64;
+                if last_emit.elapsed() > Duration::from_millis(100) {
+                    self.update(id, |t| t.transferred = offset).await;
+                    if let Some(t) = self.get(id).await {
+                        let _ = app.emit("transfer://progress", &t);
+                    }
+                    last_emit = Instant::now();
+                }
+            }
+            if eof {
+                break;
+            }
+        }
+        local_file.flush().await?;
+        self.update(id, |t| t.transferred = offset).await;
+        Ok(())
     }
 
     async fn run_ssh_download(
@@ -375,11 +438,80 @@ impl TransferManager {
                     )
                     .await
                 }
+                Session::Agent(agent) => {
+                    mgr.run_agent_upload(
+                        &id_for_task,
+                        agent.clone(),
+                        &local,
+                        &final_remote,
+                        &app,
+                    )
+                    .await
+                }
             };
             finalize(&mgr, &id_for_task, &app, res).await;
         });
         self.tasks.lock().await.insert(id.clone(), task);
         Ok(id)
+    }
+
+    /// Stream an upload to a Faro Agent daemon by ranged `WriteChunk`s. The first
+    /// chunk truncates/creates the file; subsequent chunks append at the offset.
+    async fn run_agent_upload(
+        &self,
+        id: &str,
+        session: Arc<crate::session::AgentSession>,
+        local_path: &Path,
+        remote_path: &str,
+        app: &AppHandle,
+    ) -> Result<()> {
+        use base64::Engine as _;
+        use faro_agent_proto::msg::{Request, Response};
+        self.update(id, |t| t.status = TransferStatus::Transferring).await;
+
+        let mut local_file = tokio::fs::File::open(local_path)
+            .await
+            .with_context(|| format!("open {}", local_path.display()))?;
+        // 128 KiB plaintext keeps each request comfortably under the daemon's
+        // per-chunk cap while amortising the round-trip.
+        let mut buf = vec![0u8; 128 * 1024];
+        let mut offset: u64 = 0;
+        let mut first = true;
+        let mut last_emit = Instant::now();
+        loop {
+            let n = local_file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            let data = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
+            let resp = session
+                .request(Request::WriteChunk {
+                    path: remote_path.to_string(),
+                    offset,
+                    data,
+                    truncate: first,
+                    done: false,
+                })
+                .await?;
+            match resp {
+                Response::Written { .. } => {}
+                Response::Error { message, .. } => {
+                    return Err(anyhow::anyhow!("upload {remote_path}: {message}"))
+                }
+                other => return Err(anyhow::anyhow!("upload {remote_path}: unexpected {other:?}")),
+            }
+            offset += n as u64;
+            first = false;
+            if last_emit.elapsed() > Duration::from_millis(100) {
+                self.update(id, |t| t.transferred = offset).await;
+                if let Some(t) = self.get(id).await {
+                    let _ = app.emit("transfer://progress", &t);
+                }
+                last_emit = Instant::now();
+            }
+        }
+        self.update(id, |t| t.transferred = offset).await;
+        Ok(())
     }
 
     async fn run_ssh_upload(
@@ -784,6 +916,19 @@ fn fs_for_session(session: &Arc<Session>) -> Box<dyn crate::remotefs::RemoteFs> 
         Session::Object(obj) => {
             Box::new(crate::remotefs::object::ObjectFs::new(obj.clone()))
         }
+        Session::Agent(agent) => Box::new(crate::remotefs::agent::AgentFs::new(agent.clone())),
+    }
+}
+
+/// Stat a path on a Faro Agent daemon, returning its size and whether it exists.
+async fn agent_stat(
+    session: &Arc<crate::session::AgentSession>,
+    path: &str,
+) -> (u64, bool) {
+    use faro_agent_proto::msg::{Request, Response};
+    match session.request(Request::Stat { path: path.to_string() }).await {
+        Ok(Response::Stat { entry }) => (entry.size, true),
+        _ => (0, false),
     }
 }
 
@@ -815,6 +960,7 @@ async fn remote_size(session: &Arc<Session>, path: &str) -> Result<u64> {
                 .with_context(|| format!("object head {key}"))?;
             Ok(meta.size as u64)
         }
+        Session::Agent(agent) => Ok(agent_stat(agent, path).await.0),
     }
 }
 
@@ -881,6 +1027,25 @@ async fn remote_resolve(
                         let key = candidate.trim_start_matches('/');
                         let p = object_store::path::Path::from(key);
                         if obj.store.head(&p).await.is_err() {
+                            break;
+                        }
+                    }
+                    (candidate, false)
+                }
+            })
+        }
+        Session::Agent(agent) => {
+            let (_, exists) = agent_stat(agent, initial_remote).await;
+            Ok(match policy {
+                OverwritePolicy::Overwrite => (initial_remote.to_string(), false),
+                OverwritePolicy::Skip => (initial_remote.to_string(), exists),
+                OverwritePolicy::Rename if !exists => (initial_remote.to_string(), false),
+                OverwritePolicy::Rename => {
+                    let mut candidate = initial_remote.to_string();
+                    for i in 1..=999 {
+                        let (stem, ext) = split_ext(initial_remote);
+                        candidate = format!("{stem}_{i}{ext}");
+                        if !agent_stat(agent, &candidate).await.1 {
                             break;
                         }
                     }

@@ -1,5 +1,7 @@
+pub mod agent;
 pub mod ftp;
 pub mod object;
+pub use agent::{agent_pair, AgentSession};
 pub use ftp::{ftp_connect, FtpSession};
 pub use object::{object_connect, ObjectSession};
 
@@ -1363,6 +1365,7 @@ pub enum Session {
     Ssh(Arc<SshSession>),
     Ftp(Arc<FtpSession>),
     Object(Arc<ObjectSession>),
+    Agent(Arc<AgentSession>),
 }
 
 impl Session {
@@ -1371,6 +1374,7 @@ impl Session {
             Self::Ssh(s) => &s.profile,
             Self::Ftp(s) => &s.profile,
             Self::Object(s) => &s.profile,
+            Self::Agent(s) => &s.profile,
         }
     }
 
@@ -1379,6 +1383,7 @@ impl Session {
             Self::Ssh(_) => "sftp",
             Self::Ftp(_) => "ftp",
             Self::Object(s) => s.profile.protocol.as_str(),
+            Self::Agent(_) => "faro-agent",
         }
     }
 }
@@ -1453,6 +1458,11 @@ impl SessionManager {
                 let id = obj.id.clone();
                 (id, Session::Object(Arc::new(obj)))
             }
+            "faro-agent" => {
+                let agent = AgentSession::connect(profile).await?;
+                let id = agent.id.clone();
+                (id, Session::Agent(Arc::new(agent)))
+            }
             other => return Err(anyhow!("unsupported protocol: {other}")),
         };
         let (id, sess) = session;
@@ -1473,6 +1483,18 @@ impl SessionManager {
         match self.sessions.lock().await.get(id) {
             Some(s) => match &**s {
                 Session::Ssh(ssh) => Some(ssh.clone()),
+                _ => None,
+            },
+            None => None,
+        }
+    }
+
+    /// Convenience accessor for a Faro Agent session (e.g. the bridge routing an
+    /// exec to a paired daemon). None if the session is another protocol/missing.
+    pub async fn get_agent(&self, id: &str) -> Option<Arc<AgentSession>> {
+        match self.sessions.lock().await.get(id) {
+            Some(s) => match &**s {
+                Session::Agent(a) => Some(a.clone()),
                 _ => None,
             },
             None => None,
@@ -1506,6 +1528,9 @@ impl SessionManager {
                 }
                 Session::Object(_) => {
                     // Object stores are stateless HTTP — nothing to close.
+                }
+                Session::Agent(agent) => {
+                    agent.disconnect().await;
                 }
             }
         }

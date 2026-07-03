@@ -39,6 +39,11 @@ russh = "0.45"
 russh-keys = "0.45"
 russh-sftp = "2.0"
 
+# Faro Agent (Faro-to-Faro remote control) — shared wire protocol + encrypted
+# channel. mdns-sd powers LAN discovery of paired daemons.
+faro-agent-proto = { path = "faro-agent-proto" }
+mdns-sd = "0.11"
+
 # FTP / FTPS — sync API, driven from tokio via spawn_blocking.
 suppaftp = { version = "6", features = ["native-tls"] }
 

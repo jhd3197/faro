@@ -76,6 +76,59 @@ pub async fn disconnect(
     state.sessions.disconnect(&session_id).await.map_err(err)
 }
 
+// ---------- Faro Agent (Faro-to-Faro remote control) ----------
+
+/// Discover `faro-agentd` daemons on the local network over mDNS. Best-effort;
+/// returns an empty list on a network without multicast rather than erroring.
+#[tauri::command]
+pub async fn discover_agents() -> Result<Vec<crate::session::agent::discovery::Discovered>, String> {
+    Ok(crate::session::agent::discovery::browse(Duration::from_millis(1500)).await)
+}
+
+/// This controller's own agent public key (base64). Shown in the pairing UI so a
+/// user can eyeball which controller a daemon just pinned.
+#[tauri::command]
+pub async fn agent_public_key() -> Result<String, String> {
+    crate::session::agent::controller_public_key().map_err(err)
+}
+
+/// Result of pairing, surfaced to the UI to confirm the machine.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPairResult {
+    pub fingerprint: String,
+    pub hostname: String,
+    pub os: String,
+}
+
+/// Pair with a `faro-agentd` at `host:port` using a one-time `code`, then persist
+/// the daemon's pinned key into the profile so subsequent connects are keyed. The
+/// profile must already exist (created by the connection form) and use protocol
+/// `"faro-agent"`.
+#[tauri::command]
+pub async fn pair_agent(
+    profile_id: String,
+    code: String,
+    state: State<'_, AppState>,
+) -> Result<AgentPairResult, String> {
+    let mut profile = state
+        .profiles
+        .get(&profile_id)
+        .await
+        .map_err(err)?
+        .ok_or_else(|| format!("profile {profile_id} not found"))?;
+    let outcome = crate::session::agent_pair(&profile.host, profile.port, &code)
+        .await
+        .map_err(err)?;
+    profile.agent_key = Some(outcome.server_key);
+    state.profiles.upsert(profile).await.map_err(err)?;
+    Ok(AgentPairResult {
+        fingerprint: outcome.fingerprint,
+        hostname: outcome.system_info.hostname,
+        os: outcome.system_info.os,
+    })
+}
+
 /// List the in-flight tracked commands (agent/bridge `exec`s, tails) running on a
 /// session, so the UI can show a Jobs panel with a Kill button. Returns an empty
 /// list for a non-SSH or unknown session rather than erroring.
@@ -398,6 +451,7 @@ pub fn fs_for_session(session: &Arc<Session>) -> Box<dyn RemoteFs> {
         Session::Object(obj) => {
             Box::new(crate::remotefs::object::ObjectFs::new(obj.clone()))
         }
+        Session::Agent(agent) => Box::new(crate::remotefs::agent::AgentFs::new(agent.clone())),
     }
 }
 

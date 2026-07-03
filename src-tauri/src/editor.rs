@@ -365,6 +365,33 @@ async fn download_to(
             }
             file.flush().await?;
         }
+        Session::Agent(agent) => {
+            use base64::Engine as _;
+            use faro_agent_proto::msg::{Request, Response};
+            let mut file = tokio::fs::File::create(local_path).await?;
+            let mut offset: u64 = 0;
+            loop {
+                let resp = agent
+                    .request(Request::ReadChunk { path: remote_path.to_string(), offset, len: 0 })
+                    .await?;
+                let (data, eof) = match resp {
+                    Response::Chunk { data, eof } => (data, eof),
+                    Response::Error { message, .. } => {
+                        return Err(anyhow::anyhow!("read {remote_path}: {message}"))
+                    }
+                    other => return Err(anyhow::anyhow!("read {remote_path}: unexpected {other:?}")),
+                };
+                let bytes = base64::engine::general_purpose::STANDARD.decode(&data)?;
+                if !bytes.is_empty() {
+                    file.write_all(&bytes).await?;
+                    offset += bytes.len() as u64;
+                }
+                if eof {
+                    break;
+                }
+            }
+            file.flush().await?;
+        }
     }
     Ok(())
 }
@@ -425,6 +452,39 @@ async fn upload_from(
                 .put(&p, bytes::Bytes::from(buf).into())
                 .await
                 .with_context(|| format!("object put {key}"))?;
+        }
+        Session::Agent(agent) => {
+            use base64::Engine as _;
+            use faro_agent_proto::msg::{Request, Response};
+            let mut file = tokio::fs::File::open(&local).await?;
+            let mut buf = vec![0u8; 128 * 1024];
+            let mut offset: u64 = 0;
+            let mut first = true;
+            loop {
+                let n = file.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                let data = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
+                match agent
+                    .request(Request::WriteChunk {
+                        path: remote_path.to_string(),
+                        offset,
+                        data,
+                        truncate: first,
+                        done: false,
+                    })
+                    .await?
+                {
+                    Response::Written { .. } => {}
+                    Response::Error { message, .. } => {
+                        return Err(anyhow::anyhow!("write {remote_path}: {message}"))
+                    }
+                    other => return Err(anyhow::anyhow!("write {remote_path}: unexpected {other:?}")),
+                }
+                offset += n as u64;
+                first = false;
+            }
         }
     }
     Ok(size)

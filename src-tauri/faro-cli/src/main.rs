@@ -343,6 +343,7 @@ fn fs_for(session: &Session) -> Box<dyn RemoteFs> {
         Session::Object(obj) => {
             Box::new(faro_lib::remotefs::object::ObjectFs::new(obj.clone()))
         }
+        Session::Agent(agent) => Box::new(faro_lib::remotefs::agent::AgentFs::new(agent.clone())),
     }
 }
 
@@ -1156,6 +1157,7 @@ async fn upload_file(
         Session::Object(obj) => {
             upload_object(obj.clone(), local_path, &remote_path, &bar).await?
         }
+        Session::Agent(_) => anyhow::bail!("faro-agent connections are not supported in the CLI"),
     }
 
     bar.finish_with_message(format!("uploaded {name}"));
@@ -1278,6 +1280,7 @@ async fn download_file(session: &Session, remote_path: &str, local_dir: &str) ->
             }
             file.flush().await?;
         }
+        Session::Agent(_) => anyhow::bail!("faro-agent connections are not supported in the CLI"),
     }
 
     bar.finish_with_message(format!("downloaded {name}"));
