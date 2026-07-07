@@ -8,6 +8,7 @@ use tauri::Manager;
 pub mod bridge;
 mod commands;
 pub mod agent;
+mod agent_host;
 mod editor;
 pub mod importers;
 mod known_hosts;
@@ -25,6 +26,7 @@ pub struct AppState {
     pub transfers: Arc<transfer::TransferManager>,
     pub editors: Arc<editor::EditManager>,
     pub bridge: Arc<bridge::BridgeState>,
+    pub agent_host: Arc<agent_host::AgentHost>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -53,6 +55,10 @@ pub fn run() {
                 bridge: Arc::new(
                     bridge::BridgeState::load_or_create(&handle).unwrap_or_default(),
                 ),
+                agent_host: Arc::new(
+                    agent_host::AgentHost::load(&handle)
+                        .expect("failed to initialise agent host settings"),
+                ),
             };
             app.manage(state);
 
@@ -63,6 +69,13 @@ pub fn run() {
             let bridge_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 bridge.auto_start_if_enabled(bridge_handle).await;
+            });
+
+            // Likewise the Remote-control host (this machine as a Faro Agent).
+            let host = app.state::<AppState>().agent_host.clone();
+            let host_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                host.auto_start_if_enabled(host_handle).await;
             });
 
             Ok(())
@@ -76,6 +89,12 @@ pub fn run() {
             commands::discover_agents,
             commands::agent_public_key,
             commands::pair_agent,
+            agent_host::agent_host_status,
+            agent_host::agent_host_set_enabled,
+            agent_host::agent_host_open_pairing,
+            agent_host::agent_host_close_pairing,
+            agent_host::agent_host_set_policy,
+            agent_host::agent_host_revoke_peer,
             commands::list_agent_jobs,
             commands::kill_agent_job,
             commands::respond_to_host_prompt,

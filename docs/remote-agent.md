@@ -2,12 +2,28 @@
 
 Control another machine — Windows, macOS, or Linux — from Faro, the way you
 already drive a remote server over SFTP/SSH, but **without installing or
-configuring an SSH server** on the target. You run a tiny headless daemon
-(`faro-agentd`) on the machine you want to reach, pair it once with a short code
-(RustDesk-style), and it shows up in Faro as a connection you can browse, run
+configuring an SSH server** on the target. Pair it once with a short code
+(RustDesk-style) and it shows up in Faro as a connection you can browse, run
 commands on, and transfer files through. Because Faro already brokers its live
 sessions to a local AI agent over the Agent Bridge, this immediately lets an AI
 model run Windows/macOS commands on any paired machine, from anywhere.
+
+**Two ways to make a machine controllable:**
+
+- **The Faro app itself** (easiest — nothing to download). If the target
+  already has Faro installed, open **Settings → Remote control**, flip on
+  *"Let my other machines control this computer,"* and click **Show pairing
+  code**. The app hosts the agent in-process — no separate binary, no terminal.
+  This is the whole answer to "two of my PCs both have Faro."
+- **The headless daemon** `faro-agentd` (for servers, VMs, or boxes with no
+  GUI). One small binary; run `faro-agentd pair`, read the code. Bundled with
+  the installer and service-installable — see [Distribution](#distribution).
+
+Both speak the identical protocol against the same identity/config directory,
+so on one machine the GUI host and a headless daemon are interchangeable views
+of the same agent (only one holds the port at a time). A running daemon now
+**serves paired controllers and accepts new pairings on one port** — pairing no
+longer needs a separate mode or a restart.
 
 ## Pieces
 

@@ -31,6 +31,7 @@ import type {
   SavedCommand,
   DiscoveredAgent,
   AgentPairResult,
+  AgentHostStatus,
 } from "./types";
 
 // Typed wrappers around the Tauri command surface. The string names must match
@@ -63,6 +64,32 @@ export const ipc = {
    *  so a failed pairing leaves no half-configured connection behind. */
   pairAgent: (host: string, port: number, code: string) =>
     invoke<AgentPairResult>("pair_agent", { host, port, code }),
+
+  // ---- Remote control: host THIS machine as a Faro Agent (Settings) ----
+
+  /** Current state of the in-app agent host (enabled, running, policy, peers,
+   *  open pairing window). */
+  agentHostStatus: () => invoke<AgentHostStatus>("agent_host_status"),
+
+  /** Turn the host on/off; optionally set the listen port. */
+  agentHostSetEnabled: (enabled: boolean, port?: number) =>
+    invoke<AgentHostStatus>("agent_host_set_enabled", { enabled, port }),
+
+  /** Open a pairing window and get the fresh 6-digit code to read aloud. */
+  agentHostOpenPairing: () =>
+    invoke<AgentHostStatus>("agent_host_open_pairing"),
+
+  /** Close the pairing window early (e.g. the dialog closed). */
+  agentHostClosePairing: () =>
+    invoke<AgentHostStatus>("agent_host_close_pairing"),
+
+  /** Set what paired controllers may do on THIS machine. */
+  agentHostSetPolicy: (allowExec: boolean, allowWrite: boolean) =>
+    invoke<AgentHostStatus>("agent_host_set_policy", { allowExec, allowWrite }),
+
+  /** Un-pin a controller by its public key. */
+  agentHostRevokePeer: (publicKey: string) =>
+    invoke<AgentHostStatus>("agent_host_revoke_peer", { publicKey }),
 
   listDirectory: (sessionId: SessionId, path: string) =>
     invoke<DirEntry[]>("list_directory", { sessionId, path }),
@@ -314,6 +341,15 @@ export async function onAgentOutput(
   cb: (event: AgentOutput) => void
 ): Promise<UnlistenFn> {
   return listen<AgentOutput>("agent://output", (e) => cb(e.payload));
+}
+
+/** A controller finished pairing with THIS machine's hosted agent. */
+export async function onAgentHostPaired(
+  cb: (event: { name: string; key: string }) => void
+): Promise<UnlistenFn> {
+  return listen<{ name: string; key: string }>("agent-host://paired", (e) =>
+    cb(e.payload)
+  );
 }
 
 export async function onTransferEvent(

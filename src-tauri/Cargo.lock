@@ -1206,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "faro"
-version = "1.3.11"
+version = "1.3.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1214,6 +1214,7 @@ dependencies = [
  "bytes",
  "dirs 5.0.1",
  "faro-agent-proto",
+ "faro-agentd",
  "futures",
  "mdns-sd",
  "notify",
@@ -1240,7 +1241,7 @@ dependencies = [
 
 [[package]]
 name = "faro-agent-proto"
-version = "1.3.11"
+version = "1.3.12"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1255,7 +1256,7 @@ dependencies = [
 
 [[package]]
 name = "faro-agentd"
-version = "1.3.11"
+version = "1.3.12"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1273,7 +1274,7 @@ dependencies = [
 
 [[package]]
 name = "faro-cli"
-version = "1.3.11"
+version = "1.3.12"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -82,6 +82,36 @@ export interface AgentPairResult {
   os: string;
 }
 
+// ---- Remote control: this machine hosted as a Faro Agent (mirrors agent_host.rs) ----
+
+/** A controller pinned to THIS machine. */
+export interface AgentHostPeer {
+  name: string;
+  publicKey: string;
+  fingerprint: string;
+  pairedAt: number;
+}
+
+/** The open pairing window, if any. */
+export interface AgentHostPairing {
+  code: string;
+  remainingSecs: number;
+}
+
+/** State of the in-app agent host (Settings → Remote control). */
+export interface AgentHostStatus {
+  enabled: boolean;
+  running: boolean;
+  port: number;
+  hostname: string;
+  os: string;
+  fingerprint: string;
+  allowExec: boolean;
+  allowWrite: boolean;
+  peers: AgentHostPeer[];
+  pairing: AgentHostPairing | null;
+}
+
 // ---- Importers ----
 
 export interface ProfilePreview {
