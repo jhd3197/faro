@@ -40,6 +40,8 @@ const APPROVAL_COPY: Record<string, { title: string; foot: string }> = {
   read: { title: "Agent wants to read from the server", foot: "Reads through your authenticated Faro session." },
   download: { title: "Agent wants to download a file", foot: "Downloads through Faro's transfer engine." },
   upload: { title: "Agent wants to upload a file", foot: "Uploads through Faro's transfer engine." },
+  upload_dir: { title: "Agent wants to upload a directory", foot: "Uploads the whole tree through Faro's transfer engine." },
+  sync: { title: "Agent wants to sync directories", foot: "Copies through Faro's transfer engine; mirror mode deletes destination files missing from the source." },
   search: { title: "Agent wants to search the server", foot: "Searches through your authenticated Faro session." },
 };
 function approvalCopy(kind: string) {
@@ -49,6 +51,36 @@ function approvalCopy(kind: string) {
       foot: "Runs through your authenticated Faro session.",
     }
   );
+}
+
+// Pull the load-bearing numbers out of a directory-upload / sync summary so
+// the modal surfaces them as badges (risk obvious), not just prose. The full
+// summary is always shown verbatim above; these only re-emphasize it, so a
+// non-matching summary simply renders no badges.
+function summaryStats(
+  kind: string,
+  command: string
+): { label: string; danger?: boolean }[] {
+  const stats: { label: string; danger?: boolean }[] = [];
+  if (kind === "upload_dir") {
+    const m = command.match(/\((\d+) files?, (.+?) total, overwrite: (yes|no)\)/);
+    if (m) {
+      stats.push({ label: `${m[1]} files` }, { label: m[2] });
+      if (m[3] === "yes")
+        stats.push({ label: "overwrites existing files", danger: true });
+    }
+  } else if (kind === "sync") {
+    if (/dry run — no changes/.test(command)) {
+      stats.push({ label: "dry run — nothing changes" });
+      return stats;
+    }
+    const copy = command.match(/copy (\d+) files? \((.+?)\)/);
+    if (copy) stats.push({ label: `copies ${copy[1]} files` }, { label: copy[2] });
+    const del = command.match(/delete (\d+) files? on the destination \(mirror\)/);
+    if (del)
+      stats.push({ label: `DELETES ${del[1]} files on the destination`, danger: true });
+  }
+  return stats;
 }
 
 // Always-mounted: boots the bridge store (status + event listeners) and renders
@@ -97,6 +129,7 @@ function ApprovalModal({
   onDeny: () => void;
 }) {
   const copy = approvalCopy(approval.kind);
+  const stats = summaryStats(approval.kind, approval.command);
   const allowSudo = useBridge((s) => s.status.policy.allowSudo);
   const sudoNote =
     allowSudo && approval.kind === "exec" && /\bsudo\b/.test(approval.command);
@@ -129,6 +162,23 @@ function ApprovalModal({
           <pre className="selectable max-h-40 max-w-full overflow-auto whitespace-pre-wrap [overflow-wrap:anywhere] rounded-md border border-border bg-bg-subtle px-3 py-2 font-mono text-xs text-text">
             {approval.command}
           </pre>
+          {stats.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {stats.map((s) => (
+                <span
+                  key={s.label}
+                  className={cn(
+                    "rounded-md border px-2 py-0.5 text-[11px] font-medium",
+                    s.danger
+                      ? "border-danger/40 bg-danger/10 text-danger"
+                      : "border-border bg-bg-subtle text-text-muted"
+                  )}
+                >
+                  {s.label}
+                </span>
+              ))}
+            </div>
+          )}
           <div className="mt-3 flex items-center gap-1.5 text-[11px] text-text-dim">
             <TerminalIcon size={11} /> {copy.foot}
           </div>
@@ -255,6 +305,21 @@ faro-cli agent upload   ${S} ./a.txt /home/user # local file → remote dir
 faro-cli agent transfer <transferId>            # poll until done/error
 \`\`\`
 
+## Upload or sync a directory
+
+One approval covers the whole tree; the prompt in Faro shows the exact
+file/byte (and delete) counts.
+
+\`\`\`bash
+faro-cli agent sync ${S} ./dist /var/www/app --dry-run   # preview — nothing changes
+faro-cli agent sync ${S} ./dist /var/www/app             # push new/changed files
+faro-cli agent upload-dir ${S} ./dist /var/www/releases  # upload the whole tree
+\`\`\`
+
+\`sync --mirror\` also DELETES destination files missing from the source. Never
+use it without a \`--dry-run\` first, and only when the user explicitly asked
+for an exact mirror.
+
 ## Review what you've done
 
 \`\`\`bash
@@ -319,12 +384,13 @@ faro-cli agent search ${S} ".log" /var/log     # search <server> <query> [path]
 faro-cli agent info   ${S}                      # protocol, host, port, …
 \`\`\`
 
-## Run a status or diagnostic command (SSH only)
+## Run a status or diagnostic command (SSH or Faro Agent)
 
 For checking state only — for example disk usage, service status or log tailing:
 
 \`\`\`bash
 faro-cli agent exec ${S} "df -h"
+faro-cli agent exec ${S} --timeout-ms 300000 "tar czf /tmp/site.tgz /var/www"  # long-running
 \`\`\`
 
 Keep commands non-interactive (no prompts/pagers); add \`-y\`, \`| cat\`, etc. The
@@ -339,6 +405,24 @@ faro-cli agent upload   ${S} ./a.txt /home/user # local file → remote dir
 faro-cli agent transfer <transferId>            # poll until done/error
 \`\`\`
 
+## Upload or sync a directory
+
+One approval covers the whole tree; the prompt in Faro shows the exact
+file/byte (and delete) counts.
+
+\`\`\`bash
+faro-cli agent sync ${S} ./dist /var/www/app --dry-run   # preview — nothing changes
+faro-cli agent sync ${S} ./dist /var/www/app             # push new/changed files
+faro-cli agent upload-dir ${S} ./dist /var/www/releases  # upload the whole tree
+\`\`\`
+
+Staged deploy in one line:
+\`faro-cli agent upload-dir ${S} ./dist /var/www/releases && faro-cli agent exec ${S} "ln -sfn /var/www/releases/dist /var/www/current"\`
+
+\`sync --mirror\` also DELETES destination files missing from the source. Never
+use it without a \`--dry-run\` first, and only when the user explicitly asked
+for an exact mirror.
+
 ## Review what you've done
 
 \`\`\`bash
@@ -351,7 +435,8 @@ Notes:
   that kind). A blocked call means they're being asked to confirm.
 - Transfers run in the background and also appear in Faro's transfer panel; poll
   \`agent transfer <id>\` for the outcome.
-- \`exec\` output is capped (512 KiB) and times out after 60s.
+- \`exec\` output is capped (512 KiB) and times out after 60s by default;
+  \`--timeout-ms\` raises that up to 15 minutes for legitimately long commands.
 `;
 }
 

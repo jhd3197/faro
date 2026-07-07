@@ -132,13 +132,16 @@ enum AgentCmd {
     Context,
     /// List the servers the Agent Bridge can currently reach.
     Sessions,
-    /// Run a shell command on a server (SSH only). Exits with its exit code.
+    /// Run a shell command on a server (SSH or Faro Agent). Exits with its exit code.
     Exec {
         /// Saved server name (as shown in Faro) or its session id.
         server: String,
         /// Show what would run and whether it would need approval, without executing.
         #[arg(long)]
         dry_run: bool,
+        /// Timeout in milliseconds (default 60000; clamped to 1000–900000).
+        #[arg(long)]
+        timeout_ms: Option<u64>,
         /// The command to run. Quote it, or pass it as trailing arguments.
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
@@ -185,6 +188,37 @@ enum AgentCmd {
         server: String,
         local_path: String,
         remote_dir: String,
+    },
+    /// Upload a whole local directory tree into a remote directory. One
+    /// approval covers the tree; the prompt shows file/byte counts.
+    UploadDir {
+        server: String,
+        /// Local directory to upload (recreated INSIDE the remote directory).
+        local_dir: String,
+        /// Remote destination directory.
+        remote_dir: String,
+        /// Replace existing remote files (default: rename colliding uploads).
+        #[arg(long)]
+        overwrite: bool,
+    },
+    /// One-way sync between a local directory and a remote directory. Use
+    /// --dry-run first: it prints the plan without changing anything.
+    Sync {
+        server: String,
+        /// Local directory (source for push, destination for pull).
+        local_dir: String,
+        /// Remote directory (destination for push, source for pull).
+        remote_dir: String,
+        /// Direction. Defaults to push (local to remote).
+        #[arg(long, value_enum, default_value = "push")]
+        direction: Dir,
+        /// Mirror mode ALSO DELETES destination files missing from the source.
+        /// The approval prompt in Faro shows the exact delete count.
+        #[arg(long)]
+        mirror: bool,
+        /// Show the plan without executing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Check a transfer started via `agent download` / `agent upload`.
     Transfer { transfer_id: String },
@@ -878,13 +912,14 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             }
             Ok(())
         }
-        AgentCmd::Exec { server, dry_run, command } => {
+        AgentCmd::Exec { server, dry_run, timeout_ms, command } => {
             let id = resolve_server(&ep, &server)?;
-            let body = http_post(
-                &ep,
-                "/exec",
-                serde_json::json!({ "sessionId": id, "command": command.join(" "), "dryRun": dry_run }),
-            )?;
+            let mut req =
+                serde_json::json!({ "sessionId": id, "command": command.join(" "), "dryRun": dry_run });
+            if let Some(t) = timeout_ms {
+                req["timeoutMs"] = serde_json::json!(t);
+            }
+            let body = http_post(&ep, "/exec", req)?;
             if let Some(out) = body.get("stdout").and_then(|v| v.as_str()) {
                 let mut so = io::stdout();
                 so.write_all(out.as_bytes()).ok();
@@ -990,6 +1025,106 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
                 serde_json::json!({ "sessionId": id, "localPath": local_path, "remoteDir": remote_dir }),
             )?;
             print_transfer_started(&body);
+            Ok(())
+        }
+        AgentCmd::UploadDir { server, local_dir, remote_dir, overwrite } => {
+            let id = resolve_server(&ep, &server)?;
+            let body = http_post(
+                &ep,
+                "/upload_dir",
+                serde_json::json!({
+                    "sessionId": id,
+                    "localDir": local_dir,
+                    "remoteDir": remote_dir,
+                    "overwrite": overwrite,
+                }),
+            )?;
+            let ids = body
+                .get("transferIds")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let total = body.get("totalBytes").and_then(|v| v.as_u64()).unwrap_or(0);
+            let root = body.get("remoteRoot").and_then(|v| v.as_str()).unwrap_or("?");
+            println!(
+                "queued {} file uploads ({}) → {}",
+                ids.len(),
+                fmt_bytes(total),
+                root
+            );
+            if let Some(first) = ids.first().and_then(|v| v.as_str()) {
+                println!("poll with: faro-cli agent transfer {first}");
+            }
+            Ok(())
+        }
+        AgentCmd::Sync { server, local_dir, remote_dir, direction, mirror, dry_run } => {
+            let id = resolve_server(&ep, &server)?;
+            let dir_word = match direction {
+                Dir::Push => "push",
+                Dir::Pull => "pull",
+            };
+            let strategy = if mirror { "mirror" } else { "additive" };
+            let body = http_post(
+                &ep,
+                "/sync",
+                serde_json::json!({
+                    "sessionId": id,
+                    "localDir": local_dir,
+                    "remoteDir": remote_dir,
+                    "direction": dir_word,
+                    "strategy": strategy,
+                    "dryRun": dry_run,
+                }),
+            )?;
+            let copies = body.get("copyCount").and_then(|v| v.as_u64()).unwrap_or(0);
+            let deletes = body.get("deleteCount").and_then(|v| v.as_u64()).unwrap_or(0);
+            let bytes = body.get("totalBytes").and_then(|v| v.as_u64()).unwrap_or(0);
+            eprintln!(
+                "\n{}\n  copies   {}\n  deletes  {}\n  bytes    {}",
+                dim(&format!(
+                    "Plan: {local_dir} {} {remote_dir} ({strategy}, {dir_word})",
+                    if dry_run { "↔" } else { "→" }
+                )),
+                copies,
+                deletes,
+                fmt_bytes(bytes),
+            );
+            if dry_run {
+                if let Some(arr) = body.get("copies").and_then(|v| v.as_array()) {
+                    for c in arr.iter().take(50) {
+                        let rel = c.get("relative").and_then(|v| v.as_str()).unwrap_or("");
+                        let size = c.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let reason = c.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+                        eprintln!("  {reason:<11}  {:>10}  {rel}", fmt_bytes(size));
+                    }
+                    if arr.len() > 50 {
+                        eprintln!("  …and {} more copies", arr.len() - 50);
+                    }
+                }
+                if let Some(arr) = body.get("deletes").and_then(|v| v.as_array()) {
+                    for d in arr.iter().take(50) {
+                        let rel = d.get("relative").and_then(|v| v.as_str()).unwrap_or("");
+                        eprintln!("  {}       {rel}", warn("delete"));
+                    }
+                    if arr.len() > 50 {
+                        eprintln!("  …and {} more deletes", arr.len() - 50);
+                    }
+                }
+                return Ok(());
+            }
+            if body.get("status").and_then(|v| v.as_str()) == Some("in-sync") {
+                eprintln!("Already in sync.");
+                return Ok(());
+            }
+            let ids = body
+                .get("transferIds")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            println!("queued {} transfers; deletes applied", ids.len());
+            if let Some(first) = ids.first().and_then(|v| v.as_str()) {
+                println!("poll with: faro-cli agent transfer {first}");
+            }
             Ok(())
         }
         AgentCmd::Transfer { transfer_id } => {

@@ -285,7 +285,7 @@ export interface BridgeContext {
 export interface BridgeActivity {
   id: string;
   sessionId: string;
-  kind: string; // "exec" | "denied" | "error"
+  kind: string; // "exec" | "read" | "download" | "upload" | "upload_dir" | "sync" | "search" | "denied" | "error"
   detail: string;
   ok: boolean;
   at: number; // unix millis
@@ -295,7 +295,8 @@ export interface BridgeApproval {
   requestId: string;
   sessionId: string;
   sessionName: string;
-  /** Operation kind: "exec" | "read" | "download" | "upload" | "search". */
+  /** Operation kind: "exec" | "read" | "download" | "upload" | "upload_dir"
+   *  | "sync" | "search". */
   kind: string;
   /** Human-readable summary of what the agent wants to do. */
   command: string;

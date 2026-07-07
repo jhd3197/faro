@@ -80,3 +80,30 @@ Three new units, plus wiring into the existing app:
 Every logical message is JSON, split into ≤64 KiB Noise segments (each with a
 continuation flag) so large directory listings and file chunks stream safely
 under Noise's per-message size limit.
+
+## Agent Bridge ops on a paired machine
+
+Once a paired machine is connected in Faro and granted agent access, the local
+AI agent reaches it through the same bridge tools it uses for SSH servers
+(each gated by the per-op approval flow):
+
+- **`faro_exec`** — runs in the daemon's native shell (PowerShell on Windows,
+  `sh` elsewhere). Takes an optional `timeoutMs` (default 60 000 ms, clamped to
+  1 s – 15 min; `faro-cli agent exec --timeout-ms …`); output is capped at
+  512 KiB.
+- **`faro_read_file`** — capped file read via the daemon's `ReadFile`.
+- **`faro_list_dir` / `faro_search` / `faro_download` / `faro_upload`** — file
+  ops through `AgentFs` and the transfer engine (uploads stream as ranged
+  `WriteChunk`s).
+- **`faro_upload_dir`** — uploads a whole local tree (`/upload_dir`,
+  `faro-cli agent upload-dir`). ONE approval covers the tree; the prompt names
+  the file count, total bytes and overwrite mode. Collisions rename by default
+  (`overwrite=true` replaces).
+- **`faro_sync`** — one-way directory sync (`/sync`, `faro-cli agent sync`),
+  push or pull, additive or mirror, with `dryRun` returning the capped
+  per-file plan. Executing gates once with the copy/byte/delete counts in the
+  summary; mirror deletes are always named, and as a Write the gate is never
+  auto-approved by the read/safe-exec policies (only allow-all).
+- `faro_glob`, `faro_tail` and `faro_read_files_batch` stay **SSH-only** (they
+  use `find`/`tail -f`/SFTP); on a paired machine the agent is told to run a
+  native equivalent through `faro_exec` instead.
