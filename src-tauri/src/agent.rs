@@ -196,12 +196,13 @@ fn anthropic_tools() -> Vec<Value> {
         }),
         json!({
             "name": "faro_exec",
-            "description": "Run a diagnostic/status command on an SSH server. Prefer read-only commands. Set dryRun=true to preview approval. `sudo` is supported when the user enabled it — write `sudo <cmd>` normally (Faro answers the password prompt); never add `-S` or pipe in a password.",
+            "description": "Run a diagnostic/status command on an SSH server or a paired Faro Agent machine. Prefer read-only commands. Set dryRun=true to preview approval. `sudo` is supported when the user enabled it — write `sudo <cmd>` normally (Faro answers the password prompt); never add `-S` or pipe in a password.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "command": { "type": "string" },
                     "dryRun": { "type": "boolean" },
+                    "timeoutMs": { "type": "integer", "description": "Optional timeout in ms (default 60000, clamped to 1000–900000)." },
                     "session": session_param.clone()
                 },
                 "required": ["command"]
@@ -359,7 +360,9 @@ async fn run_tool(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("command is required"))?;
             let dry_run = input.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
-            let (status, body) = exec_on(app, state, &session_id, command, dry_run).await;
+            let timeout_ms = input.get("timeoutMs").and_then(|v| v.as_u64());
+            let (status, body) =
+                exec_on(app, state, &session_id, command, dry_run, timeout_ms).await;
             if status == 200 {
                 Ok(body)
             } else {
@@ -471,7 +474,7 @@ async fn run_tool(
                 .get("name")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("name is required"))?;
-            let (status, body) = op_run_command(app, state, &session_id, name, false).await;
+            let (status, body) = op_run_command(app, state, &session_id, name, false, None).await;
             if status == 200 {
                 Ok(body)
             } else {

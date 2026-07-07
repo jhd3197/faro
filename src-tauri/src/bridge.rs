@@ -43,7 +43,12 @@ const MAX_BODY: usize = 1024 * 1024; // 1 MiB request bodies
 const MAX_HEADERS: usize = 64 * 1024;
 const MAX_READ_FILE: usize = 256 * 1024; // cap faro_read_file output at 256 KiB
 const MAX_EXEC_BYTES: usize = 512 * 1024; // cap exec output at 512 KiB
-const EXEC_TIMEOUT: Duration = Duration::from_secs(60); // kill a hung/streaming command
+const EXEC_TIMEOUT: Duration = Duration::from_secs(60); // default; kill a hung/streaming command
+/// Bounds for a caller-supplied exec timeout (`timeoutMs`). The floor keeps a
+/// typo like `1` from insta-killing every command; the ceiling (15 min) keeps
+/// a runaway agent from parking a command forever.
+const EXEC_TIMEOUT_MS_MIN: u64 = 1_000;
+const EXEC_TIMEOUT_MS_MAX: u64 = 900_000;
 const SEARCH_MAX_RESULTS: usize = 200;
 const SEARCH_MAX_DEPTH: usize = 6;
 const SEARCH_MAX_DIRS: usize = 4000; // hard ceiling on directories visited
@@ -190,6 +195,15 @@ fn now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Effective exec timeout for an optional caller-supplied `timeoutMs`:
+/// absent → the 60 s default; present → clamped to [1 s, 15 min].
+fn exec_timeout_from(timeout_ms: Option<u64>) -> Duration {
+    match timeout_ms {
+        Some(ms) => Duration::from_millis(ms.clamp(EXEC_TIMEOUT_MS_MIN, EXEC_TIMEOUT_MS_MAX)),
+        None => EXEC_TIMEOUT,
+    }
 }
 
 fn activity(kind: &str, session_id: &str, detail: String, ok: bool) -> ActivityEntry {
@@ -883,7 +897,8 @@ async fn handle_exec(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> 
         return (400, json!({"error": "sessionId and command are required"}));
     }
     let dry_run = parsed.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
-    exec_on(app, state, &session_id, &command, dry_run).await
+    let timeout_ms = parsed.get("timeoutMs").and_then(|v| v.as_u64());
+    exec_on(app, state, &session_id, &command, dry_run, timeout_ms).await
 }
 
 async fn handle_run(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
@@ -897,7 +912,8 @@ async fn handle_run(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (
         return (400, json!({"error": "sessionId and name are required"}));
     }
     let dry_run = parsed.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
-    op_run_command(app, state, &session_id, &name, dry_run).await
+    let timeout_ms = parsed.get("timeoutMs").and_then(|v| v.as_u64());
+    op_run_command(app, state, &session_id, &name, dry_run, timeout_ms).await
 }
 
 async fn handle_list(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
@@ -1082,12 +1098,15 @@ async fn handle_history(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) 
 // ---- Operation cores (shared by REST routes and MCP tools) ----
 
 /// Run a non-interactive shell command on an SSH server or a Faro Agent machine.
+/// `timeout_ms` optionally overrides the 60 s default (clamped to [1 s, 15 min]);
+/// the 512 KiB output cap is fixed.
 pub(crate) async fn exec_on(
     app: &AppHandle,
     state: &Arc<BridgeState>,
     session_id: &str,
     command: &str,
     dry_run: bool,
+    timeout_ms: Option<u64>,
 ) -> (u16, Value) {
     let manager = app.state::<AppState>().sessions.clone();
 
@@ -1147,16 +1166,17 @@ pub(crate) async fn exec_on(
         return resp;
     }
 
+    let timeout = exec_timeout_from(timeout_ms);
     if is_agent {
         let Some(agent) = manager.get_agent(session_id).await else {
             return (400, json!({"error": "session went away"}));
         };
-        exec_core_agent(app, state, &agent, session_id, &session_name, command).await
+        exec_core_agent(app, state, &agent, session_id, &session_name, command, timeout).await
     } else {
         let Some(ssh) = manager.get_ssh(session_id).await else {
             return (400, json!({"error": "session went away"}));
         };
-        exec_core(app, state, &ssh, session_id, &session_name, command, command).await
+        exec_core(app, state, &ssh, session_id, &session_name, command, command, timeout).await
     }
 }
 
@@ -1172,6 +1192,7 @@ async fn exec_core_agent(
     session_id: &str,
     session_name: &str,
     command: &str,
+    timeout: Duration,
 ) -> (u16, Value) {
     let op_id = Uuid::new_v4().to_string();
     let started_at = now_millis();
@@ -1186,7 +1207,7 @@ async fn exec_core_agent(
     );
 
     let result = agent
-        .exec(command, MAX_EXEC_BYTES, EXEC_TIMEOUT.as_millis() as u64)
+        .exec(command, MAX_EXEC_BYTES, timeout.as_millis() as u64)
         .await;
 
     match result {
@@ -1296,6 +1317,7 @@ pub(crate) async fn op_run_command(
     session_id: &str,
     name: &str,
     dry_run: bool,
+    timeout_ms: Option<u64>,
 ) -> (u16, Value) {
     let manager = app.state::<AppState>().sessions.clone();
     let Some(ssh) = manager.get_ssh(session_id).await else {
@@ -1328,7 +1350,8 @@ pub(crate) async fn op_run_command(
             }),
         );
     }
-    exec_core(app, state, &ssh, session_id, &session_name, &cmd.command, &label).await
+    let timeout = exec_timeout_from(timeout_ms);
+    exec_core(app, state, &ssh, session_id, &session_name, &cmd.command, &label, timeout).await
 }
 
 /// Shared exec body used by `exec_on` (after the approval gate) and
@@ -1336,7 +1359,9 @@ pub(crate) async fn op_run_command(
 /// output + the final audit line correlate in the live agent console, runs it
 /// bounded/streamed, and logs the activity. `label` is what shows in the
 /// console + audit log (the raw command for `exec`, "[name] command" for a
-/// saved command); `command` is what actually executes.
+/// saved command); `command` is what actually executes. `timeout` is the
+/// already-clamped run deadline (see `exec_timeout_from`).
+#[allow(clippy::too_many_arguments)]
 async fn exec_core(
     app: &AppHandle,
     state: &Arc<BridgeState>,
@@ -1345,6 +1370,7 @@ async fn exec_core(
     session_name: &str,
     command: &str,
     label: &str,
+    timeout: Duration,
 ) -> (u16, Value) {
     let op_id = Uuid::new_v4().to_string();
     let _ = app.emit(
@@ -1375,11 +1401,11 @@ async fn exec_core(
     };
     let result = match &sudo_pw {
         Some(pw) => {
-            ssh.exec_sudo(command, pw, MAX_EXEC_BYTES, EXEC_TIMEOUT, Some(&stream))
+            ssh.exec_sudo(command, pw, MAX_EXEC_BYTES, timeout, Some(&stream))
                 .await
         }
         None => {
-            ssh.exec_bounded(command, MAX_EXEC_BYTES, EXEC_TIMEOUT, Some(&stream))
+            ssh.exec_bounded(command, MAX_EXEC_BYTES, timeout, Some(&stream))
                 .await
         }
     };
@@ -2484,12 +2510,13 @@ fn mcp_tools_list() -> Value {
             },
             {
                 "name": "faro_exec",
-                "description": "Run a diagnostic or status command on a connected computer in Faro — the user's own machine, which they have already authenticated to and authorized for agent access. Works on SSH servers and on Faro Agent machines (a paired Windows/macOS/Linux box running faro-agentd); on a Faro Agent machine the command runs in the daemon's native shell (PowerShell on Windows, sh elsewhere), so write commands for that OS — check faro_server_info for which. This is equivalent to the user typing the command into Faro's built-in terminal. The user approves each command in Faro (or has pre-approved this kind in their settings). Returns stdout, stderr and exit code. Set dryRun=true to preview whether the command would need approval without running it.",
+                "description": "Run a diagnostic or status command on a connected computer in Faro — the user's own machine, which they have already authenticated to and authorized for agent access. Works on SSH servers and on Faro Agent machines (a paired Windows/macOS/Linux box running faro-agentd); on a Faro Agent machine the command runs in the daemon's native shell (PowerShell on Windows, sh elsewhere), so write commands for that OS — check faro_server_info for which. This is equivalent to the user typing the command into Faro's built-in terminal. The user approves each command in Faro (or has pre-approved this kind in their settings). Returns stdout, stderr and exit code; output is capped at 512 KiB. Set dryRun=true to preview whether the command would need approval without running it.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "command": { "type": "string", "description": "The command to run. Keep it non-interactive (no pagers/prompts). Prefer read-only status and diagnostic commands. `sudo` is supported: when the user has enabled it, Faro answers sudo's password prompt with their connection password — so just write `sudo <cmd>` normally; do NOT add `-S`, a password, or `echo <pw> |`." },
                         "dryRun": { "type": "boolean", "description": "If true, return a preview of what would run and whether it would need approval, without executing." },
+                        "timeoutMs": { "type": "integer", "description": "Optional timeout in milliseconds for commands that legitimately run long (builds, backups). Default 60000; clamped to [1000, 900000]. The 512 KiB output cap is unchanged." },
                         "session": session_prop
                     },
                     "required": ["command"],
@@ -2642,6 +2669,7 @@ fn mcp_tools_list() -> Value {
                     "type": "object",
                     "properties": {
                         "name": { "type": "string", "description": "The saved command's name (see faro_list_commands)." },
+                        "timeoutMs": { "type": "integer", "description": "Optional timeout in milliseconds. Default 60000; clamped to [1000, 900000]." },
                         "session": session_prop
                     },
                     "required": ["name"],
@@ -2696,12 +2724,14 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 return tool_error("`name` is required");
             };
             let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
+            let timeout_ms = args.get("timeoutMs").and_then(|v| v.as_u64());
             // Saved commands run through the SSH exec path only.
             let session_id = match resolve_session(app, state, session_arg, SessionNeed::SshOnly).await {
                 Ok(id) => id,
                 Err(msg) => return tool_error(&msg),
             };
-            let (status, body) = op_run_command(app, state, &session_id, &cmd_name, dry_run).await;
+            let (status, body) =
+                op_run_command(app, state, &session_id, &cmd_name, dry_run, timeout_ms).await;
             if status == 200 {
                 if dry_run {
                     tool_text(serde_json::to_string_pretty(&body).unwrap_or_default())
@@ -2717,12 +2747,14 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 return tool_error("`command` is required");
             };
             let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
+            let timeout_ms = args.get("timeoutMs").and_then(|v| v.as_u64());
             // Exec works on SSH servers and paired Faro Agent machines alike.
             let session_id = match resolve_session(app, state, session_arg, SessionNeed::Exec).await {
                 Ok(id) => id,
                 Err(msg) => return tool_error(&msg),
             };
-            let (status, body) = exec_on(app, state, &session_id, &command, dry_run).await;
+            let (status, body) =
+                exec_on(app, state, &session_id, &command, dry_run, timeout_ms).await;
             if status == 200 {
                 if dry_run {
                     tool_text(serde_json::to_string_pretty(&body).unwrap_or_default())
@@ -3043,4 +3075,35 @@ async fn write_jsonrpc_error(
 ) -> Result<()> {
     let env = json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } });
     write_raw(stream, 200, "application/json", &serde_json::to_vec(&env)?).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exec_timeout_defaults_and_clamps() {
+        // Absent → the 60 s default.
+        assert_eq!(exec_timeout_from(None), EXEC_TIMEOUT);
+        // In range → taken verbatim.
+        assert_eq!(exec_timeout_from(Some(5_000)), Duration::from_secs(5));
+        assert_eq!(
+            exec_timeout_from(Some(EXEC_TIMEOUT_MS_MAX)),
+            Duration::from_millis(EXEC_TIMEOUT_MS_MAX)
+        );
+        // Below the floor → clamped up (a typo can't insta-kill commands).
+        assert_eq!(
+            exec_timeout_from(Some(1)),
+            Duration::from_millis(EXEC_TIMEOUT_MS_MIN)
+        );
+        assert_eq!(
+            exec_timeout_from(Some(0)),
+            Duration::from_millis(EXEC_TIMEOUT_MS_MIN)
+        );
+        // Above the ceiling → clamped to 15 min.
+        assert_eq!(
+            exec_timeout_from(Some(3_600_000)),
+            Duration::from_millis(EXEC_TIMEOUT_MS_MAX)
+        );
+    }
 }
