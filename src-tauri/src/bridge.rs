@@ -6,7 +6,8 @@
 //! Capabilities exposed to the agent (REST + MCP):
 //!   * `exec` — run a diagnostic/status command (SSH or Faro Agent),
 //!   * `list_dir` / `read_file` / `search` — inspect the remote filesystem,
-//!   * `download` / `upload` — move files through Faro's transfer engine,
+//!   * `download` / `upload` / `upload_dir` — move files through Faro's
+//!     transfer engine,
 //!   * `server_info` / `list_sessions` — context about what's connected.
 //!
 //! Security model:
@@ -128,7 +129,7 @@ pub struct BridgeStatus {
 pub struct ActivityEntry {
     pub id: String,
     pub session_id: String,
-    pub kind: String, // "exec" | "read" | "download" | "upload" | "search" | "denied" | "error"
+    pub kind: String, // "exec" | "read" | "download" | "upload" | "upload_dir" | "search" | "denied" | "error"
     pub detail: String,
     pub ok: bool,
     pub at: i64, // unix millis
@@ -846,6 +847,7 @@ async fn route(app: &AppHandle, state: &Arc<BridgeState>, req: &Request) -> (u16
         ("POST", "/read") => handle_read(app, state, &req.body).await,
         ("POST", "/download") => handle_download(app, state, &req.body).await,
         ("POST", "/upload") => handle_upload(app, state, &req.body).await,
+        ("POST", "/upload_dir") => handle_upload_dir(app, state, &req.body).await,
         ("POST", "/search") => handle_search(app, state, &req.body).await,
         ("POST", "/read_batch") => handle_read_batch(app, state, &req.body).await,
         ("POST", "/glob") => handle_glob(app, state, &req.body).await,
@@ -978,6 +980,24 @@ async fn handle_upload(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -
         );
     }
     op_upload(app, state, &session_id, &local_path, &remote_dir).await
+}
+
+async fn handle_upload_dir(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    let local_dir = body_str(&parsed, "localDir");
+    let remote_dir = body_str(&parsed, "remoteDir");
+    if session_id.is_empty() || local_dir.is_empty() || remote_dir.is_empty() {
+        return (
+            400,
+            json!({"error": "sessionId, localDir and remoteDir are required"}),
+        );
+    }
+    let overwrite = parsed.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+    op_upload_dir(app, state, &session_id, &local_dir, &remote_dir, overwrite).await
 }
 
 async fn handle_search(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
@@ -2110,6 +2130,198 @@ async fn op_upload(
     }
 }
 
+/// Human-readable byte count for approval summaries ("risk obvious" — the user
+/// should read "3.4 MB", not "3563520").
+fn human_bytes(n: u64) -> String {
+    if n < 1024 {
+        format!("{n} B")
+    } else if n < 1024 * 1024 {
+        format!("{:.1} KB", n as f64 / 1024.0)
+    } else if n < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} GB", n as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+/// Overwrite policy for the agent-facing directory upload: collisions are
+/// renamed (`_1`, `_2`, …) unless the agent explicitly asked to overwrite.
+fn upload_overwrite_policy(overwrite: bool) -> OverwritePolicy {
+    if overwrite {
+        OverwritePolicy::Overwrite
+    } else {
+        OverwritePolicy::Rename
+    }
+}
+
+/// The one-shot approval summary for a whole-tree upload. Counts are computed
+/// BEFORE gating so the user approves a concrete, sized operation.
+fn upload_dir_summary(
+    local_dir: &str,
+    session_name: &str,
+    remote_dir: &str,
+    files: usize,
+    bytes: u64,
+    overwrite: bool,
+) -> String {
+    format!(
+        "Upload directory {local_dir} → {session_name}:{remote_dir} ({files} files, {} total, overwrite: {})",
+        human_bytes(bytes),
+        if overwrite { "yes" } else { "no" },
+    )
+}
+
+/// Count the files/bytes a directory upload would queue. Mirrors the walk in
+/// `TransferManager::start_directory_upload` (skips symlinks and unreadable
+/// entries) so the approval summary matches what actually uploads.
+async fn count_local_tree(root: &std::path::Path) -> Result<(usize, u64)> {
+    let mut dirs_to_visit: Vec<PathBuf> = vec![root.to_path_buf()];
+    let mut files: usize = 0;
+    let mut bytes: u64 = 0;
+    while let Some(d) = dirs_to_visit.pop() {
+        let mut rd = tokio::fs::read_dir(&d)
+            .await
+            .with_context(|| format!("read_dir {}", d.display()))?;
+        while let Some(entry) = rd.next_entry().await? {
+            let meta = match entry.metadata().await {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if meta.is_dir() {
+                dirs_to_visit.push(entry.path());
+            } else if meta.is_file() {
+                files += 1;
+                bytes = bytes.saturating_add(meta.len());
+            }
+        }
+    }
+    Ok((files, bytes))
+}
+
+/// Upload a whole local directory tree into a remote directory through the
+/// transfer engine (one transfer per file, remote dirs created depth-first).
+/// ONE approval covers the whole tree; the summary names the file/byte counts
+/// and the overwrite mode so the risk is obvious up front.
+async fn op_upload_dir(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    local_dir: &str,
+    remote_dir: &str,
+    overwrite: bool,
+) -> (u16, Value) {
+    let manager = app.state::<AppState>().sessions.clone();
+    let Some(sess) = manager.get(session_id).await else {
+        return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
+    };
+    let name = sess.profile().name.clone();
+
+    let local_root = PathBuf::from(local_dir);
+    match tokio::fs::metadata(&local_root).await {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => {
+            return (
+                400,
+                json!({"error": format!("localDir {local_dir} is not a directory — use upload for a single file")}),
+            )
+        }
+        Err(e) => {
+            return (
+                400,
+                json!({"error": format!("localDir {local_dir} does not exist or is unreadable: {e}")}),
+            )
+        }
+    }
+
+    // Size the tree first so the single gate names exactly what's at stake.
+    let (file_count, total_bytes) = match count_local_tree(&local_root).await {
+        Ok(v) => v,
+        Err(e) => return (500, json!({"error": format!("walking {local_dir}: {e}")})),
+    };
+
+    let summary = upload_dir_summary(local_dir, &name, remote_dir, file_count, total_bytes, overwrite);
+    if let Err(resp) = gate(
+        app,
+        state,
+        session_id,
+        &name,
+        OpClass::Write,
+        "upload_dir",
+        &summary,
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    // Same remote-root shape start_directory_upload computes internally:
+    // the local directory is recreated INSIDE remoteDir.
+    let root_name = local_root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "upload".into());
+    let remote_root = if remote_dir.ends_with('/') {
+        format!("{remote_dir}{root_name}")
+    } else {
+        format!("{remote_dir}/{root_name}")
+    };
+
+    let transfers = app.state::<AppState>().transfers.clone();
+    match transfers
+        .start_directory_upload(
+            sess.clone(),
+            local_dir.to_string(),
+            remote_dir.to_string(),
+            upload_overwrite_policy(overwrite),
+            app.clone(),
+        )
+        .await
+    {
+        Ok(ids) => {
+            state
+                .log(
+                    app,
+                    activity(
+                        "upload_dir",
+                        session_id,
+                        format!(
+                            "upload dir {local_dir} → {remote_root} ({} files, {})",
+                            ids.len(),
+                            human_bytes(total_bytes)
+                        ),
+                        true,
+                    ),
+                )
+                .await;
+            (
+                200,
+                json!({
+                    "transferIds": ids,
+                    "fileCount": ids.len(),
+                    "totalBytes": total_bytes,
+                    "remoteRoot": remote_root,
+                    "status": "started",
+                }),
+            )
+        }
+        Err(e) => {
+            state
+                .log(
+                    app,
+                    activity(
+                        "error",
+                        session_id,
+                        format!("upload dir {local_dir} — {e}"),
+                        false,
+                    ),
+                )
+                .await;
+            (500, json!({"error": e.to_string()}))
+        }
+    }
+}
+
 pub(crate) async fn op_search(
     app: &AppHandle,
     state: &Arc<BridgeState>,
@@ -2632,12 +2844,27 @@ fn mcp_tools_list() -> Value {
                 }
             },
             {
-                "name": "faro_transfer_status",
-                "description": "Check whether a download/upload (started via faro_download/faro_upload) has finished. Returns status (queued|transferring|done|skipped|error|canceled), bytes transferred, and any error. Poll this after starting a transfer to confirm success.",
+                "name": "faro_upload_dir",
+                "description": "Upload a whole local directory tree into a directory on the user's connected server via Faro's transfer engine. The local directory is recreated INSIDE remoteDir (uploading /a/dist to /srv gives /srv/dist/…); remote subdirectories are created automatically and one transfer is queued per file. The user approves the WHOLE tree once — the prompt shows the file count, total size and overwrite mode. By default existing remote files are kept and colliding uploads are renamed (_1, _2, …); set overwrite=true to replace them. Returns transferIds plus counts; poll faro_transfer_status to confirm completion.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "transferId": { "type": "string", "description": "The transferId returned by faro_download or faro_upload." }
+                        "localDir": { "type": "string", "description": "Path to the local directory to upload. Must exist and be a directory." },
+                        "remoteDir": { "type": "string", "description": "Remote destination directory the local directory is created inside." },
+                        "overwrite": { "type": "boolean", "description": "Replace existing remote files instead of renaming the new ones. Default false." },
+                        "session": session_prop
+                    },
+                    "required": ["localDir", "remoteDir"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "faro_transfer_status",
+                "description": "Check whether a transfer (started via faro_download, faro_upload or faro_upload_dir) has finished. Returns status (queued|transferring|done|skipped|error|canceled), bytes transferred, and any error. Poll this after starting a transfer to confirm success.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "transferId": { "type": "string", "description": "A transferId returned by faro_download, faro_upload or faro_upload_dir." }
                     },
                     "required": ["transferId"],
                     "additionalProperties": false
@@ -2855,6 +3082,20 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             };
             match resolve_session(app, state, session_arg, SessionNeed::Any).await {
                 Ok(id) => mcp_wrap(op_upload(app, state, &id, &local_path, &remote_dir).await),
+                Err(msg) => tool_error(&msg),
+            }
+        }
+        "faro_upload_dir" => {
+            let (Some(local_dir), Some(remote_dir)) =
+                (arg_str(&args, "localDir"), arg_str(&args, "remoteDir"))
+            else {
+                return tool_error("`localDir` and `remoteDir` are required");
+            };
+            let overwrite = args.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+            match resolve_session(app, state, session_arg, SessionNeed::Any).await {
+                Ok(id) => {
+                    mcp_wrap(op_upload_dir(app, state, &id, &local_dir, &remote_dir, overwrite).await)
+                }
                 Err(msg) => tool_error(&msg),
             }
         }
@@ -3105,5 +3346,47 @@ mod tests {
             exec_timeout_from(Some(3_600_000)),
             Duration::from_millis(EXEC_TIMEOUT_MS_MAX)
         );
+    }
+
+    #[test]
+    fn human_bytes_scales() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+        assert_eq!(human_bytes(2 * 1024), "2.0 KB");
+        assert_eq!(human_bytes(3 * 1024 * 1024 + 512 * 1024), "3.5 MB");
+        assert_eq!(human_bytes(5 * 1024 * 1024 * 1024), "5.00 GB");
+    }
+
+    #[test]
+    fn upload_dir_policy_defaults_to_rename() {
+        assert_eq!(upload_overwrite_policy(false), OverwritePolicy::Rename);
+        assert_eq!(upload_overwrite_policy(true), OverwritePolicy::Overwrite);
+    }
+
+    #[test]
+    fn upload_dir_summary_names_counts_and_mode() {
+        let s = upload_dir_summary("C:\\site\\dist", "prod", "/var/www", 12, 3_670_016, false);
+        assert_eq!(
+            s,
+            "Upload directory C:\\site\\dist → prod:/var/www (12 files, 3.5 MB total, overwrite: no)"
+        );
+        let s = upload_dir_summary("./dist", "prod", "/var/www/", 1, 10, true);
+        assert!(s.ends_with("(1 files, 10 B total, overwrite: yes)"));
+    }
+
+    #[tokio::test]
+    async fn count_local_tree_counts_nested_files() {
+        let root = std::env::temp_dir().join(format!("faro-bridge-test-{}", Uuid::new_v4()));
+        let sub = root.join("a").join("b");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(root.join("one.txt"), b"12345").unwrap();
+        std::fs::write(root.join("a").join("two.txt"), b"123").unwrap();
+        std::fs::write(sub.join("three.txt"), b"1").unwrap();
+
+        let (files, bytes) = count_local_tree(&root).await.unwrap();
+        assert_eq!(files, 3);
+        assert_eq!(bytes, 9);
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }
