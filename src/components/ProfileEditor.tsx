@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useConnections } from "@/stores/connectionsStore";
 import { useSettings } from "@/stores/settingsStore";
 import { useDialog } from "@/hooks/useDialog";
@@ -54,6 +54,7 @@ function guessProvider(endpoint?: string): S3Provider {
 
 export function ProfileEditor({ profile, onClose }: Props) {
   const saveProfile = useConnections((s) => s.saveProfile);
+  const connectProfile = useConnections((s) => s.connect);
   const defaultPort = useSettings((s) => s.defaultPort);
 
   // Stable id for the lifetime of the editor, so pairing (which persists to this
@@ -170,18 +171,25 @@ export function ProfileEditor({ profile, onClose }: Props) {
     onClose();
   };
 
-  /// Pair with the daemon at host:port using a 6-digit code. Persists the profile
-  /// first (pairing pins the key onto this id server-side), then re-reads the
-  /// stored key so a later Save keeps it.
+  /// Pair with the daemon at host:port using a 6-digit code. Nothing is
+  /// persisted until the daemon acknowledges, so a failed attempt leaves no
+  /// half-configured connection behind. On success the profile is saved right
+  /// away (pairing IS the consent step — demanding another Save was a dead
+  /// end), the editor closes, and the connection opens.
   const pair = async (code: string): Promise<void> => {
-    await saveProfile(buildProfile());
-    const res = await ipc.pairAgent(id, code);
-    const saved = (await ipc.listProfiles()).find((p) => p.id === id);
-    setAgentKey(saved?.agentKey);
+    const res = await ipc.pairAgent(host.trim(), port, code);
+    // buildProfile() reads state that React hasn't committed yet — pass the
+    // fresh values through explicitly.
+    const finalName = name || res.hostname || `Agent @ ${host}`;
+    setAgentKey(res.serverKey);
+    if (!name) setName(finalName);
+    await saveProfile({ ...buildProfile(), name: finalName, agentKey: res.serverKey });
     toast.success(
       `Paired with ${res.hostname || host}`,
       `${res.os} · ${res.fingerprint}`
     );
+    onClose();
+    void connectProfile(id);
   };
 
   const canSave = isS3
@@ -266,6 +274,7 @@ export function ProfileEditor({ profile, onClose }: Props) {
           />
         ) : isAgent ? (
           <AgentSection
+            profileId={id}
             host={host}
             setHost={setHost}
             port={port}
@@ -436,6 +445,7 @@ export function ProfileEditor({ profile, onClose }: Props) {
 /// ceremony. Controls a whole remote machine (no login/auth) — it's paired once
 /// with a 6-digit code the daemon prints, then keyed by the pinned daemon key.
 function AgentSection({
+  profileId,
   host,
   setHost,
   port,
@@ -445,6 +455,7 @@ function AgentSection({
   onPair,
   onUnpair,
 }: {
+  profileId: string;
   host: string;
   setHost: (v: string) => void;
   port: number;
@@ -458,8 +469,9 @@ function AgentSection({
   const [pairing, setPairing] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [found, setFound] = useState<DiscoveredAgent[] | null>(null);
+  const codeRef = useRef<HTMLInputElement>(null);
 
-  const scan = async () => {
+  const scan = useCallback(async () => {
     setScanning(true);
     try {
       setFound(await ipc.discoverAgents());
@@ -468,7 +480,13 @@ function AgentSection({
     } finally {
       setScanning(false);
     }
-  };
+  }, []);
+
+  // Scan the moment the Faro Agent form opens — finding machines shouldn't
+  // require knowing there's a button for it.
+  useEffect(() => {
+    void scan();
+  }, [scan]);
 
   const doPair = async () => {
     setPairing(true);
@@ -483,6 +501,8 @@ function AgentSection({
   };
 
   const codeValid = /^\d{6}$/.test(code.trim());
+  // The machine the host/port fields currently point at, if it was discovered.
+  const selectedMachine = found?.find((d) => d.host === host && d.port === port);
 
   return (
     <>
@@ -508,7 +528,7 @@ function AgentSection({
         </Field>
       </div>
 
-      {/* LAN discovery */}
+      {/* LAN discovery — runs automatically on open; the button rescans. */}
       <div className="mb-3">
         <button
           type="button"
@@ -521,38 +541,60 @@ function AgentSection({
           ) : (
             <Radar size={12} />
           )}
-          {scanning ? "Scanning…" : "Scan local network"}
+          {scanning ? "Scanning…" : found ? "Rescan network" : "Scan local network"}
         </button>
-        {found && found.length === 0 && (
+        {found && found.length === 0 && !scanning && (
           <div className="mt-1.5 text-[11px] text-text-dim">
-            No Faro Agents found. Make sure <span className="font-mono">faro-agentd</span>{" "}
-            is running on the target machine, or enter its IP above.
+            No machines found. Start <span className="font-mono">faro-agentd</span> on
+            the machine you want to control (or enable Remote control in its Faro
+            app), or enter its IP above.
           </div>
         )}
         {found && found.length > 0 && (
           <div className="mt-1.5 flex flex-col gap-1">
-            {found.map((d) => (
-              <button
-                key={d.fingerprint + d.host}
-                type="button"
-                onClick={() => {
-                  setHost(d.host);
-                  setPort(d.port);
-                  setPortTouched(true);
-                }}
-                className="flex items-center justify-between rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-left text-xs hover:bg-bg-hover"
-              >
-                <span className="min-w-0">
-                  <span className="block truncate font-medium text-text">
-                    {d.hostname || d.host}
+            {found.map((d) => {
+              const selected = d.host === host && d.port === port;
+              const isThisProfile = d.pairedProfileId === profileId;
+              return (
+                <button
+                  key={d.fingerprint + d.host}
+                  type="button"
+                  onClick={() => {
+                    setHost(d.host);
+                    setPort(d.port);
+                    setPortTouched(true);
+                    // Lead the user to the next step instead of silently
+                    // filling a field they may not be looking at.
+                    if (!paired) codeRef.current?.focus();
+                  }}
+                  className={cn(
+                    "flex items-center justify-between rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors",
+                    selected
+                      ? "border-accent bg-accent/10"
+                      : "border-border bg-bg-subtle hover:bg-bg-hover"
+                  )}
+                >
+                  <span className="min-w-0">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="truncate font-medium text-text">
+                        {d.hostname || d.host}
+                      </span>
+                      {selected && <Check size={11} className="shrink-0 text-accent" />}
+                    </span>
+                    <span className="block truncate text-[10px] text-text-dim">
+                      {d.os} · {d.host}:{d.port} · {d.fingerprint}
+                    </span>
                   </span>
-                  <span className="block truncate text-[10px] text-text-dim">
-                    {d.os} · {d.host}:{d.port} · {d.fingerprint}
-                  </span>
-                </span>
-                <MonitorSmartphone size={13} className="shrink-0 text-text-dim" />
-              </button>
-            ))}
+                  {d.pairedProfileId ? (
+                    <span className="ml-2 shrink-0 rounded-full border border-success/40 bg-success/10 px-1.5 py-0.5 text-[9px] font-medium text-success">
+                      {isThisProfile ? "this connection" : "paired"}
+                    </span>
+                  ) : (
+                    <MonitorSmartphone size={13} className="ml-2 shrink-0 text-text-dim" />
+                  )}
+                </button>
+              );
+            })}
           </div>
         )}
       </div>
@@ -576,18 +618,40 @@ function AgentSection({
         <div className="mb-3 rounded-md border border-border bg-bg-subtle p-2.5">
           <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-text">
             <Link2 size={13} className="text-accent" />
-            Pair with this machine
+            {selectedMachine
+              ? `Pair with ${selectedMachine.hostname || host}`
+              : "Pair with this machine"}
           </div>
           <div className="mb-2 text-[11px] leading-relaxed text-text-dim">
-            On the target machine run{" "}
-            <span className="font-mono text-text-muted">faro-agentd pair</span> and
-            type the 6-digit code it prints below. Pairing sets up an end-to-end
-            encrypted link and pins the machine's key — you won't need the code again.
+            {selectedMachine ? (
+              <>
+                Type the 6-digit code showing on{" "}
+                <span className="font-medium text-text-muted">
+                  {selectedMachine.hostname || host}
+                </span>
+                . No code there? Run{" "}
+                <span className="font-mono text-text-muted">faro-agentd pair</span> on
+                it, or open its Faro app → Settings → Remote control → Show pairing
+                code.
+              </>
+            ) : (
+              <>
+                On the machine you want to control, run{" "}
+                <span className="font-mono text-text-muted">faro-agentd pair</span> (or
+                open its Faro app → Settings → Remote control → Show pairing code) and
+                type the 6-digit code below. Pairing sets up an end-to-end encrypted
+                link and pins the machine's key — you won't need the code again.
+              </>
+            )}
           </div>
           <div className="flex gap-2">
             <input
+              ref={codeRef}
               value={code}
               onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && codeValid && host && !pairing) void doPair();
+              }}
               placeholder="000000"
               inputMode="numeric"
               className={cn(inputCls, "flex-1 text-center font-mono tracking-[0.3em]")}
@@ -599,7 +663,7 @@ function AgentSection({
               className="btn-accent flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               {pairing && <Loader2 size={13} className="animate-spin" />}
-              Pair
+              {pairing ? "Pairing…" : "Pair"}
             </button>
           </div>
         </div>

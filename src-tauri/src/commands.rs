@@ -78,11 +78,40 @@ pub async fn disconnect(
 
 // ---------- Faro Agent (Faro-to-Faro remote control) ----------
 
+/// A discovered daemon plus what this Faro already knows about it, so the UI
+/// can label machines that are already paired instead of offering to re-pair.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredAgent {
+    #[serde(flatten)]
+    pub agent: crate::session::agent::discovery::Discovered,
+    /// Id of a saved profile whose pinned key matches this machine, if any.
+    pub paired_profile_id: Option<String>,
+}
+
 /// Discover `faro-agentd` daemons on the local network over mDNS. Best-effort;
 /// returns an empty list on a network without multicast rather than erroring.
 #[tauri::command]
-pub async fn discover_agents() -> Result<Vec<crate::session::agent::discovery::Discovered>, String> {
-    Ok(crate::session::agent::discovery::browse(Duration::from_millis(1500)).await)
+pub async fn discover_agents(
+    state: State<'_, AppState>,
+) -> Result<Vec<DiscoveredAgent>, String> {
+    let found = crate::session::agent::discovery::browse(Duration::from_millis(1500)).await;
+    // Map the pinned keys of saved profiles to the fingerprints daemons advertise.
+    let mut fp_to_profile = std::collections::HashMap::new();
+    for p in state.profiles.list().await.map_err(err)? {
+        if let Some(key) = &p.agent_key {
+            if let Ok(raw) = faro_agent_proto::decode_public(key) {
+                fp_to_profile.insert(faro_agent_proto::fingerprint_of(&raw), p.id.clone());
+            }
+        }
+    }
+    Ok(found
+        .into_iter()
+        .map(|agent| DiscoveredAgent {
+            paired_profile_id: fp_to_profile.get(&agent.fingerprint).cloned(),
+            agent,
+        })
+        .collect())
 }
 
 /// This controller's own agent public key (base64). Shown in the pairing UI so a
@@ -92,37 +121,28 @@ pub async fn agent_public_key() -> Result<String, String> {
     crate::session::agent::controller_public_key().map_err(err)
 }
 
-/// Result of pairing, surfaced to the UI to confirm the machine.
+/// Result of pairing, surfaced to the UI to confirm the machine. Carries the
+/// daemon's pinned key; the frontend stores it into the profile it saves.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentPairResult {
+    pub server_key: String,
     pub fingerprint: String,
     pub hostname: String,
     pub os: String,
 }
 
-/// Pair with a `faro-agentd` at `host:port` using a one-time `code`, then persist
-/// the daemon's pinned key into the profile so subsequent connects are keyed. The
-/// profile must already exist (created by the connection form) and use protocol
-/// `"faro-agent"`.
+/// Pair with a `faro-agentd` at `host:port` using a one-time `code`. Persists
+/// nothing — the connection editor keeps the returned key and only saves a
+/// profile once pairing has succeeded, so a failed attempt leaves no
+/// half-configured connection behind.
 #[tauri::command]
-pub async fn pair_agent(
-    profile_id: String,
-    code: String,
-    state: State<'_, AppState>,
-) -> Result<AgentPairResult, String> {
-    let mut profile = state
-        .profiles
-        .get(&profile_id)
-        .await
-        .map_err(err)?
-        .ok_or_else(|| format!("profile {profile_id} not found"))?;
-    let outcome = crate::session::agent_pair(&profile.host, profile.port, &code)
+pub async fn pair_agent(host: String, port: u16, code: String) -> Result<AgentPairResult, String> {
+    let outcome = crate::session::agent_pair(host.trim(), port, &code)
         .await
         .map_err(err)?;
-    profile.agent_key = Some(outcome.server_key);
-    state.profiles.upsert(profile).await.map_err(err)?;
     Ok(AgentPairResult {
+        server_key: outcome.server_key,
         fingerprint: outcome.fingerprint,
         hostname: outcome.system_info.hostname,
         os: outcome.system_info.os,

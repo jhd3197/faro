@@ -58,7 +58,7 @@ export function isAgentProtocol(p: Protocol): boolean {
   return p === "faro-agent";
 }
 
-/** A daemon found on the LAN by mDNS discovery (mirrors Discovered in Rust). */
+/** A daemon found on the LAN by mDNS discovery (mirrors DiscoveredAgent in Rust). */
 export interface DiscoveredAgent {
   hostname: string;
   host: string;
@@ -66,10 +66,14 @@ export interface DiscoveredAgent {
   fingerprint: string;
   os: string;
   version: string;
+  /** Id of a saved profile already pinned to this machine's key, if any. */
+  pairedProfileId?: string | null;
 }
 
 /** Result of a successful pairing (mirrors AgentPairResult in Rust). */
 export interface AgentPairResult {
+  /** The daemon's static public key (base64) — pin it into the profile. */
+  serverKey: string;
   fingerprint: string;
   hostname: string;
   os: string;

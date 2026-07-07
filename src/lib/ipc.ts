@@ -58,10 +58,11 @@ export const ipc = {
   /** This controller's own agent public key, for the pairing UI. */
   agentPublicKey: () => invoke<string>("agent_public_key"),
 
-  /** Pair a Faro Agent profile with a one-time 6-digit code, pinning the
-   *  daemon's key into the profile. */
-  pairAgent: (profileId: string, code: string) =>
-    invoke<AgentPairResult>("pair_agent", { profileId, code }),
+  /** Pair with a faro-agentd at host:port using a one-time 6-digit code.
+   *  Returns the daemon's key to pin into the profile; persists nothing itself,
+   *  so a failed pairing leaves no half-configured connection behind. */
+  pairAgent: (host: string, port: number, code: string) =>
+    invoke<AgentPairResult>("pair_agent", { host, port, code }),
 
   listDirectory: (sessionId: SessionId, path: string) =>
     invoke<DirEntry[]>("list_directory", { sessionId, path }),
