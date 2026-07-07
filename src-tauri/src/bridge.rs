@@ -8,6 +8,7 @@
 //!   * `list_dir` / `read_file` / `search` — inspect the remote filesystem,
 //!   * `download` / `upload` / `upload_dir` — move files through Faro's
 //!     transfer engine,
+//!   * `sync` — one-way directory sync (plan/dry-run + gated execute),
 //!   * `server_info` / `list_sessions` — context about what's connected.
 //!
 //! Security model:
@@ -36,6 +37,7 @@ use uuid::Uuid;
 
 use crate::remotefs::FileKind;
 use crate::session::{ExecStream, Session};
+use crate::sync::{SyncDirection, SyncStrategy};
 use crate::transfer::OverwritePolicy;
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -129,7 +131,7 @@ pub struct BridgeStatus {
 pub struct ActivityEntry {
     pub id: String,
     pub session_id: String,
-    pub kind: String, // "exec" | "read" | "download" | "upload" | "upload_dir" | "search" | "denied" | "error"
+    pub kind: String, // "exec" | "read" | "download" | "upload" | "upload_dir" | "sync" | "search" | "denied" | "error"
     pub detail: String,
     pub ok: bool,
     pub at: i64, // unix millis
@@ -848,6 +850,7 @@ async fn route(app: &AppHandle, state: &Arc<BridgeState>, req: &Request) -> (u16
         ("POST", "/download") => handle_download(app, state, &req.body).await,
         ("POST", "/upload") => handle_upload(app, state, &req.body).await,
         ("POST", "/upload_dir") => handle_upload_dir(app, state, &req.body).await,
+        ("POST", "/sync") => handle_sync(app, state, &req.body).await,
         ("POST", "/search") => handle_search(app, state, &req.body).await,
         ("POST", "/read_batch") => handle_read_batch(app, state, &req.body).await,
         ("POST", "/glob") => handle_glob(app, state, &req.body).await,
@@ -998,6 +1001,32 @@ async fn handle_upload_dir(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8
     }
     let overwrite = parsed.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
     op_upload_dir(app, state, &session_id, &local_dir, &remote_dir, overwrite).await
+}
+
+async fn handle_sync(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    let local_dir = body_str(&parsed, "localDir");
+    let remote_dir = body_str(&parsed, "remoteDir");
+    if session_id.is_empty() || local_dir.is_empty() || remote_dir.is_empty() {
+        return (
+            400,
+            json!({"error": "sessionId, localDir and remoteDir are required"}),
+        );
+    }
+    let (direction, strategy) =
+        match parse_sync_args(&body_str(&parsed, "direction"), &body_str(&parsed, "strategy")) {
+            Ok(v) => v,
+            Err(msg) => return (400, json!({ "error": msg })),
+        };
+    let dry_run = parsed.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
+    op_sync(
+        app, state, &session_id, &local_dir, &remote_dir, direction, strategy, dry_run,
+    )
+    .await
 }
 
 async fn handle_search(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
@@ -2322,6 +2351,322 @@ async fn op_upload_dir(
     }
 }
 
+/// Parse the wire words for a sync request. Defaults (empty string) are
+/// push + additive — the least destructive combination.
+fn parse_sync_args(
+    direction: &str,
+    strategy: &str,
+) -> Result<(SyncDirection, SyncStrategy), String> {
+    let d = match direction {
+        "" | "push" => SyncDirection::LocalToRemote,
+        "pull" => SyncDirection::RemoteToLocal,
+        other => return Err(format!("direction must be \"push\" or \"pull\" (got \"{other}\")")),
+    };
+    let s = match strategy {
+        "" | "additive" => SyncStrategy::Additive,
+        "mirror" => SyncStrategy::Mirror,
+        other => {
+            return Err(format!(
+                "strategy must be \"additive\" or \"mirror\" (got \"{other}\")"
+            ))
+        }
+    };
+    Ok((d, s))
+}
+
+fn sync_direction_word(direction: SyncDirection) -> &'static str {
+    match direction {
+        SyncDirection::LocalToRemote => "push",
+        SyncDirection::RemoteToLocal => "pull",
+    }
+}
+
+fn sync_strategy_word(strategy: SyncStrategy) -> &'static str {
+    match strategy {
+        SyncStrategy::Additive => "additive",
+        SyncStrategy::Mirror => "mirror",
+    }
+}
+
+/// The one-shot approval summary for executing a sync plan. Mirror deletes are
+/// the riskiest part, so the delete count is always spelled out for mirror —
+/// and additive says so explicitly, so "no deletes" is a promise, not an
+/// omission.
+#[allow(clippy::too_many_arguments)]
+fn sync_gate_summary(
+    direction: SyncDirection,
+    strategy: SyncStrategy,
+    local_dir: &str,
+    session_name: &str,
+    remote_dir: &str,
+    copies: usize,
+    bytes: u64,
+    deletes: usize,
+) -> String {
+    let tail = match strategy {
+        SyncStrategy::Mirror => {
+            format!(", delete {deletes} files on the destination (mirror)")
+        }
+        SyncStrategy::Additive => ", no deletes (additive)".to_string(),
+    };
+    format!(
+        "Sync {} {local_dir} ↔ {session_name}:{remote_dir} — copy {copies} files ({}){tail}",
+        sync_direction_word(direction),
+        human_bytes(bytes),
+    )
+}
+
+/// Cap on per-file plan entries returned by a dry run.
+const SYNC_PLAN_MAX_ENTRIES: usize = 200;
+
+/// One-way directory sync through the transfer engine, mirroring the UI's
+/// plan → confirm → execute flow. A dry run only walks both trees, so it's
+/// classed as a READ (auto-approvable under auto_read) and returns the capped
+/// plan without changing anything. Executing plans first, then gates ONCE as a
+/// Write with the copy/delete counts in the summary — OpClass::Write is never
+/// auto-approved by auto_read/auto_safe_exec, so a mirror sync's deletes always
+/// face the user unless they opted into allow-all. Copies overwrite the
+/// destination file (OverwritePolicy::Overwrite), exactly like the UI's sync.
+#[allow(clippy::too_many_arguments)]
+async fn op_sync(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    local_dir: &str,
+    remote_dir: &str,
+    direction: SyncDirection,
+    strategy: SyncStrategy,
+    dry_run: bool,
+) -> (u16, Value) {
+    let manager = app.state::<AppState>().sessions.clone();
+    let Some(sess) = manager.get(session_id).await else {
+        return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
+    };
+    let name = sess.profile().name.clone();
+
+    // Opt-in check before ANY I/O: even planning walks the remote tree.
+    // (The gate below re-checks; this just refuses earlier.)
+    if !state.is_enabled(session_id).await {
+        return (403, json!({
+            "error": format!(
+                "connection '{}' has not granted agent access. Ask the user to open Faro → Agent Bridge and toggle 'Allow agent access' for it.",
+                name
+            )
+        }));
+    }
+
+    // For a push the local side is the source and must exist; for a pull it's
+    // the destination (the planner tolerates a missing/empty side).
+    if matches!(direction, SyncDirection::LocalToRemote) {
+        match tokio::fs::metadata(local_dir).await {
+            Ok(m) if m.is_dir() => {}
+            _ => {
+                return (
+                    400,
+                    json!({"error": format!("localDir {local_dir} does not exist or is not a directory")}),
+                )
+            }
+        }
+    }
+
+    let dir_word = sync_direction_word(direction);
+    let strategy_word = sync_strategy_word(strategy);
+
+    if dry_run {
+        // Gate the dry run as a read BEFORE walking anything, so the tree
+        // listing itself is covered by the user's read policy.
+        if let Err(resp) = gate(
+            app,
+            state,
+            session_id,
+            &name,
+            OpClass::Read,
+            "sync",
+            &format!(
+                "Plan sync {dir_word} {local_dir} ↔ {name}:{remote_dir} ({strategy_word}, dry run — no changes)"
+            ),
+            None,
+        )
+        .await
+        {
+            return resp;
+        }
+    }
+
+    let local_fs: Box<dyn crate::remotefs::RemoteFs> = Box::new(crate::remotefs::local::LocalFs);
+    let remote_fs = crate::commands::fs_for_session(&sess);
+    let plan = match crate::sync::plan(
+        local_fs.as_ref(),
+        remote_fs.as_ref(),
+        local_dir,
+        remote_dir,
+        direction,
+        strategy,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(e) => {
+            state
+                .log(
+                    app,
+                    activity(
+                        "error",
+                        session_id,
+                        format!("sync {dir_word} {local_dir} ↔ {remote_dir} — {e}"),
+                        false,
+                    ),
+                )
+                .await;
+            return (500, json!({"error": e.to_string()}));
+        }
+    };
+
+    let copy_count = plan.copies.len();
+    let delete_count = plan.deletes.len();
+    let total_bytes = plan.total_bytes;
+
+    if dry_run {
+        state
+            .log(
+                app,
+                activity(
+                    "sync",
+                    session_id,
+                    format!(
+                        "sync dry-run {dir_word} {local_dir} ↔ {remote_dir} ({strategy_word}) — copy {copy_count} ({}), delete {delete_count}",
+                        human_bytes(total_bytes)
+                    ),
+                    true,
+                ),
+            )
+            .await;
+        let copies: Vec<Value> = plan
+            .copies
+            .iter()
+            .take(SYNC_PLAN_MAX_ENTRIES)
+            .map(|c| json!({ "relative": c.relative, "size": c.size, "reason": c.reason }))
+            .collect();
+        let deletes: Vec<Value> = plan
+            .deletes
+            .iter()
+            .take(SYNC_PLAN_MAX_ENTRIES)
+            .map(|d| json!({ "relative": d.relative, "size": d.size }))
+            .collect();
+        return (
+            200,
+            json!({
+                "dryRun": true,
+                "direction": dir_word,
+                "strategy": strategy_word,
+                "localDir": plan.local_root,
+                "remoteDir": plan.remote_root,
+                "copyCount": copy_count,
+                "deleteCount": delete_count,
+                "totalBytes": total_bytes,
+                "copies": copies,
+                "deletes": deletes,
+                "listTruncated": copy_count > SYNC_PLAN_MAX_ENTRIES || delete_count > SYNC_PLAN_MAX_ENTRIES,
+            }),
+        );
+    }
+
+    if copy_count == 0 && delete_count == 0 {
+        // Nothing to do — don't raise an approval prompt for a no-op.
+        state
+            .log(
+                app,
+                activity(
+                    "sync",
+                    session_id,
+                    format!("sync {dir_word} {local_dir} ↔ {remote_dir} — already in sync"),
+                    true,
+                ),
+            )
+            .await;
+        return (
+            200,
+            json!({
+                "transferIds": [],
+                "copyCount": 0,
+                "deleteCount": 0,
+                "totalBytes": 0,
+                "status": "in-sync",
+            }),
+        );
+    }
+
+    let summary = sync_gate_summary(
+        direction,
+        strategy,
+        local_dir,
+        &name,
+        remote_dir,
+        copy_count,
+        total_bytes,
+        delete_count,
+    );
+    if let Err(resp) = gate(
+        app,
+        state,
+        session_id,
+        &name,
+        OpClass::Write,
+        "sync",
+        &summary,
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    let transfers = app.state::<AppState>().transfers.clone();
+    match crate::commands::execute_sync_plan(sess.clone(), plan, &transfers, app).await {
+        Ok(ids) => {
+            state
+                .log(
+                    app,
+                    activity(
+                        "sync",
+                        session_id,
+                        format!(
+                            "sync {dir_word} {local_dir} ↔ {remote_dir} ({strategy_word}) — {} copies ({}), {delete_count} deletes",
+                            ids.len(),
+                            human_bytes(total_bytes)
+                        ),
+                        true,
+                    ),
+                )
+                .await;
+            (
+                200,
+                json!({
+                    "transferIds": ids,
+                    "copyCount": copy_count,
+                    "deleteCount": delete_count,
+                    "totalBytes": total_bytes,
+                    "status": "started",
+                }),
+            )
+        }
+        Err(e) => {
+            state
+                .log(
+                    app,
+                    activity(
+                        "error",
+                        session_id,
+                        format!("sync {dir_word} {local_dir} ↔ {remote_dir} — {e}"),
+                        false,
+                    ),
+                )
+                .await;
+            (500, json!({"error": e.to_string()}))
+        }
+    }
+}
+
 pub(crate) async fn op_search(
     app: &AppHandle,
     state: &Arc<BridgeState>,
@@ -2859,6 +3204,23 @@ fn mcp_tools_list() -> Value {
                 }
             },
             {
+                "name": "faro_sync",
+                "description": "One-way sync between a local directory and a directory on the user's connected server, through Faro's transfer engine. direction 'push' (default) copies local → remote; 'pull' copies remote → local. Only missing, newer or size-changed files are copied, and each copy OVERWRITES the destination file. strategy 'additive' (default) never deletes anything; 'mirror' ALSO DELETES destination files that don't exist on the source — destructive, so only use it when the user explicitly wants an exact mirror. ALWAYS run with dryRun=true first and show the user the plan: a dry run only lists both trees (a read — nothing changes) and returns the per-file plan plus copy/delete/byte totals. Executing asks the user to approve the WHOLE plan once, with those counts in the prompt. Returns transferIds (deletes are applied in-call); poll faro_transfer_status for the copies.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "localDir": { "type": "string", "description": "Local directory (the source for push, the destination for pull)." },
+                        "remoteDir": { "type": "string", "description": "Remote directory (the destination for push, the source for pull)." },
+                        "direction": { "type": "string", "enum": ["push", "pull"], "description": "push = local → remote (default), pull = remote → local." },
+                        "strategy": { "type": "string", "enum": ["additive", "mirror"], "description": "additive = copy only, never delete (default). mirror = also DELETE destination files missing from the source." },
+                        "dryRun": { "type": "boolean", "description": "Plan only — return what would copy/delete without changing anything. Do this first." },
+                        "session": session_prop
+                    },
+                    "required": ["localDir", "remoteDir"],
+                    "additionalProperties": false
+                }
+            },
+            {
                 "name": "faro_transfer_status",
                 "description": "Check whether a transfer (started via faro_download, faro_upload or faro_upload_dir) has finished. Returns status (queued|transferring|done|skipped|error|canceled), bytes transferred, and any error. Poll this after starting a transfer to confirm success.",
                 "inputSchema": {
@@ -3096,6 +3458,30 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 Ok(id) => {
                     mcp_wrap(op_upload_dir(app, state, &id, &local_dir, &remote_dir, overwrite).await)
                 }
+                Err(msg) => tool_error(&msg),
+            }
+        }
+        "faro_sync" => {
+            let (Some(local_dir), Some(remote_dir)) =
+                (arg_str(&args, "localDir"), arg_str(&args, "remoteDir"))
+            else {
+                return tool_error("`localDir` and `remoteDir` are required");
+            };
+            let (direction, strategy) = match parse_sync_args(
+                &arg_str(&args, "direction").unwrap_or_default(),
+                &arg_str(&args, "strategy").unwrap_or_default(),
+            ) {
+                Ok(v) => v,
+                Err(msg) => return tool_error(&msg),
+            };
+            let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
+            match resolve_session(app, state, session_arg, SessionNeed::Any).await {
+                Ok(id) => mcp_wrap(
+                    op_sync(
+                        app, state, &id, &local_dir, &remote_dir, direction, strategy, dry_run,
+                    )
+                    .await,
+                ),
                 Err(msg) => tool_error(&msg),
             }
         }
@@ -3372,6 +3758,54 @@ mod tests {
         );
         let s = upload_dir_summary("./dist", "prod", "/var/www/", 1, 10, true);
         assert!(s.ends_with("(1 files, 10 B total, overwrite: yes)"));
+    }
+
+    #[test]
+    fn sync_args_parse_with_defaults() {
+        let (d, s) = parse_sync_args("", "").unwrap();
+        assert!(matches!(d, SyncDirection::LocalToRemote));
+        assert!(matches!(s, SyncStrategy::Additive));
+        let (d, s) = parse_sync_args("pull", "mirror").unwrap();
+        assert!(matches!(d, SyncDirection::RemoteToLocal));
+        assert!(matches!(s, SyncStrategy::Mirror));
+        assert!(parse_sync_args("sideways", "").is_err());
+        assert!(parse_sync_args("", "destroy").is_err());
+    }
+
+    #[test]
+    fn sync_summary_names_mirror_deletes() {
+        let s = sync_gate_summary(
+            SyncDirection::LocalToRemote,
+            SyncStrategy::Mirror,
+            "./dist",
+            "prod",
+            "/var/www/app",
+            12,
+            3_670_016,
+            3,
+        );
+        assert_eq!(
+            s,
+            "Sync push ./dist ↔ prod:/var/www/app — copy 12 files (3.5 MB), delete 3 files on the destination (mirror)"
+        );
+    }
+
+    #[test]
+    fn sync_summary_promises_no_deletes_for_additive() {
+        let s = sync_gate_summary(
+            SyncDirection::RemoteToLocal,
+            SyncStrategy::Additive,
+            "C:\\backup",
+            "prod",
+            "/etc/nginx",
+            2,
+            2048,
+            0,
+        );
+        assert_eq!(
+            s,
+            "Sync pull C:\\backup ↔ prod:/etc/nginx — copy 2 files (2.0 KB), no deletes (additive)"
+        );
     }
 
     #[tokio::test]

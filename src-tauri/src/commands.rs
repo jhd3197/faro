@@ -860,6 +860,21 @@ pub async fn sync_execute(
         .get(&session_id)
         .await
         .ok_or_else(|| format!("session {session_id} not found"))?;
+    execute_sync_plan(session, plan, &state.transfers, &app)
+        .await
+        .map_err(err)
+}
+
+/// Queue a sync plan's copies through the transfer engine (overwriting the
+/// destination — the user confirmed the plan), then apply its Mirror deletes.
+/// Shared by the `sync_execute` Tauri command and the Agent Bridge's
+/// `faro_sync`, so both paths behave identically.
+pub(crate) async fn execute_sync_plan(
+    session: Arc<Session>,
+    plan: SyncPlan,
+    transfers: &Arc<crate::transfer::TransferManager>,
+    app: &AppHandle,
+) -> anyhow::Result<Vec<String>> {
     let local_fs: Box<dyn RemoteFs> = Box::new(crate::remotefs::local::LocalFs);
     let remote_fs = fs_for_session(&session);
 
@@ -870,8 +885,7 @@ pub async fn sync_execute(
         let dest_parent = parent_of(&copy.destination_path);
         let id = match plan.direction {
             SyncDirection::LocalToRemote => {
-                state
-                    .transfers
+                transfers
                     .start_upload(
                         session.clone(),
                         copy.source_path,
@@ -879,12 +893,10 @@ pub async fn sync_execute(
                         policy,
                         app.clone(),
                     )
-                    .await
-                    .map_err(err)?
+                    .await?
             }
             SyncDirection::RemoteToLocal => {
-                state
-                    .transfers
+                transfers
                     .start_download(
                         session.clone(),
                         copy.source_path,
@@ -892,8 +904,7 @@ pub async fn sync_execute(
                         policy,
                         app.clone(),
                     )
-                    .await
-                    .map_err(err)?
+                    .await?
             }
         };
         ids.push(id);
