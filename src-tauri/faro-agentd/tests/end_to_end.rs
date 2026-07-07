@@ -86,6 +86,19 @@ async fn pair_then_exec_and_transfer() {
     .unwrap();
     let ack: Response = pch.recv().await.unwrap();
     assert!(matches!(ack, Response::Ok), "pairing should be acknowledged");
+
+    // The real controller asks for SystemInfo on the pairing channel right after
+    // the ack (to name the machine in its confirmation UI) — the daemon must keep
+    // serving the freshly-paired channel instead of dropping it (the v1.3 bug
+    // that made every UI pairing report failure).
+    pch.send(&Request::SystemInfo).await.unwrap();
+    match pch.recv::<Response>().await.unwrap() {
+        Response::SystemInfo(info) => assert!(!info.hostname.is_empty()),
+        other => panic!("expected system info on the pairing channel, got {other:?}"),
+    }
+
+    // pair_connection returns once the controller hangs up.
+    drop(pch);
     let (name, key) = pair_srv.await.unwrap();
     assert_eq!(name, "test-controller");
     assert_eq!(key, client_id.public_b64());

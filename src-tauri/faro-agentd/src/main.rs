@@ -109,15 +109,26 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Bind the daemon's TCP port, turning the classic AddrInUse into advice
+/// instead of a raw OS error.
+async fn bind_port(port: u16) -> Result<TcpListener> {
+    match TcpListener::bind(("0.0.0.0", port)).await {
+        Ok(l) => Ok(l),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => bail!(
+            "port {port} is already in use — most likely another faro-agentd is running.\n  \
+             Stop it first, or pass --port <N> to use a different port."
+        ),
+        Err(e) => Err(e).with_context(|| format!("bind 0.0.0.0:{port}")),
+    }
+}
+
 async fn run(args: Args, dir: PathBuf, identity: Identity, config: Config) -> Result<()> {
     let info = ops::system_info();
     let fingerprint = identity.fingerprint();
     let peers = config.peers.len();
     let daemon = Daemon::new(identity, config, dir);
 
-    let listener = TcpListener::bind(("0.0.0.0", args.port))
-        .await
-        .with_context(|| format!("bind 0.0.0.0:{}", args.port))?;
+    let listener = bind_port(args.port).await?;
     let port = listener.local_addr()?.port();
 
     println!("faro-agentd {} on {} ({})", env!("CARGO_PKG_VERSION"), info.hostname, info.os);
@@ -152,9 +163,7 @@ async fn pair(args: Args, dir: PathBuf, identity: Identity, config: Config) -> R
     let daemon = Daemon::new(identity, config, dir);
     let code = pairing::generate_code();
 
-    let listener = TcpListener::bind(("0.0.0.0", args.port))
-        .await
-        .with_context(|| format!("bind 0.0.0.0:{}", args.port))?;
+    let listener = bind_port(args.port).await?;
     let port = listener.local_addr()?.port();
 
     println!("\n  Pairing {} ({})", info.hostname, info.os);

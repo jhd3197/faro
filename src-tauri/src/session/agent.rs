@@ -60,7 +60,11 @@ pub async fn agent_pair(host: &str, port: u16, code: &str) -> Result<PairOutcome
         .with_context(|| format!("connect to {host}:{port}"))?;
     let mut channel = SecureChannel::establish(stream, Role::Initiator, &sk, Auth::Pairing { psk })
         .await
-        .context("pairing handshake — check the code and that the daemon is in `pair` mode")?;
+        .context(
+            "pairing handshake failed — check the 6-digit code, and that the machine is \
+             showing a pairing code right now (run `faro-agentd pair` on it, or open \
+             Remote control in its Faro app)",
+        )?;
 
     let server_key = channel.remote_static_b64();
     let fingerprint = faro_agent_proto::fingerprint_of(channel.remote_static());
@@ -77,20 +81,19 @@ pub async fn agent_pair(host: &str, port: u16, code: &str) -> Result<PairOutcome
         Response::Error { message, .. } => bail!("daemon rejected pairing: {message}"),
         other => bail!("unexpected pairing reply: {other:?}"),
     }
-    // Grab system info while the channel is open, for the confirmation UI.
-    channel.send(&Request::SystemInfo).await?;
-    let system_info = match channel.recv::<Response>().await? {
-        Response::SystemInfo(info) => info,
-        _ => SystemInfo {
-            os: String::new(),
-            hostname: host.to_string(),
-            arch: String::new(),
-            shell: String::new(),
-            username: String::new(),
-            home_dir: String::new(),
-            agentd_version: String::new(),
-        },
-    };
+    // Grab system info while the channel is open so the UI can name the machine
+    // it just paired with. Best-effort: both sides have already pinned by this
+    // point, and old daemons (≤ v1.3) drop the pairing socket right after the
+    // ack — a failure here must never turn a successful pairing into an error.
+    let system_info = fetch_system_info(&mut channel).await.unwrap_or(SystemInfo {
+        os: String::new(),
+        hostname: host.to_string(),
+        arch: String::new(),
+        shell: String::new(),
+        username: String::new(),
+        home_dir: String::new(),
+        agentd_version: String::new(),
+    });
 
     Ok(PairOutcome { server_key, fingerprint, system_info })
 }
@@ -142,7 +145,14 @@ impl AgentSession {
             Auth::Paired { expect_remote: Some(expect) },
         )
         .await
-        .context("agent handshake")?;
+        .with_context(|| {
+            format!(
+                "secure handshake with {}:{} failed — if the machine is showing a pairing \
+                 code, finish (or close) pairing there first; if its daemon was reinstalled \
+                 or re-keyed, re-pair this connection",
+                profile.host, profile.port
+            )
+        })?;
         channel
             .send(&Hello {
                 protocol_version: PROTOCOL_VERSION,
