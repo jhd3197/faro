@@ -1,15 +1,19 @@
 //! `faro-agentd` CLI.
 //!
 //! Usage:
-//!   faro-agentd run    [--port N] [--read-only] [--no-mdns]   serve paired controllers
-//!   faro-agentd pair   [--port N] [--window MIN] [--json]     serve + open a pairing window
-//!   faro-agentd info                                          print this machine's identity + peers
-//!   faro-agentd unpair <fingerprint|all>                      remove a pinned controller
+//!   faro-agentd run       [--port N] [--read-only] [--no-mdns]   serve paired controllers
+//!   faro-agentd pair      [--port N] [--window MIN] [--json]     serve + open a pairing window
+//!   faro-agentd info                                             print this machine's identity + peers
+//!   faro-agentd unpair    <fingerprint|all>                      remove a pinned controller
+//!   faro-agentd install   [--port N] [--read-only]               run as a background service (autostart)
+//!   faro-agentd uninstall                                        remove the background service
 //!
 //! `pair` is `run` with a pairing window open: already-paired controllers keep
 //! working while new ones pair, and nothing needs restarting afterwards.
 //! `--json` prints machine-readable events (one JSON object per line) so a
 //! hosting panel like ServerKit can read the code and build a `faro://` link.
+//! `install` registers a systemd unit (Linux), LaunchAgent (macOS), or logon
+//! task (Windows) that runs `faro-agentd run` at boot/login.
 //!
 //! Shared flags: --config-dir <path>
 
@@ -114,6 +118,8 @@ async fn main() -> Result<()> {
         "pair" => pair(args, dir, identity, config).await,
         "info" => info(dir, identity, config),
         "unpair" => unpair(dir, config, &args.positional),
+        "install" => faro_agentd::service::install(&service_run_args(&args)),
+        "uninstall" => faro_agentd::service::uninstall(),
         "help" => {
             print_help();
             Ok(())
@@ -124,6 +130,28 @@ async fn main() -> Result<()> {
             bail!("unknown command");
         }
     }
+}
+
+/// Reconstruct the `run` flags to bake into a service definition, so the
+/// installed service serves with the same options the admin chose (config dir,
+/// port, read-only). mDNS is left on by default.
+fn service_run_args(args: &Args) -> Vec<String> {
+    let mut extra = Vec::new();
+    if let Some(dir) = &args.config_dir {
+        extra.push("--config-dir".into());
+        extra.push(dir.display().to_string());
+    }
+    if args.port != DEFAULT_PORT {
+        extra.push("--port".into());
+        extra.push(args.port.to_string());
+    }
+    if args.read_only {
+        extra.push("--read-only".into());
+    }
+    if args.no_mdns {
+        extra.push("--no-mdns".into());
+    }
+    extra
 }
 
 /// Bind the daemon's TCP port, turning the classic AddrInUse into advice
@@ -308,13 +336,16 @@ fn print_help() {
     println!(
         "faro-agentd {} — control this machine from Faro over an encrypted, paired link\n\n\
          USAGE:\n\
-         \x20 faro-agentd run    [--port N] [--read-only] [--no-mdns]   serve paired controllers\n\
-         \x20 faro-agentd pair   [--port N] [--window MIN] [--json]     serve + open a pairing window\n\
-         \x20 faro-agentd info                                          show identity + paired peers\n\
-         \x20 faro-agentd unpair <fingerprint|all>                      remove a pinned controller\n\n\
+         \x20 faro-agentd run       [--port N] [--read-only] [--no-mdns]   serve paired controllers\n\
+         \x20 faro-agentd pair      [--port N] [--window MIN] [--json]     serve + open a pairing window\n\
+         \x20 faro-agentd info                                             show identity + paired peers\n\
+         \x20 faro-agentd unpair    <fingerprint|all>                      remove a pinned controller\n\
+         \x20 faro-agentd install   [--port N] [--read-only]               run as a service (autostart)\n\
+         \x20 faro-agentd uninstall                                        remove the service\n\n\
          `pair` keeps serving already-paired controllers while the window is open\n\
          (default {DEFAULT_WINDOW_MIN} min) and after it closes — no restart needed. `--json` prints\n\
-         one machine-readable event per line for hosting panels.\n\n\
+         one machine-readable event per line for hosting panels. `install` sets up\n\
+         a systemd unit / LaunchAgent / logon task that runs `faro-agentd run`.\n\n\
          SHARED FLAGS:\n\
          \x20 --config-dir <path>   override the config/identity directory\n\n\
          Default port: {}",

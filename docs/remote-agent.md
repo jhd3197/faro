@@ -123,3 +123,52 @@ AI agent reaches it through the same bridge tools it uses for SSH servers
 - `faro_glob`, `faro_tail` and `faro_read_files_batch` stay **SSH-only** (they
   use `find`/`tail -f`/SFTP); on a paired machine the agent is told to run a
   native equivalent through `faro_exec` instead.
+
+## Distribution
+
+There are three ways to get an agent onto the machine you want to control,
+easiest first:
+
+1. **The Faro app** (zero download). Settings → Remote control → toggle on →
+   Show pairing code. Best when the machine already runs Faro. See the top of
+   this doc.
+2. **The headless one-liner** (Linux/macOS servers). Downloads the right
+   `faro-agentd`, installs it as a service, and opens a pairing window:
+   ```sh
+   curl -fsSL https://github.com/jhd3197/Faro/releases/latest/download/install-agentd.sh | sh
+   ```
+   Flags after `| sh -s --`: `--read-only`, `--no-service`, `--dir <path>`,
+   `--version <tag>`.
+3. **The `faro-agentd` binary** (any platform, most control). Grab it from the
+   [release page](https://github.com/jhd3197/Faro/releases/latest), then:
+   ```sh
+   faro-agentd pair            # serve + print a pairing code (window stays open)
+   faro-agentd install         # register a service so it survives reboots
+   faro-agentd install --read-only   # …serving browse/read only
+   faro-agentd uninstall       # remove the service
+   ```
+
+### `faro-agentd install` — what it sets up
+
+`install` writes a per-platform autostart entry that runs `faro-agentd run`
+(inheriting any `--port` / `--read-only` / `--config-dir` you pass), then starts
+it:
+
+| Platform | Mechanism | Scope |
+|----------|-----------|-------|
+| **Linux** | systemd unit | system unit as root (`/etc/systemd/system`), else a per-user unit (`~/.config/systemd/user`, no sudo — `loginctl enable-linger` to survive logout) |
+| **macOS** | LaunchAgent | per-user (`~/Library/LaunchAgents`), `RunAtLoad` + `KeepAlive` |
+| **Windows** | Scheduled Task | per-user, runs at logon (`faro-agentd` is a console app, not an SCM service, so a Task is the honest fit) |
+
+Installing changes *when* the daemon runs, not *what* it can do — the service
+uses the same identity, pins, and policy as an interactive run.
+
+### Bundling with the installer (planned)
+
+The desktop installer currently ships the GUI; `faro-agentd` and `faro-cli` are
+separate release downloads. Because the **embedded agent** (path 1) already
+removes the download for the common GUI-to-GUI case, and the **one-liner** (path
+2) covers headless servers, bundling the binaries as Tauri sidecars — with an
+in-app "install the CLI / run the agent as a service" opt-in — is a follow-up,
+tracked in `docs/plans/1_faro-agent-pairing-and-distribution.md` (Phase 3). It's
+staged separately so it can't destabilise the push-to-main release build.

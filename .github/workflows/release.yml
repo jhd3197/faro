@@ -109,6 +109,18 @@ jobs:
               --draft --title "Faro $tag" \
               --notes "⏳ Build in progress — downloads appear here in ~10 minutes."
 
+      - name: Attach the headless one-line installer
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ver.outputs.tag }}"
+          # A version-pinned copy so `.../download/<tag>/install-agentd.sh` and
+          # `.../releases/latest/download/install-agentd.sh` both resolve.
+          gh release upload "$tag" scripts/install-agentd.sh \
+            --repo "${{ github.repository }}" --clobber
+
   # ---- 2. Desktop app (macOS universal, Windows, Linux) -------------------
   gui:
     needs: prepare
@@ -401,9 +413,17 @@ jobs:
             echo
             echo "> macOS CLI binary is unsigned too — \`xattr -c ./faro-cli-macos-arm64\` before the first run."
             echo
-            echo "### 🖥️ Faro Agent daemon — \`faro-agentd\`"
+            echo "### 🖥️ Faro Agent — control another machine"
             echo
-            echo "Run this on a machine you want to control from Faro (Windows/macOS/Linux) — no SSH server needed. \`faro-agentd pair\` prints a code; enter it in Faro → New Connection → Faro Agent. Rename to \`faro-agentd\` (\`.exe\` on Windows), \`chmod +x\` on macOS/Linux."
+            echo "**Already have Faro on both machines? You don't need anything below.** Open **Settings → Remote control** on the machine you want to control, toggle it on, click **Show pairing code**, and enter that code on your other Faro. No download, no terminal."
+            echo
+            echo "For a **headless Linux/macOS server**, one line installs the agent, sets it up as a service, and opens a pairing window:"
+            echo
+            echo '```sh'
+            echo "curl -fsSL https://github.com/${REPO}/releases/latest/download/install-agentd.sh | sh"
+            echo '```'
+            echo
+            echo "Or grab the \`faro-agentd\` binary directly and run \`faro-agentd pair\` (then \`faro-agentd install\` to autostart it as a service):"
             echo
             echo "| File | Size |"
             echo "|------|------|"

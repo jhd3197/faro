@@ -172,22 +172,35 @@ Surface: `GET /health`, `GET /sessions`, `POST /exec`, and `POST /mcp` (MCP Stre
 ## 🖥️ Faro Agent — control another machine
 
 Reach a whole computer — Windows, macOS, or Linux — the way you already drive a
-remote server, but **without setting up an SSH server** on it. Run the tiny
-headless daemon `faro-agentd` on the machine you want to control, pair it once
-with a 6-digit code (RustDesk-style), and it appears in Faro as a connection you
-can browse, transfer files through, and run native commands on. And because the
+remote server, but **without setting up an SSH server** on it. Pair it once with
+a 6-digit code (RustDesk-style) and it appears in Faro as a connection you can
+browse, transfer files through, and run native commands on. And because the
 [Agent Bridge](#-agent-bridge) brokers Faro's sessions to a local AI, this lets
 Claude Code run **PowerShell on your Windows box or `sh` on your Mac, from
 anywhere** — through one encrypted, pinned, policy-gated link.
 
-```bash
-# On the machine you want to control:
-faro-agentd pair          # prints a 6-digit code; keep it open
-# then in Faro: New Connection → Faro Agent → Scan local network (or type the IP)
-#               → enter the code → Pair.  Done — it's pinned; no code next time.
+**If both machines already have Faro, there's nothing to download.** On the one
+you want to control, open **Settings → Remote control**, toggle it on, and click
+**Show pairing code** — then enter that code on your other Faro. Done.
 
-faro-agentd run           # normal operation: serve paired controllers
-faro-agentd run --read-only   # browse + read + report, but no exec/writes
+For a **headless server**, one line installs the agent, registers it as a
+service, and opens a pairing window:
+
+```bash
+curl -fsSL https://github.com/jhd3197/Faro/releases/latest/download/install-agentd.sh | sh
+```
+
+Or drive the `faro-agentd` binary yourself — one port now both serves paired
+controllers and accepts new pairings, so nothing needs restarting:
+
+```bash
+faro-agentd pair          # serve + open a pairing window; prints a 6-digit code
+# then in Faro: New Connection → Faro Agent → pick this machine → enter the code.
+#               Done — it's pinned; no code next time.
+
+faro-agentd run           # serve paired controllers (no pairing window)
+faro-agentd install       # run as a service so it survives reboots
+faro-agentd install --read-only   # …serving browse + read + report only
 faro-agentd info          # this machine's identity + who's paired
 ```
 
@@ -329,8 +342,8 @@ npm run tauri icon src-tauri/icons/source.png
 - **v1.1** — `faro-cli` binary
 - **v1.2** — edit-in-place external editor
 - **v1.3** — custom title bar with File/Edit/View/Help menus + integrated window controls; GitHub Actions release pipeline + CI
-- **unreleased** — UI density pass (named themes, command palette, sortable detail columns, breadcrumbs, in-pane filter, toasts); the **🤖 Agent Bridge** (AI-agent command access over native MCP); and **🖥️ Faro Agent** — control a paired Windows/macOS/Linux machine (browse, transfer, native exec) over an encrypted, pinned link, no SSH server required *(this)*
-- **next** — Faro Agent internet reach (rendezvous + NAT hole-punch + relay fallback), transfer speed limits, queue editing (priority/retry/pause), filename filters (`.gitignore`-style), WebDAV backend, search/filter
+- **unreleased** — UI density pass (named themes, command palette, sortable detail columns, breadcrumbs, in-pane filter, toasts); the **🤖 Agent Bridge** (AI-agent command access over native MCP); and **🖥️ Faro Agent** — control a paired Windows/macOS/Linux machine (browse, transfer, native exec) over an encrypted, pinned link, no SSH server required. Now with **in-app Remote control** (host the agent from the Faro app — no separate download), a single always-pairable daemon port, `faro-agentd install` service setup + one-line headless installer, and `faro://` deep links for one-click "Connect with Faro" from a hosting panel *(this)*
+- **next** — bundle `faro-agentd`/`faro-cli` in the installer as opt-in sidecars; Faro Agent internet reach (rendezvous + NAT hole-punch + relay fallback), transfer speed limits, queue editing (priority/retry/pause), filename filters (`.gitignore`-style), WebDAV backend, search/filter
 - **release polish** — code signing (Apple Developer / Windows EV cert), Tauri auto-updater, landing page
 
 ## License

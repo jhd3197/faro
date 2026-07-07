@@ -9,6 +9,7 @@ pub mod config;
 pub mod discovery;
 pub mod ops;
 pub mod server;
+pub mod service;
 
 pub use config::{config_dir, config_path, identity_path, Config, Policy};
 pub use server::{handle_paired, pair_connection, pair_handshake, serve, Daemon, PairingWindow};
