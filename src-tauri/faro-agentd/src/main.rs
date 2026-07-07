@@ -2,9 +2,14 @@
 //!
 //! Usage:
 //!   faro-agentd run    [--port N] [--read-only] [--no-mdns]   serve paired controllers
-//!   faro-agentd pair   [--port N]                             open a pairing window, print a code
+//!   faro-agentd pair   [--port N] [--window MIN] [--json]     serve + open a pairing window
 //!   faro-agentd info                                          print this machine's identity + peers
 //!   faro-agentd unpair <fingerprint|all>                      remove a pinned controller
+//!
+//! `pair` is `run` with a pairing window open: already-paired controllers keep
+//! working while new ones pair, and nothing needs restarting afterwards.
+//! `--json` prints machine-readable events (one JSON object per line) so a
+//! hosting panel like ServerKit can read the code and build a `faro://` link.
 //!
 //! Shared flags: --config-dir <path>
 
@@ -16,10 +21,12 @@ use faro_agentd::{
     ops, server, Config, Daemon,
 };
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::net::TcpListener;
 
 const DEFAULT_PORT: u16 = 8722;
+const DEFAULT_WINDOW_MIN: u64 = 15;
 
 struct Args {
     command: String,
@@ -27,6 +34,8 @@ struct Args {
     config_dir: Option<PathBuf>,
     read_only: bool,
     no_mdns: bool,
+    json: bool,
+    window_min: u64,
     positional: Vec<String>,
 }
 
@@ -37,6 +46,8 @@ fn parse_args() -> Args {
         config_dir: None,
         read_only: false,
         no_mdns: false,
+        json: false,
+        window_min: DEFAULT_WINDOW_MIN,
         positional: Vec::new(),
     };
     let mut it = std::env::args().skip(1);
@@ -50,6 +61,12 @@ fn parse_args() -> Args {
             "--config-dir" => a.config_dir = it.next().map(PathBuf::from),
             "--read-only" => a.read_only = true,
             "--no-mdns" => a.no_mdns = true,
+            "--json" => a.json = true,
+            "--window" => {
+                if let Some(v) = it.next() {
+                    a.window_min = v.parse().unwrap_or(DEFAULT_WINDOW_MIN).clamp(1, 24 * 60);
+                }
+            }
             "-h" | "--help" => {
                 a.command = "help".into();
             }
@@ -142,7 +159,7 @@ async fn run(args: Args, dir: PathBuf, identity: Identity, config: Config) -> Re
     let _ad = if args.no_mdns {
         None
     } else {
-        match Advertisement::publish(port, &fingerprint, &info.os) {
+        match Advertisement::publish(port, &fingerprint, &info.os, false) {
             Ok(ad) => {
                 println!("  mDNS     : advertising _faro-agent._tcp");
                 Some(ad)
@@ -157,37 +174,92 @@ async fn run(args: Args, dir: PathBuf, identity: Identity, config: Config) -> Re
     server::serve(listener, daemon).await
 }
 
+/// `run` + an open pairing window: serves already-paired controllers while new
+/// ones pair with the printed code. The window auto-expires; the daemon keeps
+/// serving afterwards, so nothing needs restarting.
 async fn pair(args: Args, dir: PathBuf, identity: Identity, config: Config) -> Result<()> {
     let info = ops::system_info();
     let fingerprint = identity.fingerprint();
-    let daemon = Daemon::new(identity, config, dir);
     let code = pairing::generate_code();
+    let window = Duration::from_secs(args.window_min * 60);
+    let json = args.json;
+
+    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let c2 = counter.clone();
+    let daemon = Daemon::new(identity, config, dir).with_on_paired(move |name, key| {
+        let n = c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({ "event": "paired", "name": name, "key": key, "total": n })
+            );
+        } else {
+            println!("  ✓ paired '{name}'  ({key})  [{n} total]");
+        }
+    });
+    daemon.open_pairing(code.clone(), window).await;
 
     let listener = bind_port(args.port).await?;
     let port = listener.local_addr()?.port();
 
-    println!("\n  Pairing {} ({})", info.hostname, info.os);
-    println!("  ┌─────────────────────────┐");
-    println!("  │   Pairing code: {code}   │");
-    println!("  └─────────────────────────┘");
-    println!("  fingerprint: {fingerprint}");
-    println!("  port       : {port}");
-    println!("\n  In Faro: New Connection → Faro Agent → enter this code.");
-    println!("  Waiting for controllers to pair (Ctrl-C when done)…\n");
+    if json {
+        // One event per line, for panels (ServerKit) driving this headlessly.
+        println!(
+            "{}",
+            serde_json::json!({
+                "event": "pairing",
+                "code": code,
+                "port": port,
+                "fingerprint": fingerprint,
+                "hostname": info.hostname,
+                "os": info.os,
+                "windowSecs": window.as_secs(),
+            })
+        );
+    } else {
+        println!("\n  Pairing {} ({})", info.hostname, info.os);
+        println!("  ┌─────────────────────────┐");
+        println!("  │   Pairing code: {code}   │");
+        println!("  └─────────────────────────┘");
+        println!("  fingerprint: {fingerprint}");
+        println!("  port       : {port}");
+        println!("\n  In Faro: New Connection → Faro Agent → pick this machine → enter the code.");
+        println!(
+            "  Window open for {} min; paired controllers are served the whole time.\n",
+            args.window_min
+        );
+    }
 
-    let _ad = if args.no_mdns {
+    let ad = Arc::new(Mutex::new(if args.no_mdns {
         None
     } else {
-        Advertisement::publish(port, &fingerprint, &info.os).ok()
-    };
+        Advertisement::publish(port, &fingerprint, &info.os, true).ok()
+    }));
 
-    let counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let c2 = counter.clone();
-    server::serve_pairing(listener, daemon, code, move |name, key| {
-        let n = c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-        println!("  ✓ paired '{name}'  ({key})  [{n} total]");
-    })
-    .await
+    // When the window lapses, say so and drop the advertised pairable flag —
+    // serving continues untouched. (Expired windows are also refused lazily,
+    // so this task is cosmetic, not load-bearing.)
+    {
+        let daemon = daemon.clone();
+        let ad = ad.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(window).await;
+            daemon.close_pairing().await;
+            if let Some(ad) = ad.lock().unwrap().as_mut() {
+                let _ = ad.set_pairable(false);
+            }
+            if json {
+                println!("{}", serde_json::json!({ "event": "windowClosed" }));
+            } else {
+                println!(
+                    "  Pairing window closed — still serving paired controllers. \
+                     Run `faro-agentd pair` again for a new code."
+                );
+            }
+        });
+    }
+
+    server::serve(listener, daemon).await
 }
 
 fn info(dir: PathBuf, identity: Identity, config: Config) -> Result<()> {
@@ -237,9 +309,12 @@ fn print_help() {
         "faro-agentd {} — control this machine from Faro over an encrypted, paired link\n\n\
          USAGE:\n\
          \x20 faro-agentd run    [--port N] [--read-only] [--no-mdns]   serve paired controllers\n\
-         \x20 faro-agentd pair   [--port N] [--no-mdns]                 open a pairing window, print a code\n\
+         \x20 faro-agentd pair   [--port N] [--window MIN] [--json]     serve + open a pairing window\n\
          \x20 faro-agentd info                                          show identity + paired peers\n\
          \x20 faro-agentd unpair <fingerprint|all>                      remove a pinned controller\n\n\
+         `pair` keeps serving already-paired controllers while the window is open\n\
+         (default {DEFAULT_WINDOW_MIN} min) and after it closes — no restart needed. `--json` prints\n\
+         one machine-readable event per line for hosting panels.\n\n\
          SHARED FLAGS:\n\
          \x20 --config-dir <path>   override the config/identity directory\n\n\
          Default port: {}",

@@ -66,6 +66,9 @@ export interface DiscoveredAgent {
   fingerprint: string;
   os: string;
   version: string;
+  /** Whether the machine reports an open pairing window right now (null/absent
+   *  on daemons too old to say). */
+  pairable?: boolean | null;
   /** Id of a saved profile already pinned to this machine's key, if any. */
   pairedProfileId?: string | null;
 }

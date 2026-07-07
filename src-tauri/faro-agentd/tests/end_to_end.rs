@@ -8,19 +8,13 @@ use faro_agent_proto::{
     Auth, Role, SecureChannel,
 };
 use faro_agentd::{Config, Daemon};
-use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
 
 /// Build a daemon with its own identity and temp config dir.
 fn make_daemon(config: Config) -> (Daemon, Identity, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let identity = Identity::generate().unwrap();
-    let daemon = Daemon {
-        identity: Arc::new(identity.clone()),
-        config: Arc::new(Mutex::new(config)),
-        config_dir: dir.path().to_path_buf(),
-    };
+    let daemon = Daemon::new(identity.clone(), config, dir.path().to_path_buf());
     (daemon, identity, dir)
 }
 
@@ -272,6 +266,97 @@ async fn unpinned_peer_is_refused() {
     }
     // The server task returns an error for the rejected peer.
     assert!(srv.await.unwrap().is_err());
+}
+
+/// The unified listener serves pairing and paired handshakes on one port —
+/// paired connections keep working while a pairing window is open, and the
+/// freshly-paired controller can reconnect normally with no daemon restart.
+#[tokio::test]
+async fn unified_serve_pairs_and_serves_on_one_port() {
+    let (daemon, server_id, _dir) = make_daemon(Config::default());
+    let server_pub = server_id.public_bytes().unwrap();
+    let client_id = Identity::generate().unwrap();
+    daemon
+        .open_pairing("246802".into(), std::time::Duration::from_secs(60))
+        .await;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = daemon.clone();
+    tokio::spawn(async move {
+        let _ = faro_agentd::serve(listener, srv).await;
+    });
+
+    // Pair through the same port the daemon serves on.
+    let psk = faro_agent_proto::pairing::psk_from_code("246802");
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let ck = client_id.private_bytes().unwrap();
+    let mut pch =
+        SecureChannel::establish(stream, Role::Initiator, &ck, Auth::Pairing { psk })
+            .await
+            .unwrap();
+    pch.send(&Hello {
+        protocol_version: PROTOCOL_VERSION,
+        client_name: "test-controller".into(),
+    })
+    .await
+    .unwrap();
+    assert!(matches!(pch.recv::<Response>().await.unwrap(), Response::Ok));
+    // Served immediately on the pairing channel.
+    pch.send(&Request::Ping).await.unwrap();
+    assert!(matches!(pch.recv::<Response>().await.unwrap(), Response::Pong));
+    drop(pch);
+
+    // A normal paired connection works on the same port, no restart needed.
+    let mut ch = connect_paired(addr, &client_id, server_pub).await;
+    ch.send(&Request::Ping).await.unwrap();
+    assert!(matches!(ch.recv::<Response>().await.unwrap(), Response::Pong));
+}
+
+/// With no pairing window open, a pairing handshake is refused outright while
+/// paired peers still connect.
+#[tokio::test]
+async fn pairing_refused_without_window() {
+    let (daemon, server_id, _dir) = make_daemon(Config::default());
+    let server_pub = server_id.public_bytes().unwrap();
+    let client_id = Identity::generate().unwrap();
+    daemon
+        .config
+        .lock()
+        .await
+        .upsert_peer("test-controller", client_id.public_b64());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let srv = daemon.clone();
+    tokio::spawn(async move {
+        let _ = faro_agentd::serve(listener, srv).await;
+    });
+
+    // Pairing attempt: refused (no window).
+    let stranger = Identity::generate().unwrap();
+    let psk = faro_agent_proto::pairing::psk_from_code("111111");
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let sk = stranger.private_bytes().unwrap();
+    let res =
+        SecureChannel::establish(stream, Role::Initiator, &sk, Auth::Pairing { psk }).await;
+    assert!(res.is_err(), "pairing without a window must fail");
+
+    // Paired connection on the same listener: still fine.
+    let mut ch = connect_paired(addr, &client_id, server_pub).await;
+    ch.send(&Request::Ping).await.unwrap();
+    assert!(matches!(ch.recv::<Response>().await.unwrap(), Response::Pong));
+}
+
+/// An expired window refuses pairing without any background timer.
+#[tokio::test]
+async fn pairing_window_expires() {
+    let (daemon, _server_id, _dir) = make_daemon(Config::default());
+    daemon
+        .open_pairing("135791".into(), std::time::Duration::from_millis(1))
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(daemon.pairing_code().await.is_none(), "expired window must clear");
 }
 
 fn base64_encode(b: &[u8]) -> String {

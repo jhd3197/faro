@@ -589,6 +589,10 @@ function AgentSection({
                     <span className="ml-2 shrink-0 rounded-full border border-success/40 bg-success/10 px-1.5 py-0.5 text-[9px] font-medium text-success">
                       {isThisProfile ? "this connection" : "paired"}
                     </span>
+                  ) : d.pairable ? (
+                    <span className="ml-2 shrink-0 rounded-full border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[9px] font-medium text-accent">
+                      ready to pair
+                    </span>
                   ) : (
                     <MonitorSmartphone size={13} className="ml-2 shrink-0 text-text-dim" />
                   )}
@@ -623,7 +627,17 @@ function AgentSection({
               : "Pair with this machine"}
           </div>
           <div className="mb-2 text-[11px] leading-relaxed text-text-dim">
-            {selectedMachine ? (
+            {selectedMachine && selectedMachine.pairable === false ? (
+              <>
+                <span className="font-medium text-text-muted">
+                  {selectedMachine.hostname || host}
+                </span>{" "}
+                isn't accepting pairing right now. On that machine run{" "}
+                <span className="font-mono text-text-muted">faro-agentd pair</span> (or
+                open its Faro app → Settings → Remote control → Show pairing code),
+                then type the code here.
+              </>
+            ) : selectedMachine ? (
               <>
                 Type the 6-digit code showing on{" "}
                 <span className="font-medium text-text-muted">

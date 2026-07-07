@@ -279,6 +279,9 @@ pub mod discovery {
         pub fingerprint: String,
         pub os: String,
         pub version: String,
+        /// Whether the daemon reports an open pairing window right now.
+        /// `None` — daemon too old to say.
+        pub pairable: Option<bool>,
     }
 
     /// Browse for `timeout` and return the daemons seen. Best-effort: an mDNS
@@ -317,6 +320,9 @@ pub mod discovery {
                         fingerprint: get("fp"),
                         os: get("os"),
                         version: get("v"),
+                        pairable: info
+                            .get_property_val_str("pairable")
+                            .map(|v| v == "1"),
                     };
                     found.insert(info.get_fullname().to_string(), d);
                 }

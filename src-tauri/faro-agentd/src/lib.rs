@@ -11,4 +11,4 @@ pub mod ops;
 pub mod server;
 
 pub use config::{config_dir, config_path, identity_path, Config, Policy};
-pub use server::{handle_paired, pair_connection, pair_handshake, serve, serve_pairing, Daemon};
+pub use server::{handle_paired, pair_connection, pair_handshake, serve, Daemon, PairingWindow};

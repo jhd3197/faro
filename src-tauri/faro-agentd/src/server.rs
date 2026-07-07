@@ -1,11 +1,14 @@
 //! TCP listener, per-connection handshake, and the request loop.
 //!
-//! Two entry points:
-//!   * [`serve`] — normal operation: accept connections, complete a *paired*
-//!     handshake, refuse any peer whose static key isn't pinned, then service
-//!     requests under the daemon's policy.
-//!   * [`serve_pairing`] — pairing window: accept *pairing* handshakes keyed by a
-//!     6-digit code, pin each controller that completes one, and persist.
+//! One listener serves both connection kinds — [`serve`] sniffs the first
+//! handshake frame to tell them apart (no prelude bytes, no second port):
+//!   * **paired** — `Noise_XX`, first frame is 32 bytes (ephemeral key, empty
+//!     plaintext payload). Refuse any peer whose static key isn't pinned, then
+//!     service requests under the daemon's policy.
+//!   * **pairing** — `Noise_XXpsk3`, first frame is 48 bytes (the psk modifier
+//!     AEAD-seals even the first, empty payload — 16-byte tag). Honoured only
+//!     while a [pairing window](Daemon::open_pairing) is open; each controller
+//!     that proves the code gets pinned, persisted, and served immediately.
 
 use crate::config::{config_path, Config};
 use crate::ops;
@@ -17,9 +20,24 @@ use faro_agent_proto::{
 };
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+
+/// First-frame length of a paired `Noise_XX` handshake.
+const XX_FIRST_FRAME: u32 = 32;
+/// First-frame length of a pairing `Noise_XXpsk3` handshake.
+const XXPSK3_FIRST_FRAME: u32 = 48;
+/// How long `dispatch` waits for a first frame before dropping a silent peer.
+const SNIFF_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// An open pairing window: while unexpired, pairing handshakes that prove
+/// `code` are accepted and pinned.
+pub struct PairingWindow {
+    pub code: String,
+    pub expires_at: Instant,
+}
 
 /// Shared daemon state handed to each connection.
 #[derive(Clone)]
@@ -27,6 +45,11 @@ pub struct Daemon {
     pub identity: Arc<Identity>,
     pub config: Arc<Mutex<Config>>,
     pub config_dir: PathBuf,
+    /// The only time pairing handshakes are honoured. Shared so an embedding
+    /// app (or the CLI's expiry timer) can open/close it while serving.
+    pairing: Arc<Mutex<Option<PairingWindow>>>,
+    /// Invoked the moment a controller is pinned: `(name, public_key_b64)`.
+    on_paired: Arc<dyn Fn(&str, &str) + Send + Sync>,
 }
 
 impl Daemon {
@@ -35,20 +58,104 @@ impl Daemon {
             identity: Arc::new(identity),
             config: Arc::new(Mutex::new(config)),
             config_dir,
+            pairing: Arc::new(Mutex::new(None)),
+            on_paired: Arc::new(|_, _| {}),
         }
+    }
+
+    /// Replace the paired-notification hook (builder-style). The CLI prints a
+    /// ✓ line; the embedding app emits an event + toast.
+    pub fn with_on_paired(mut self, f: impl Fn(&str, &str) + Send + Sync + 'static) -> Self {
+        self.on_paired = Arc::new(f);
+        self
+    }
+
+    /// Open (or replace) the pairing window: `code` is accepted for `ttl`.
+    pub async fn open_pairing(&self, code: String, ttl: Duration) {
+        *self.pairing.lock().await = Some(PairingWindow {
+            code,
+            expires_at: Instant::now() + ttl,
+        });
+    }
+
+    pub async fn close_pairing(&self) {
+        *self.pairing.lock().await = None;
+    }
+
+    /// The active pairing code, if a window is open. Expired windows are
+    /// cleared (and refused) here, so expiry needs no background timer.
+    pub async fn pairing_code(&self) -> Option<String> {
+        let mut slot = self.pairing.lock().await;
+        match &*slot {
+            Some(w) if w.expires_at > Instant::now() => Some(w.code.clone()),
+            Some(_) => {
+                *slot = None;
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Time left on the open pairing window, for countdown UIs.
+    pub async fn pairing_remaining(&self) -> Option<Duration> {
+        let slot = self.pairing.lock().await;
+        slot.as_ref()
+            .map(|w| w.expires_at.saturating_duration_since(Instant::now()))
+            .filter(|d| !d.is_zero())
     }
 }
 
-/// Serve paired connections until the listener errors or the process exits.
+/// Serve until the listener errors or the process exits: paired connections
+/// always; pairing handshakes whenever a pairing window is open.
 pub async fn serve(listener: TcpListener, daemon: Daemon) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await.context("accept")?;
         let daemon = daemon.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_paired(stream, daemon).await {
+            if let Err(e) = dispatch(stream, daemon).await {
                 tracing::info!(%peer, "connection closed: {e:#}");
             }
         });
+    }
+}
+
+/// Sniff which handshake the client is opening and route it. `peek` doesn't
+/// consume, so the handshake drivers still read the stream from byte 0.
+async fn dispatch(stream: TcpStream, daemon: Daemon) -> Result<()> {
+    let first = tokio::time::timeout(SNIFF_TIMEOUT, sniff_frame_len(&stream))
+        .await
+        .context("timed out waiting for a handshake")??;
+    match first {
+        XXPSK3_FIRST_FRAME => {
+            let Some(code) = daemon.pairing_code().await else {
+                // No window open: drop it. The PSK couldn't match anyway; a
+                // fabricated failure would only leak timing about the window.
+                anyhow::bail!("pairing attempt refused — no pairing window is open");
+            };
+            let (mut channel, name, key) = pair_handshake(stream, &daemon, &code).await?;
+            (daemon.on_paired)(&name, &key);
+            request_loop(&mut channel, &daemon, &name).await;
+            Ok(())
+        }
+        XX_FIRST_FRAME => handle_paired(stream, daemon).await,
+        other => anyhow::bail!("unrecognised first handshake frame ({other} bytes)"),
+    }
+}
+
+/// Peek the 4-byte length prefix of the first frame without consuming it.
+async fn sniff_frame_len(stream: &TcpStream) -> Result<u32> {
+    let mut buf = [0u8; 4];
+    loop {
+        let n = stream.peek(&mut buf).await.context("peek handshake")?;
+        if n >= 4 {
+            return Ok(u32::from_be_bytes(buf));
+        }
+        if n == 0 {
+            anyhow::bail!("peer closed before the handshake");
+        }
+        // Partial length prefix. peek returns immediately while bytes sit in
+        // the buffer, so wait a beat for the rest instead of spinning.
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -113,38 +220,6 @@ where
         if channel.send(&resp).await.is_err() {
             break;
         }
-    }
-}
-
-/// Run a pairing window on `listener`: every controller that completes a
-/// handshake with the PSK derived from `code` gets pinned and persisted. Loops
-/// until the listener is dropped (the caller decides how long the window stays
-/// open). Emits each successful pairing through `on_paired` at the moment of
-/// pinning, then keeps answering that controller's requests — it asks for
-/// `SystemInfo` right after the ack to name the machine in its confirmation UI.
-pub async fn serve_pairing<F>(
-    listener: TcpListener,
-    daemon: Daemon,
-    code: String,
-    on_paired: F,
-) -> Result<()>
-where
-    F: Fn(String, String) + Send + Sync + Clone + 'static,
-{
-    loop {
-        let (stream, peer) = listener.accept().await.context("accept")?;
-        let daemon = daemon.clone();
-        let code = code.clone();
-        let on_paired = on_paired.clone();
-        tokio::spawn(async move {
-            match pair_handshake(stream, &daemon, &code).await {
-                Ok((mut channel, name, key)) => {
-                    on_paired(name.clone(), key);
-                    request_loop(&mut channel, &daemon, &name).await;
-                }
-                Err(e) => tracing::info!(%peer, "pairing attempt failed: {e:#}"),
-            }
-        });
     }
 }
 
