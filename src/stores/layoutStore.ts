@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { ConnectionProfile } from "@/lib/types";
 
 // Which app-level modal is open (mutually exclusive). Centralized here so the
 // command palette, keyboard shortcuts and title-bar menus can all open them
@@ -29,6 +30,12 @@ interface LayoutState {
   openDialog: (d: AppDialog) => void;
   closeDialog: () => void;
 
+  // Prefill for the New Connection editor, set by a faro:// deep link so the
+  // editor opens pointed at the right server (never auto-connecting). Cleared
+  // when the editor closes.
+  connectionPrefill: Partial<ConnectionProfile> | null;
+  openNewConnection: (prefill?: Partial<ConnectionProfile>) => void;
+
   // When true, the file browser shows the LOCAL filesystem instead of the
   // active server. Toggled by the rail's "Local" home bubble; cleared when a
   // server bubble is selected.
@@ -58,7 +65,11 @@ export const useLayout = create<LayoutState>((set) => ({
 
   dialog: null,
   openDialog: (d) => set({ dialog: d }),
-  closeDialog: () => set({ dialog: null }),
+  closeDialog: () => set({ dialog: null, connectionPrefill: null }),
+
+  connectionPrefill: null,
+  openNewConnection: (prefill) =>
+    set({ dialog: "newConnection", connectionPrefill: prefill ?? null }),
 
   browseLocal: false,
   setBrowseLocal: (v) => set({ browseLocal: v }),

@@ -112,6 +112,23 @@ export interface AgentHostStatus {
   pairing: AgentHostPairing | null;
 }
 
+/** A parsed faro:// deep link forwarded from Rust (mirrors DeepLink there).
+ *  Every field optional; never carries a password. */
+export interface DeepLink {
+  action: "connect" | "pair" | string;
+  protocol?: string;
+  host?: string;
+  port?: number;
+  username?: string;
+  path?: string;
+  name?: string;
+  code?: string;
+  bucket?: string;
+  region?: string;
+  endpoint?: string;
+  account?: string;
+}
+
 // ---- Importers ----
 
 export interface ProfilePreview {

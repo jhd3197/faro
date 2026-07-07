@@ -35,6 +35,10 @@ import { useEditor } from "./stores/editorStore";
 import { useToasts, type ToastVariant } from "./stores/toastStore";
 import { useBridge } from "./stores/bridgeStore";
 import { useSettings } from "./stores/settingsStore";
+import { onDeepLink } from "./lib/ipc";
+import { toast } from "./stores/toastStore";
+import type { DeepLink, Protocol, ConnectionProfile } from "./lib/types";
+import { PROTOCOL_DEFAULT_PORT } from "./lib/types";
 import { Toaster } from "./components/ui/Toaster";
 import { OverwriteDialogHost } from "./components/OverwriteModal";
 import { CommandPalette } from "./components/CommandPalette";
@@ -61,6 +65,7 @@ export default function App() {
   const browserLayout = useSettings((s) => s.browserLayout);
   const dialog = useLayout((s) => s.dialog);
   const closeDialog = useLayout((s) => s.closeDialog);
+  const connectionPrefill = useLayout((s) => s.connectionPrefill);
   const togglePanel = useTransfers((s) => s.togglePanel);
   const transferPanelOpen = useTransfers((s) => s.panelOpen);
   const activeTransfers = useTransfers((s) =>
@@ -75,9 +80,14 @@ export default function App() {
   return (
     <div className="flex h-screen w-screen flex-col">
       <TitleBar />
+      <DeepLinkListener />
       {dialog === "settings" && <Settings onClose={closeDialog} />}
       {dialog === "newConnection" && (
-        <ProfileEditor profile={null} onClose={closeDialog} />
+        <ProfileEditor
+          profile={null}
+          prefill={connectionPrefill}
+          onClose={closeDialog}
+        />
       )}
       {dialog === "import" && <ImportDialog onClose={closeDialog} />}
       {dialog === "about" && <AboutDialog onClose={closeDialog} />}
@@ -468,6 +478,52 @@ function PillButton({
       )}
     </button>
   );
+}
+
+/// Listens for faro:// deep links (from a hosting panel like ServerKit) and
+/// opens the New Connection editor prefilled. Never auto-connects — the user
+/// reviews the target and clicks Connect / Pair, because any web page can fire
+/// a protocol handler.
+function DeepLinkListener() {
+  const openNewConnection = useLayout((s) => s.openNewConnection);
+  useEffect(() => {
+    const un = onDeepLink((dl) => {
+      const prefill = deepLinkToPrefill(dl);
+      openNewConnection(prefill);
+      toast.info(
+        dl.action === "pair" ? "Pair a machine" : "Open connection",
+        prefill.name || prefill.host || undefined
+      );
+    });
+    return () => {
+      void un.then((f) => f());
+    };
+  }, [openNewConnection]);
+  return null;
+}
+
+/// Map a parsed deep link to editor seed values. `pair` links become a
+/// faro-agent profile; everything else a server profile of the named protocol.
+function deepLinkToPrefill(dl: DeepLink): Partial<ConnectionProfile> {
+  const known: Protocol[] = ["sftp", "ftp", "ftps", "s3", "azure", "faro-agent"];
+  const protocol: Protocol =
+    dl.action === "pair"
+      ? "faro-agent"
+      : known.includes(dl.protocol as Protocol)
+      ? (dl.protocol as Protocol)
+      : "sftp";
+  return {
+    protocol,
+    name: dl.name ?? undefined,
+    host: dl.host ?? undefined,
+    port: dl.port ?? PROTOCOL_DEFAULT_PORT[protocol],
+    username: dl.username ?? undefined,
+    defaultRemotePath: dl.path ?? undefined,
+    bucket: dl.bucket ?? undefined,
+    region: dl.region ?? undefined,
+    endpoint: dl.endpoint ?? undefined,
+    account: dl.account ?? undefined,
+  };
 }
 
 function NotifIcon({ variant }: { variant: ToastVariant }) {

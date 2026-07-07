@@ -26,6 +26,12 @@ tauri-build = { version = "2.0", features = [] }
 tauri = { version = "2.1", features = [] }
 # Native file/folder picker for the Upload button + download-folder chooser.
 tauri-plugin-dialog = "2"
+# faro:// deep links (one-click "open in Faro" from a hosting panel like
+# ServerKit). single-instance forwards a link to the already-running window
+# instead of launching a second copy; the `deep-link` feature carries the URL.
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

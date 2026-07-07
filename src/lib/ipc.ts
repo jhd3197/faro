@@ -32,6 +32,7 @@ import type {
   DiscoveredAgent,
   AgentPairResult,
   AgentHostStatus,
+  DeepLink,
 } from "./types";
 
 // Typed wrappers around the Tauri command surface. The string names must match
@@ -350,6 +351,13 @@ export async function onAgentHostPaired(
   return listen<{ name: string; key: string }>("agent-host://paired", (e) =>
     cb(e.payload)
   );
+}
+
+/** A faro:// deep link was opened (from a hosting panel like ServerKit). */
+export async function onDeepLink(
+  cb: (link: DeepLink) => void
+): Promise<UnlistenFn> {
+  return listen<DeepLink>("deep-link://open", (e) => cb(e.payload));
 }
 
 export async function onTransferEvent(

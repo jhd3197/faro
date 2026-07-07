@@ -35,6 +35,9 @@ import { toast } from "@/stores/toastStore";
 
 interface Props {
   profile: ConnectionProfile | null;
+  /** Seed values for a NEW connection (e.g. from a faro:// deep link). Ignored
+   *  when editing an existing profile. Never carries credentials. */
+  prefill?: Partial<ConnectionProfile> | null;
   onClose: () => void;
 }
 
@@ -52,22 +55,26 @@ function guessProvider(endpoint?: string): S3Provider {
   return "aws";
 }
 
-export function ProfileEditor({ profile, onClose }: Props) {
+export function ProfileEditor({ profile, prefill, onClose }: Props) {
   const saveProfile = useConnections((s) => s.saveProfile);
   const connectProfile = useConnections((s) => s.connect);
   const defaultPort = useSettings((s) => s.defaultPort);
 
+  // Seed values: the profile being edited, or a deep-link prefill for a new
+  // one. `profile` still gates "is this an edit" (title, pairing persistence).
+  const seed = profile ?? prefill ?? null;
+
   // Stable id for the lifetime of the editor, so pairing (which persists to this
   // id) and a later Save target the same profile.
   const [id] = useState(profile?.id ?? genId());
-  const [name, setName] = useState(profile?.name ?? "");
-  const [protocol, setProtocol] = useState<Protocol>(profile?.protocol ?? "sftp");
+  const [name, setName] = useState(seed?.name ?? "");
+  const [protocol, setProtocol] = useState<Protocol>(seed?.protocol ?? "sftp");
   // Faro Agent: the pinned daemon key. Set by pairing; carried through Save.
-  const [agentKey, setAgentKey] = useState<string | undefined>(profile?.agentKey);
-  const [host, setHost] = useState(profile?.host ?? "");
-  const [port, setPort] = useState(profile?.port ?? defaultPort);
-  const [portTouched, setPortTouched] = useState<boolean>(!!profile?.port);
-  const [username, setUsername] = useState(profile?.username ?? "");
+  const [agentKey, setAgentKey] = useState<string | undefined>(seed?.agentKey);
+  const [host, setHost] = useState(seed?.host ?? "");
+  const [port, setPort] = useState(seed?.port ?? defaultPort);
+  const [portTouched, setPortTouched] = useState<boolean>(!!seed?.port);
+  const [username, setUsername] = useState(seed?.username ?? "");
   const [authKind, setAuthKind] = useState<AuthMethod["kind"]>(
     profile?.auth.kind ?? "password"
   );
@@ -81,19 +88,19 @@ export function ProfileEditor({ profile, onClose }: Props) {
     profile?.auth.kind === "key" ? profile.auth.passphrase ?? "" : ""
   );
   const [defaultRemotePath, setDefaultRemotePath] = useState(
-    profile?.defaultRemotePath ?? "."
+    seed?.defaultRemotePath ?? "."
   );
   const [autoConnect, setAutoConnect] = useState(profile?.autoConnect ?? false);
 
   // S3-only state.
-  const [bucket, setBucket] = useState(profile?.bucket ?? "");
-  const [region, setRegion] = useState(profile?.region ?? "us-east-1");
-  const [endpoint, setEndpoint] = useState(profile?.endpoint ?? "");
+  const [bucket, setBucket] = useState(seed?.bucket ?? "");
+  const [region, setRegion] = useState(seed?.region ?? "us-east-1");
+  const [endpoint, setEndpoint] = useState(seed?.endpoint ?? "");
   const [s3Provider, setS3Provider] = useState<S3Provider>(
-    profile?.protocol === "s3" ? guessProvider(profile.endpoint) : "aws"
+    seed?.protocol === "s3" ? guessProvider(seed.endpoint) : "aws"
   );
   // Azure-only state.
-  const [azureAccount, setAzureAccount] = useState(profile?.account ?? "");
+  const [azureAccount, setAzureAccount] = useState(seed?.account ?? "");
 
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();

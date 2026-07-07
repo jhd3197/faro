@@ -9,6 +9,7 @@ pub mod bridge;
 mod commands;
 pub mod agent;
 mod agent_host;
+mod deeplink;
 mod editor;
 pub mod importers;
 mod known_hosts;
@@ -39,6 +40,18 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        // single-instance MUST be the first plugin: on Windows/Linux a
+        // `faro://` link launches a second process, and this forwards its argv
+        // (which carries the URL) to the running instance and focuses it,
+        // instead of opening a duplicate window. The `deep-link` feature makes
+        // the forwarded URL fire the same on_open_url handler below.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            use tauri::Manager;
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.set_focus();
+            }
+        }))
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -77,6 +90,26 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 host.auto_start_if_enabled(host_handle).await;
             });
+
+            // faro:// deep links. `on_open_url` covers the app-already-running
+            // case (macOS always; Windows/Linux via single-instance forwarding).
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let dl_handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    deeplink::handle_urls(&dl_handle, event.urls().as_slice());
+                });
+                // Cold start: the OS may have launched us WITH the URL already.
+                if let Ok(Some(urls)) = app.deep_link().get_current() {
+                    deeplink::handle_urls(&app.handle().clone(), urls.as_slice());
+                }
+                // On dev/Linux the scheme must be registered at runtime; on a
+                // packaged build the installer does it. Best-effort.
+                #[cfg(any(windows, target_os = "linux"))]
+                {
+                    let _ = app.deep_link().register_all();
+                }
+            }
 
             Ok(())
         })

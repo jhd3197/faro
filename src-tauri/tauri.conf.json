@@ -27,6 +27,13 @@
       "csp": null
     }
   },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["faro"]
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
