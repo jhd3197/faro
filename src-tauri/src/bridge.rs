@@ -4,7 +4,7 @@
 //! credentials.
 //!
 //! Capabilities exposed to the agent (REST + MCP):
-//!   * `exec` — run a diagnostic/status command (SSH only),
+//!   * `exec` — run a diagnostic/status command (SSH or Faro Agent),
 //!   * `list_dir` / `read_file` / `search` — inspect the remote filesystem,
 //!   * `download` / `upload` — move files through Faro's transfer engine,
 //!   * `server_info` / `list_sessions` — context about what's connected.
@@ -1688,7 +1688,7 @@ pub(crate) async fn op_read_file_batch(
     let Some(ssh) = manager.get_ssh(session_id).await else {
         return (
             400,
-            json!({"error": "read_file_batch currently supports SSH/SFTP sessions — use download for other protocols"}),
+            json!({"error": "read_files_batch is SSH-only — on a Faro Agent machine read files one at a time with read_file; use download for other protocols"}),
         );
     };
     let name = ssh.profile.name.clone();
@@ -1768,7 +1768,7 @@ pub(crate) async fn op_glob(
     let Some(ssh) = manager.get_ssh(session_id).await else {
         return (
             400,
-            json!({"error": "glob currently supports SSH/SFTP sessions"}),
+            json!({"error": "glob is SSH-only (it runs `find` over the shell) — on a Faro Agent machine use exec with a native command instead"}),
         );
     };
     let name = ssh.profile.name.clone();
@@ -1838,7 +1838,7 @@ pub(crate) async fn op_tail(
     let Some(ssh) = manager.get_ssh(session_id).await else {
         return (
             400,
-            json!({"error": "tail currently supports SSH/SFTP sessions"}),
+            json!({"error": "tail is SSH-only — on a Faro Agent machine use exec with a native tail command instead"}),
         );
     };
     let name = ssh.profile.name.clone();
@@ -2192,7 +2192,7 @@ async fn op_history(
 ) -> (u16, Value) {
     let limit = limit.clamp(1, MAX_ACTIVITY);
     let filter_id = if let Some(arg) = session_filter {
-        match resolve_session(app, state, Some(arg), false).await {
+        match resolve_session(app, state, Some(arg), SessionNeed::Any).await {
             Ok(id) => {
                 if !state.is_enabled(&id).await {
                     return (403, json!({
@@ -2510,7 +2510,7 @@ fn mcp_tools_list() -> Value {
             },
             {
                 "name": "faro_read_file",
-                "description": "Read a text file on the user's connected server (SSH/SFTP only). Output is capped at 256 KiB; check the `truncated` flag.",
+                "description": "Read a text file on the user's connected server (SSH/SFTP or a paired Faro Agent machine). Output is capped at 256 KiB; check the `truncated` flag.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -2537,7 +2537,7 @@ fn mcp_tools_list() -> Value {
             },
             {
                 "name": "faro_read_files_batch",
-                "description": "Read several text files from a connected SSH/SFTP server in one call. Each file is capped at 256 KiB and the total response is capped at 1 MiB. Returns an array of file objects; entries that fail to read include an `error` field instead of `content`.",
+                "description": "Read several text files from a connected SSH/SFTP server in one call. SSH-only — on a Faro Agent machine read files one at a time with faro_read_file. Each file is capped at 256 KiB and the total response is capped at 1 MiB. Returns an array of file objects; entries that fail to read include an `error` field instead of `content`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -2550,7 +2550,7 @@ fn mcp_tools_list() -> Value {
             },
             {
                 "name": "faro_glob",
-                "description": "Find files on a connected SSH/SFTP server whose names match a shell glob pattern (e.g. '/var/log/nginx/*.log'), recursively under a root path. SSH sessions use `find`; SFTP sessions are not supported yet. Bounded in depth and results.",
+                "description": "Find files on a connected SSH server whose names match a shell glob pattern (e.g. '/var/log/nginx/*.log'), recursively under a root path. SSH-only — it runs `find` over the shell; on a Faro Agent machine use faro_exec with a native command instead (e.g. Get-ChildItem on Windows). Bounded in depth and results.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -2564,7 +2564,7 @@ fn mcp_tools_list() -> Value {
             },
             {
                 "name": "faro_tail",
-                "description": "Stream the tail of a log file from a connected SSH/SFTP server for up to 30 seconds. Output is forwarded live to Faro's Agent Console and returned when the stream ends (either the timeout or the connection closing). Use this to watch logs in real time.",
+                "description": "Stream the tail of a log file from a connected SSH server for up to 30 seconds. SSH-only. Output is forwarded live to Faro's Agent Console and returned when the stream ends (either the timeout or the connection closing). Use this to watch logs in real time.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -2696,7 +2696,8 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 return tool_error("`name` is required");
             };
             let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
-            let session_id = match resolve_session(app, state, session_arg, true).await {
+            // Saved commands run through the SSH exec path only.
+            let session_id = match resolve_session(app, state, session_arg, SessionNeed::SshOnly).await {
                 Ok(id) => id,
                 Err(msg) => return tool_error(&msg),
             };
@@ -2716,7 +2717,8 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 return tool_error("`command` is required");
             };
             let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
-            let session_id = match resolve_session(app, state, session_arg, true).await {
+            // Exec works on SSH servers and paired Faro Agent machines alike.
+            let session_id = match resolve_session(app, state, session_arg, SessionNeed::Exec).await {
                 Ok(id) => id,
                 Err(msg) => return tool_error(&msg),
             };
@@ -2731,13 +2733,13 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 tool_error(body.get("error").and_then(|v| v.as_str()).unwrap_or("error"))
             }
         }
-        "faro_server_info" => match resolve_session(app, state, session_arg, false).await {
+        "faro_server_info" => match resolve_session(app, state, session_arg, SessionNeed::Any).await {
             Ok(id) => mcp_wrap(op_server_info(app, state, &id).await),
             Err(msg) => tool_error(&msg),
         },
         "faro_list_dir" => {
             let path = arg_str(&args, "path").unwrap_or_else(|| ".".to_string());
-            match resolve_session(app, state, session_arg, false).await {
+            match resolve_session(app, state, session_arg, SessionNeed::Any).await {
                 Ok(id) => mcp_wrap(op_list_dir(app, state, &id, &path).await),
                 Err(msg) => tool_error(&msg),
             }
@@ -2746,7 +2748,8 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             let Some(path) = arg_str(&args, "path") else {
                 return tool_error("`path` is required");
             };
-            match resolve_session(app, state, session_arg, true).await {
+            // read_file has both an SFTP and a Faro Agent daemon path.
+            match resolve_session(app, state, session_arg, SessionNeed::Exec).await {
                 Ok(id) => mcp_wrap(op_read_file(app, state, &id, &path).await),
                 Err(msg) => tool_error(&msg),
             }
@@ -2756,7 +2759,7 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 return tool_error("`query` is required");
             };
             let root = arg_str(&args, "path").unwrap_or_else(|| ".".to_string());
-            match resolve_session(app, state, session_arg, false).await {
+            match resolve_session(app, state, session_arg, SessionNeed::Any).await {
                 Ok(id) => mcp_wrap(op_search(app, state, &id, &root, &query).await),
                 Err(msg) => tool_error(&msg),
             }
@@ -2774,7 +2777,8 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             if paths.is_empty() {
                 return tool_error("`paths` is required");
             }
-            match resolve_session(app, state, session_arg, true).await {
+            // Batch reads go through the SFTP subsystem — SSH only.
+            match resolve_session(app, state, session_arg, SessionNeed::SshOnly).await {
                 Ok(id) => mcp_wrap(op_read_file_batch(app, state, &id, paths).await),
                 Err(msg) => tool_error(&msg),
             }
@@ -2784,7 +2788,8 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 return tool_error("`pattern` is required");
             };
             let root = arg_str(&args, "path").unwrap_or_else(|| ".".to_string());
-            match resolve_session(app, state, session_arg, true).await {
+            // glob shells out to `find` — SSH only.
+            match resolve_session(app, state, session_arg, SessionNeed::SshOnly).await {
                 Ok(id) => mcp_wrap(op_glob(app, state, &id, &root, &pattern).await),
                 Err(msg) => tool_error(&msg),
             }
@@ -2794,7 +2799,8 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 return tool_error("`path` is required");
             };
             let lines = args.get("lines").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
-            match resolve_session(app, state, session_arg, true).await {
+            // tail streams `tail -f` over the SSH shell — SSH only.
+            match resolve_session(app, state, session_arg, SessionNeed::SshOnly).await {
                 Ok(id) => mcp_wrap(op_tail(app, state, &id, &path, lines).await),
                 Err(msg) => tool_error(&msg),
             }
@@ -2804,7 +2810,7 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 return tool_error("`path` is required");
             };
             let local_dir = arg_str(&args, "localDir");
-            match resolve_session(app, state, session_arg, false).await {
+            match resolve_session(app, state, session_arg, SessionNeed::Any).await {
                 Ok(id) => mcp_wrap(op_download(app, state, &id, &path, local_dir).await),
                 Err(msg) => tool_error(&msg),
             }
@@ -2815,7 +2821,7 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             else {
                 return tool_error("`localPath` and `remoteDir` are required");
             };
-            match resolve_session(app, state, session_arg, false).await {
+            match resolve_session(app, state, session_arg, SessionNeed::Any).await {
                 Ok(id) => mcp_wrap(op_upload(app, state, &id, &local_path, &remote_dir).await),
                 Err(msg) => tool_error(&msg),
             }
@@ -2835,59 +2841,116 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
     }
 }
 
-/// All enabled sessions as (id, name, is_ssh).
-async fn enabled_sessions(app: &AppHandle, state: &Arc<BridgeState>) -> Vec<(String, String, bool)> {
+/// Backend class of an enabled session, for tool-capability routing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BackendKind {
+    /// SSH/SFTP server — full shell + SFTP subsystem.
+    Ssh,
+    /// Paired Faro Agent machine — native exec + file reads via the daemon.
+    Agent,
+    /// FTP / object store — file operations only.
+    Other,
+}
+
+/// What a tool needs from the target session.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SessionNeed {
+    /// Any protocol works (RemoteFs-based ops: list, search, transfers).
+    Any,
+    /// Runs commands / reads files natively: SSH servers and Faro Agent
+    /// machines both qualify.
+    Exec,
+    /// Needs the SSH shell / SFTP subsystem specifically (glob's `find`,
+    /// tail's streaming, batch SFTP reads, saved commands). Faro Agent
+    /// machines do NOT qualify.
+    SshOnly,
+}
+
+impl SessionNeed {
+    fn satisfied_by(self, kind: BackendKind) -> bool {
+        match self {
+            SessionNeed::Any => true,
+            SessionNeed::Exec => matches!(kind, BackendKind::Ssh | BackendKind::Agent),
+            SessionNeed::SshOnly => matches!(kind, BackendKind::Ssh),
+        }
+    }
+}
+
+/// All enabled sessions as (id, name, backend kind).
+async fn enabled_sessions(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+) -> Vec<(String, String, BackendKind)> {
     let manager = app.state::<AppState>().sessions.clone();
     let ids: Vec<String> = state.enabled.lock().await.iter().cloned().collect();
     let mut out = Vec::new();
     for id in ids {
         if let Some(sess) = manager.get(&id).await {
-            let is_ssh = matches!(&*sess, Session::Ssh(_));
-            out.push((id, sess.profile().name.clone(), is_ssh));
+            let kind = match &*sess {
+                Session::Ssh(_) => BackendKind::Ssh,
+                Session::Agent(_) => BackendKind::Agent,
+                _ => BackendKind::Other,
+            };
+            out.push((id, sess.profile().name.clone(), kind));
         }
     }
     out
 }
 
-/// Resolve the `session` argument to a concrete session id. When `require_exec`
-/// is set, only SSH sessions are valid (exec/read_file need a shell/SFTP) — but
-/// we resolve against ALL enabled sessions first so a non-SSH match yields an
-/// accurate "that's not SSH" error rather than a misleading "no match".
+/// Resolve the `session` argument to a concrete session id. `need` says what
+/// the calling tool requires of the backend: `Exec` accepts SSH servers AND
+/// paired Faro Agent machines (both run commands and read files natively);
+/// `SshOnly` is for tools built on the SSH shell/SFTP subsystem. We resolve
+/// against ALL enabled sessions first so a capability mismatch yields an
+/// accurate "wrong kind of connection" error rather than a misleading
+/// "no match".
 async fn resolve_session(
     app: &AppHandle,
     state: &Arc<BridgeState>,
     arg: Option<&str>,
-    require_exec: bool,
+    need: SessionNeed,
 ) -> Result<String, String> {
-    let all = enabled_sessions(app, state).await; // (id, name, is_ssh)
+    let all = enabled_sessions(app, state).await; // (id, name, kind)
 
     if let Some(a) = arg {
         return match all
             .iter()
             .find(|(id, name, _)| id == a || name.eq_ignore_ascii_case(a))
         {
-            Some((id, _, is_ssh)) => {
-                if require_exec && !*is_ssh {
-                    Err(format!(
-                        "session \"{a}\" is not an SSH session — exec and read_file need SSH; use list_dir/download/upload for this server"
-                    ))
-                } else {
+            Some((id, _, kind)) => {
+                if need.satisfied_by(*kind) {
                     Ok(id.clone())
+                } else {
+                    Err(match need {
+                        SessionNeed::Exec => format!(
+                            "session \"{a}\" can't run this tool — it needs an SSH or Faro Agent connection; use list_dir/search/download/upload for this server"
+                        ),
+                        _ if *kind == BackendKind::Agent => format!(
+                            "session \"{a}\" is a Faro Agent machine — this tool is SSH-only; use faro_exec with a native command there instead"
+                        ),
+                        _ => format!(
+                            "session \"{a}\" is not an SSH session — this tool needs SSH/SFTP; use list_dir/download/upload for this server"
+                        ),
+                    })
                 }
             }
             None => Err(format!("no enabled session matches \"{a}\"")),
         };
     }
 
-    let candidates: Vec<&(String, String, bool)> = all
+    let candidates: Vec<&(String, String, BackendKind)> = all
         .iter()
-        .filter(|(_, _, is_ssh)| !require_exec || *is_ssh)
+        .filter(|(_, _, kind)| need.satisfied_by(*kind))
         .collect();
     match candidates.len() {
-        0 if require_exec && !all.is_empty() => Err(
-            "the enabled session(s) are not SSH — exec and read_file need SSH; use list_dir/download/upload instead"
-                .into(),
-        ),
+        0 if !all.is_empty() => Err(match need {
+            SessionNeed::SshOnly => {
+                "none of the enabled sessions are SSH — this tool is SSH-only; on a Faro Agent machine use faro_exec instead".into()
+            }
+            _ => {
+                "none of the enabled sessions can run commands — this needs an SSH or Faro Agent connection; use list_dir/download/upload instead".into()
+            }
+        }),
         0 => Err(
             "no server has granted agent access — ask the user to enable it in Faro's Agent Bridge panel"
                 .into(),
