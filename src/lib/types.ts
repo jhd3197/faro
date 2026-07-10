@@ -115,7 +115,7 @@ export interface AgentHostStatus {
 /** A parsed faro:// deep link forwarded from Rust (mirrors DeepLink there).
  *  Every field optional; never carries a password. */
 export interface DeepLink {
-  action: "connect" | "pair" | string;
+  action: "connect" | "pair" | "terminal" | string;
   protocol?: string;
   host?: string;
   port?: number;

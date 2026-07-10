@@ -42,7 +42,7 @@ const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
   { id: "connections", label: "Connections", icon: <Plug size={14} /> },
   { id: "remoteControl", label: "Remote control", icon: <MonitorSmartphone size={14} /> },
   { id: "bridge", label: "Agent Bridge", icon: <Radio size={14} /> },
-  { id: "agent", label: "Agent", icon: <Bot size={14} /> },
+  { id: "agent", label: "Chat", icon: <Bot size={14} /> },
 ];
 
 export function Settings({ onClose }: Props) {
@@ -400,7 +400,7 @@ export function Settings({ onClose }: Props) {
               />
             </Field>
             <Help>
-              Used only by the built-in Agent chat. Stored locally; never sent
+              Used only by the built-in AI chat. Stored locally; never sent
               to Faro's servers.
             </Help>
           </>

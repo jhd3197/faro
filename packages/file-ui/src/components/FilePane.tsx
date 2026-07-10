@@ -56,18 +56,29 @@ interface Segment {
   path: string;
 }
 
-// Build clickable breadcrumb segments for the address bar. Session-aware:
-// Windows-local paths keep drive + backslashes, everything else is POSIX "/".
-function parseSegments(path: string, isLocal: boolean): Segment[] {
+// A drive-letter (C:\ or C:/) or UNC (\\server\share) path is Windows-style
+// regardless of whether the session is local — a Faro Agent on a Windows host
+// serves these too, so the separator must be inferred from the path itself,
+// never from the session kind.
+function isWindowsPath(path: string): boolean {
+  return /^[a-zA-Z]:/.test(path) || path.startsWith("\\\\");
+}
+
+// Build clickable breadcrumb segments for the address bar. Windows-style
+// paths keep drive/UNC prefix + backslashes, everything else is POSIX "/".
+function parseSegments(path: string): Segment[] {
   if (!path || path === ".") return [{ label: path || "/", path: path || "/" }];
   if (path === "/") return [{ label: "/", path: "/" }];
-  const isWin = isLocal && /^[a-zA-Z]:/.test(path);
   const parts = path.split(/[/\\]/).filter(Boolean);
   const segs: Segment[] = [];
-  if (isWin) {
-    let acc = parts[0] + "\\";
-    segs.push({ label: parts[0], path: acc });
-    for (let i = 1; i < parts.length; i++) {
+  if (isWindowsPath(path)) {
+    // UNC: \\server\share is the smallest listable root, so it's one crumb.
+    const isUnc = path.startsWith("\\\\");
+    let acc = isUnc
+      ? "\\\\" + parts.slice(0, 2).join("\\")
+      : parts[0] + "\\";
+    segs.push({ label: isUnc ? acc : parts[0], path: acc });
+    for (let i = isUnc ? 2 : 1; i < parts.length; i++) {
       acc = acc.endsWith("\\") ? acc + parts[i] : acc + "\\" + parts[i];
       segs.push({ label: parts[i], path: acc });
     }
@@ -353,23 +364,24 @@ export function FilePane({
   }, []);
 
   const goUp = () => {
-    const isLocal = sessionId === LOCAL_SESSION;
+    const isWin = isWindowsPath(path);
+    const isUnc = path.startsWith("\\\\");
     const parts = path.split(/[/\\]/).filter(Boolean);
-    if (parts.length <= 1) {
-      onPathChange(isLocal ? path : "/");
+    const rootParts = isUnc ? 2 : 1; // UNC root is \\server\share
+    if (parts.length <= rootParts) {
+      onPathChange(isWin ? path : "/");
       return;
     }
     parts.pop();
-    const next =
-      isLocal && /^[a-zA-Z]:/.test(path)
-        ? parts.join("\\")
-        : "/" + parts.join("/");
+    let next: string;
+    if (isUnc) next = "\\\\" + parts.join("\\");
+    else if (isWin) next = parts.length === 1 ? parts[0] + "\\" : parts.join("\\");
+    else next = "/" + parts.join("/");
     onPathChange(next || "/");
   };
 
   const joinPath = (parent: string, name: string) => {
-    const isLocal = sessionId === LOCAL_SESSION;
-    const sep = isLocal && /^[a-zA-Z]:/.test(parent) ? "\\" : "/";
+    const sep = isWindowsPath(parent) ? "\\" : "/";
     if (parent.endsWith(sep) || parent.endsWith("/")) return `${parent}${name}`;
     return `${parent}${sep}${name}`;
   };
@@ -704,7 +716,7 @@ export function FilePane({
   const selectionCount = selected.size;
   const activeIdx = anchor ? visible.findIndex((v) => v.path === anchor) : -1;
   const activeDescId = activeIdx >= 0 ? `${paneId}-row-${activeIdx}` : undefined;
-  const segments = parseSegments(path, sessionId === LOCAL_SESSION);
+  const segments = parseSegments(path);
   const hasPerms =
     !!sessionId && caps?.canChmod !== false && visible.some((e) => e.mode != null);
   // Columns yield as the pane narrows so the filename never gets crushed:

@@ -29,13 +29,14 @@ import {
   AlertTriangle,
   Radio,
   Columns2,
-  Bot,
+  MessageSquare,
 } from "lucide-react";
 import { useEditor } from "./stores/editorStore";
 import { useToasts, type ToastVariant } from "./stores/toastStore";
 import { useBridge } from "./stores/bridgeStore";
 import { useSettings } from "./stores/settingsStore";
 import { onDeepLink } from "./lib/ipc";
+import { openTerminalWindow } from "./lib/popout";
 import { toast } from "./stores/toastStore";
 import type { DeepLink, Protocol, ConnectionProfile } from "./lib/types";
 import { PROTOCOL_DEFAULT_PORT } from "./lib/types";
@@ -189,6 +190,7 @@ function StatusBar({
     s.console.filter((e) => e.status === "running").length
   );
   const openDialog = useLayout((s) => s.openDialog);
+  const bridgeDialogOpen = useLayout((s) => s.dialog === "agentBridge");
   const consoleOpen = useLayout((s) => s.consoleOpen);
   const toggleConsole = useLayout((s) => s.toggleConsole);
   const chatOpen = useLayout((s) => s.chatOpen);
@@ -371,7 +373,7 @@ function StatusBar({
         )}
       </div>
       <PillButton
-        active={bridgeRunning}
+        active={bridgeDialogOpen}
         onClick={() => openDialog("agentBridge")}
         icon={
           <Radio
@@ -379,7 +381,9 @@ function StatusBar({
             className={bridgeRunning ? "text-success" : undefined}
           />
         }
-        title="Agent Bridge — let a local AI agent run commands on your servers"
+        title={`Agent Bridge${
+          bridgeRunning ? " (running)" : ""
+        } — let a local AI agent run commands on your servers`}
       >
         Bridge
       </PillButton>
@@ -395,10 +399,10 @@ function StatusBar({
       <PillButton
         active={chatOpen}
         onClick={toggleChat}
-        icon={<Bot size={11} />}
-        title="Agent chat — ask an AI agent to work on your servers"
+        icon={<MessageSquare size={11} />}
+        title="AI chat — ask an AI assistant to work on your servers"
       >
-        Agent
+        Chat
       </PillButton>
       <PillButton
         active={browserLayout === "dual"}
@@ -483,11 +487,47 @@ function PillButton({
 /// Listens for faro:// deep links (from a hosting panel like ServerKit) and
 /// opens the New Connection editor prefilled. Never auto-connects — the user
 /// reviews the target and clicks Connect / Pair, because any web page can fire
-/// a protocol handler.
+/// a protocol handler. `faro://terminal` is the one shortcut: if the named
+/// server is ALREADY connected it opens a standalone terminal window for it
+/// (no new connection is ever made), otherwise it falls back to the editor.
 function DeepLinkListener() {
   const openNewConnection = useLayout((s) => s.openNewConnection);
   useEffect(() => {
     const un = onDeepLink((dl) => {
+      if (dl.action === "terminal") {
+        const { profiles, sessions } = useConnections.getState();
+        const norm = (v?: string | null) => (v ?? "").trim().toLowerCase();
+        const match = profiles.find(
+          (p) =>
+            (dl.name && norm(p.name) === norm(dl.name)) ||
+            (dl.host && norm(p.host) === norm(dl.host))
+        );
+        const live = match
+          ? sessions.find((s) => s.profileId === match.id)
+          : undefined;
+        if (match && live && match.protocol === "sftp") {
+          void openTerminalWindow({
+            sessionId: live.sessionId,
+            title: match.name,
+          }).catch((e) => toast.error("Terminal window failed", String(e)));
+          return;
+        }
+        if (match && live) {
+          toast.warning(
+            "No terminal for this server",
+            `${match.name} is a ${match.protocol} connection — terminals need SFTP.`
+          );
+          return;
+        }
+        // Not connected: a link never auto-connects, so the best we can do is
+        // open the prefilled editor with a single explanatory toast.
+        openNewConnection(deepLinkToPrefill(dl));
+        toast.warning(
+          "Server not connected",
+          "Connect it first, then the terminal link can open a shell."
+        );
+        return;
+      }
       const prefill = deepLinkToPrefill(dl);
       openNewConnection(prefill);
       toast.info(

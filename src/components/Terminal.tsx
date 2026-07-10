@@ -2,12 +2,27 @@ import { useEffect, useRef, useState } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { Plus, X, TerminalSquare } from "lucide-react";
+import { SerializeAddon } from "@xterm/addon-serialize";
+import { Plus, X, TerminalSquare, PictureInPicture2 } from "lucide-react";
 import { ipc, onTerminalData, onTerminalExit } from "@/lib/ipc";
 import type { SessionId } from "@/lib/types";
 import { useSettings, TERMINAL_THEMES } from "@/stores/settingsStore";
 import { useTerminals, type TerminalTab } from "@/stores/terminalsStore";
+import { openTerminalWindow, popoutBufferKey } from "@/lib/popout";
+import { toast } from "@/stores/toastStore";
+import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { cn } from "@/lib/cn";
+
+// Live handles to each mounted pane so "Pop out" can serialize the xterm
+// buffer and grab the PTY id without threading refs through the tree.
+const paneHandles = new Map<
+  string,
+  { serialize: () => string; getTerminalId: () => string | null }
+>();
+
+// PTYs handed off to a popped-out window: the pane's unmount cleanup must NOT
+// close these — the new window adopts them and closes them when it closes.
+const handedOffPtys = new Set<string>();
 
 /// Tabbed terminal dock. Backend supports N PTY channels per session — we open
 /// one per tab and keep EVERY `<TerminalPane>` mounted (across all sessions, and
@@ -30,6 +45,56 @@ export function TerminalDock({
   const closeTab = useTerminals((s) => s.closeTab);
   const setActive = useTerminals((s) => s.setActive);
   const renameTab = useTerminals((s) => s.renameTab);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(
+    null
+  );
+
+  // Move a tab's shell into its own window: hand the live PTY over (scrollback
+  // serialized through localStorage) and drop the in-app tab. The popped-out
+  // window owns the PTY from here on and closes it when it closes.
+  const popOut = async (tab: TerminalTab) => {
+    const handle = paneHandles.get(tab.id);
+    const terminalId = handle?.getTerminalId() ?? null;
+    if (terminalId) {
+      try {
+        const buffer = handle!.serialize();
+        if (buffer) localStorage.setItem(popoutBufferKey(terminalId), buffer);
+      } catch {}
+      handedOffPtys.add(terminalId);
+    }
+    try {
+      await openTerminalWindow({
+        sessionId: tab.sessionId,
+        title: tab.title,
+        terminalId: terminalId ?? undefined,
+      });
+      closeTab(tab.id);
+    } catch (e) {
+      if (terminalId) {
+        handedOffPtys.delete(terminalId);
+        localStorage.removeItem(popoutBufferKey(terminalId));
+      }
+      toast.error("Pop out failed", String(e));
+    }
+  };
+
+  const tabMenuItems = (tab: TerminalTab): MenuItem[] => [
+    {
+      label: "Pop out into window",
+      icon: <PictureInPicture2 size={12} />,
+      // No PTY id yet (shell still opening) → nothing to hand off; popping
+      // out now would silently swap the shell for a fresh one.
+      disabled: !paneHandles.get(tab.id)?.getTerminalId(),
+      onClick: () => void popOut(tab),
+      separatorAfter: true,
+    },
+    {
+      label: "Close",
+      icon: <X size={12} />,
+      destructive: true,
+      onClick: () => closeTab(tab.id),
+    },
+  ];
 
   const sessionTabs = sessionId
     ? tabs.filter((t) => t.sessionId === sessionId)
@@ -64,6 +129,10 @@ export function TerminalDock({
               onClick={() => setActive(tab.id)}
               onClose={() => closeTab(tab.id)}
               onRename={(title) => renameTab(tab.id, title)}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                setMenu({ x: e.clientX, y: e.clientY, items: tabMenuItems(tab) });
+              }}
             />
           ))}
           {sessionId && (
@@ -89,6 +158,14 @@ export function TerminalDock({
           />
         ))}
       </div>
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menu.items}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 }
@@ -99,12 +176,14 @@ function TabChip({
   onClick,
   onClose,
   onRename,
+  onContextMenu,
 }: {
   tab: TerminalTab;
   active: boolean;
   onClick: () => void;
   onClose: () => void;
   onRename: (title: string) => void;
+  onContextMenu: (e: React.MouseEvent) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(tab.title);
@@ -148,6 +227,7 @@ function TabChip({
         setDraft(tab.title);
         setEditing(true);
       }}
+      onContextMenu={onContextMenu}
       title={`${tab.title} — double-click to rename`}
       className={cn(
         "group/tab flex h-6 shrink-0 items-center gap-1.5 rounded-md px-2 text-[11px] transition-colors",
@@ -209,12 +289,21 @@ function TerminalPane({
       allowProposedApi: true,
     });
     const fit = new FitAddon();
+    const serialize = new SerializeAddon();
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon());
+    term.loadAddon(serialize);
     term.open(containerRef.current);
     fit.fit();
     termRef.current = term;
     fitRef.current = fit;
+
+    paneHandles.set(tab.id, {
+      // Cap the handoff snapshot: it travels through localStorage (shared
+      // ~5MB origin quota) and a full scrollback of a busy shell can blow it.
+      serialize: () => serialize.serialize({ scrollback: 2000 }),
+      getTerminalId: () => terminalIdRef.current,
+    });
 
     let unlistenData: (() => void) | null = null;
     let unlistenExit: (() => void) | null = null;
@@ -283,6 +372,7 @@ function TerminalPane({
 
     return () => {
       disposed = true;
+      paneHandles.delete(tab.id);
       window.removeEventListener("resize", onWindowResize);
       dataDisposable.dispose();
       resizeDisposable.dispose();
@@ -290,7 +380,9 @@ function TerminalPane({
       if (unlistenData) unlistenData();
       if (unlistenExit) unlistenExit();
       const id = terminalIdRef.current;
-      if (id) ipc.closeTerminal(id).catch(() => {});
+      // A PTY handed off to a popped-out window stays open — the new window
+      // adopted it and owns its lifetime now.
+      if (id && !handedOffPtys.delete(id)) ipc.closeTerminal(id).catch(() => {});
       term.dispose();
       termRef.current = null;
       fitRef.current = null;

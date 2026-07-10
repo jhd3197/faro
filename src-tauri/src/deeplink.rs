@@ -11,7 +11,12 @@
 //! ```text
 //! faro://connect?protocol=sftp&host=example.com&port=22&username=me&path=/var/www&name=My%20Site
 //! faro://pair?host=192.168.1.5&port=8722&code=428170&name=Basement%20NAS
+//! faro://terminal?name=My%20Site
 //! ```
+//!
+//! `terminal` opens a standalone terminal window for an already-connected
+//! server (matched by `name` or `host`); if the server isn't connected, the
+//! UI falls back to the prefilled editor like `connect` does.
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
@@ -91,7 +96,11 @@ pub fn parse(raw: &str) -> Option<DeepLink> {
 pub fn handle_urls(app: &AppHandle, urls: &[url::Url]) {
     for u in urls {
         match parse(u.as_str()) {
-            Some(dl) if dl.action == "connect" || dl.action == "pair" => {
+            Some(dl)
+                if dl.action == "connect"
+                    || dl.action == "pair"
+                    || dl.action == "terminal" =>
+            {
                 if let Err(e) = app.emit("deep-link://open", &dl) {
                     tracing::warn!("failed to forward deep link: {e}");
                 }
@@ -139,6 +148,13 @@ mod tests {
         let dl = parse("faro://connect?host=h&password=hunter2&secret=x").unwrap();
         // No field on DeepLink can hold a credential; the params are ignored.
         assert_eq!(dl.host.as_deref(), Some("h"));
+    }
+
+    #[test]
+    fn parses_terminal_link() {
+        let dl = parse("faro://terminal?name=My%20Site").unwrap();
+        assert_eq!(dl.action, "terminal");
+        assert_eq!(dl.name.as_deref(), Some("My Site"));
     }
 
     #[test]

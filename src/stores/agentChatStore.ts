@@ -41,7 +41,7 @@ export const useAgentChat = create<AgentChatState>((set, get) => ({
   send: async (prompt) => {
     const apiKey = useSettings.getState().anthropicApiKey.trim();
     if (!apiKey) {
-      set({ error: "Add an Anthropic API key in Settings → Agent." });
+      set({ error: "Add an Anthropic API key in Settings → Chat." });
       return;
     }
 

@@ -32,7 +32,7 @@ faro://<action>?<param>=<value>&<param>=<value>…
 The **authority** is the action; everything else is URL-encoded query
 parameters. The *site's* own host goes in `?host=`, not in the URL authority.
 
-Two actions:
+Three actions:
 
 ### `faro://connect` — open a server connection
 
@@ -79,6 +79,25 @@ The pairing code is a short-lived, single-use consent token (it authenticates
 the *first* handshake and is then useless — the machines pin each other's keys),
 so it's safe to put in a link that the panel shows to its own logged-in admin.
 Still, generate it right before showing the link — see the ServerKit note below.
+
+### `faro://terminal` — open a standalone terminal window
+
+Opens a terminal for a server in its own window (no file manager, just the
+shell). The server is matched against saved connections by `name` or `host`
+and must **already be connected** in Faro — a link never opens a new
+connection or carries credentials. If it isn't connected, Faro falls back to
+the prefilled connection editor. Terminals require an SFTP connection.
+
+| Param  | Meaning                                   | Example      |
+|--------|-------------------------------------------|--------------|
+| `name` | Connection name to match (case-insensitive) | `My Site`  |
+| `host` | Alternative match by hostname or IP       | `10.0.0.20`  |
+
+**Example:**
+
+```
+faro://terminal?name=My%20Site
+```
 
 ## Generating links (any language)
 

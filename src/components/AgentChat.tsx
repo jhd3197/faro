@@ -48,7 +48,7 @@ export function AgentChatDock() {
       <div className="flex h-8 shrink-0 items-center gap-2 border-b border-border bg-bg-subtle px-2.5">
         <Bot size={13} className="text-accent" />
         <span id={titleId} className="text-[12px] font-semibold tracking-tight">
-          Agent
+          Chat
         </span>
         <div className="flex-1" />
         <button
@@ -95,7 +95,7 @@ export function AgentChatDock() {
           <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-xs text-text-dim">
             <Bot size={24} className="opacity-50" />
             <div className="max-w-xs">
-              Ask the agent to investigate or fix something on your connected
+              Ask the AI to investigate or fix something on your connected
               servers. It can use the same tools as Claude Code over the Agent
               Bridge.
             </div>
@@ -124,7 +124,7 @@ export function AgentChatDock() {
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask the agent…"
+          placeholder="Ask the AI…"
           className="min-w-0 flex-1 rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-sm outline-none focus:border-accent"
         />
         <button

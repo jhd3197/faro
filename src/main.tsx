@@ -1,8 +1,10 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { TerminalWindow } from "./components/TerminalWindow";
 import { useSettings } from "./stores/settingsStore";
 import { applyAccent } from "./lib/accent";
+import { sweepStalePopoutBuffers } from "./lib/popout";
 import "./styles.css";
 
 // Demo/screenshot build: expose the stores on window.__demo so the headless
@@ -40,8 +42,21 @@ useSettings.subscribe((s) => {
   themingTimer = setTimeout(() => el.classList.remove("theming"), 260);
 });
 
+// Secondary windows load this same SPA with `?view=…` (see lib/popout.ts):
+// a popped-out terminal renders just the terminal view, not the app shell.
+// No StrictMode there — its dev double-mount would close the adopted PTY.
+const view = new URLSearchParams(window.location.search).get("view");
+// Reap handoff buffers a crashed popout left behind — deferred so it stays off
+// the first-paint path and so a reload during an in-flight handoff can't eat
+// a buffer its popout hasn't read yet.
+if (view !== "terminal") window.setTimeout(sweepStalePopoutBuffers, 10_000);
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
+  view === "terminal" ? (
+    <TerminalWindow />
+  ) : (
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  )
 );
