@@ -6,7 +6,9 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { Plus, X, TerminalSquare, PictureInPicture2 } from "lucide-react";
 import { ipc, onTerminalData, onTerminalExit } from "@/lib/ipc";
 import type { SessionId } from "@/lib/types";
+import { attachSuggestions } from "@/lib/termSuggest";
 import { useSettings, TERMINAL_THEMES } from "@/stores/settingsStore";
+import { useConnections } from "@/stores/connectionsStore";
 import { useTerminals, type TerminalTab } from "@/stores/terminalsStore";
 import { openTerminalWindow, popoutBufferKey } from "@/lib/popout";
 import { toast } from "@/stores/toastStore";
@@ -67,6 +69,9 @@ export function TerminalDock({
         sessionId: tab.sessionId,
         title: tab.title,
         terminalId: terminalId ?? undefined,
+        historyKey: useConnections
+          .getState()
+          .sessions.find((x) => x.sessionId === tab.sessionId)?.profileId,
       });
       closeTab(tab.id);
     } catch (e) {
@@ -305,6 +310,21 @@ function TerminalPane({
       getTerminalId: () => terminalIdRef.current,
     });
 
+    // History is keyed by profile, not session, so suggestions survive
+    // reconnects to the same server.
+    const historyKey =
+      useConnections
+        .getState()
+        .sessions.find((x) => x.sessionId === tab.sessionId)?.profileId ??
+      tab.sessionId;
+    const suggest = attachSuggestions(term, {
+      historyKey,
+      send: (data) => {
+        const id = terminalIdRef.current;
+        if (id) ipc.terminalWrite(id, data).catch(() => {});
+      },
+    });
+
     let unlistenData: (() => void) | null = null;
     let unlistenExit: (() => void) | null = null;
     let disposed = false;
@@ -374,6 +394,7 @@ function TerminalPane({
       disposed = true;
       paneHandles.delete(tab.id);
       window.removeEventListener("resize", onWindowResize);
+      suggest.dispose();
       dataDisposable.dispose();
       resizeDisposable.dispose();
       selectionDisposable.dispose();

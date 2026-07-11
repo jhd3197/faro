@@ -337,6 +337,12 @@ export function Settings({ onClose }: Props) {
               checked={s.terminalCopyOnSelect}
               onChange={s.setTerminalCopyOnSelect}
             />
+            <ToggleField
+              label="Inline suggestions"
+              help="As you type a command, show the most recent matching command from this server's history as dim ghost text — press → to accept it. History is kept locally per profile."
+              checked={s.terminalSuggestions}
+              onChange={s.setTerminalSuggestions}
+            />
           </>
         );
 

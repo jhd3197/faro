@@ -103,6 +103,9 @@ interface SettingsState {
   /** Copy the terminal selection to the clipboard as soon as it's made
    *  (PuTTY-style). On by default. */
   terminalCopyOnSelect: boolean;
+  /** Inline ghost-text history suggestions while typing a command (fish/VS
+   *  Code style, → to accept). On by default. */
+  terminalSuggestions: boolean;
 
   // Connections
   defaultPort: number;
@@ -130,6 +133,7 @@ interface SettingsState {
   setTerminalTheme: (t: TerminalTheme) => void;
   setTerminalScrollback: (n: number) => void;
   setTerminalCopyOnSelect: (v: boolean) => void;
+  setTerminalSuggestions: (v: boolean) => void;
   setDefaultPort: (n: number) => void;
   setAnthropicApiKey: (s: string) => void;
 }
@@ -157,6 +161,7 @@ type Persisted = Omit<
   | "setTerminalTheme"
   | "setTerminalScrollback"
   | "setTerminalCopyOnSelect"
+  | "setTerminalSuggestions"
   | "setDefaultPort"
   | "setAnthropicApiKey"
 >;
@@ -182,6 +187,7 @@ const DEFAULTS: Persisted = {
   terminalTheme: "dark",
   terminalScrollback: 5000,
   terminalCopyOnSelect: true,
+  terminalSuggestions: true,
   defaultPort: 22,
   anthropicApiKey: "",
 };
@@ -235,6 +241,7 @@ function mutate<K extends keyof Persisted>(
     terminalTheme: s.terminalTheme,
     terminalScrollback: s.terminalScrollback,
     terminalCopyOnSelect: s.terminalCopyOnSelect,
+    terminalSuggestions: s.terminalSuggestions,
     defaultPort: s.defaultPort,
     anthropicApiKey: s.anthropicApiKey,
   });
@@ -265,6 +272,8 @@ export const useSettings = create<SettingsState>((set, get) => ({
   setTerminalScrollback: (n) => mutate(set, get, "terminalScrollback", n),
   setTerminalCopyOnSelect: (v) =>
     mutate(set, get, "terminalCopyOnSelect", v),
+  setTerminalSuggestions: (v) =>
+    mutate(set, get, "terminalSuggestions", v),
   setDefaultPort: (n) => mutate(set, get, "defaultPort", n),
   setAnthropicApiKey: (s) => mutate(set, get, "anthropicApiKey", s),
 }));

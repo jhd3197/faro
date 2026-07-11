@@ -12,6 +12,9 @@ export interface TerminalWindowOpts {
   title: string;
   /** Hand off an already-open PTY. Omitted → the new window opens its own. */
   terminalId?: string;
+  /** Key for the inline-suggestion history (the profile id) — passed along so
+   *  the popped-out shell keeps suggesting from the same server's history. */
+  historyKey?: string;
 }
 
 /** localStorage key used to pass the serialized scrollback to the new window
@@ -43,6 +46,7 @@ export async function openTerminalWindow(
     title: opts.title,
   });
   if (opts.terminalId) qs.set("terminal", opts.terminalId);
+  if (opts.historyKey) qs.set("histkey", opts.historyKey);
 
   const win = new WebviewWindow(`terminal-${crypto.randomUUID().slice(0, 8)}`, {
     url: `index.html?${qs.toString()}`,

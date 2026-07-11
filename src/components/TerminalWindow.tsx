@@ -5,6 +5,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Minus, Square, Copy as CopySquares, X, TerminalSquare } from "lucide-react";
 import { ipc, onTerminalData, onTerminalExit } from "@/lib/ipc";
+import { attachSuggestions } from "@/lib/termSuggest";
 import { popoutBufferKey } from "@/lib/popout";
 import { useSettings, TERMINAL_THEMES } from "@/stores/settingsStore";
 import { cn } from "@/lib/cn";
@@ -18,6 +19,7 @@ export function TerminalWindow() {
   const sessionId = params.get("session") ?? "";
   const title = params.get("title") || "Terminal";
   const handoffId = params.get("terminal");
+  const histKey = params.get("histkey");
 
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<XTerm | null>(null);
@@ -70,6 +72,14 @@ export function TerminalWindow() {
       if (!useSettings.getState().terminalCopyOnSelect) return;
       const text = term.getSelection();
       if (text) navigator.clipboard.writeText(text).catch(() => {});
+    });
+
+    const suggest = attachSuggestions(term, {
+      historyKey: histKey || sessionId || "default",
+      send: (data) => {
+        const id = terminalIdRef.current;
+        if (id) ipc.terminalWrite(id, data).catch(() => {});
+      },
     });
 
     const onWindowResize = () => {
@@ -135,6 +145,7 @@ export function TerminalWindow() {
       disposed = true;
       window.removeEventListener("resize", onWindowResize);
       window.removeEventListener("beforeunload", onBeforeUnload);
+      suggest.dispose();
       dataDisposable.dispose();
       resizeDisposable.dispose();
       selectionDisposable.dispose();
