@@ -147,6 +147,16 @@ easiest first:
    faro-agentd install --read-only   # …serving browse/read only
    faro-agentd uninstall       # remove the service
    ```
+4. **Android phone/tablet** (the `Faro Agent` APK). Same `faro-agentd` stack
+   embedded in an Android app, so a phone appears in Faro as a normal
+   connection (browse `/sdcard`, transfer, sync; `exec` is a sandboxed non-root
+   `sh`, off by default). Sideload the `FaroAgent-*.apk` from the
+   [DeviceKit agent releases](https://github.com/jhd3197/DeviceKit/releases?q=agent),
+   grant it all-files access, toggle the agent on, tap **Show pairing code**,
+   and enter that code in Faro — same 6-digit ceremony as every other agent.
+   The APK is built out of the DeviceKit repo (`agent-android`, `faro`
+   product flavor); the full DeviceKit fleet agent exposes the same Faro
+   screen too.
 
 ### `faro-agentd install` — what it sets up
 
