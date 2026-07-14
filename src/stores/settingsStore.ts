@@ -94,6 +94,8 @@ interface SettingsState {
   /** Expand the connection rail into a labeled list (names + addresses) instead
    *  of the compact Discord-style bubble strip. */
   railExpanded: boolean;
+  /** Rail groups the user has folded shut (by group name). */
+  railCollapsedGroups: string[];
 
   // Terminal
   terminalFontSize: number;
@@ -128,6 +130,7 @@ interface SettingsState {
   setPaneDensity: (d: PaneDensity) => void;
   setBrowserLayout: (l: BrowserLayout) => void;
   setRailExpanded: (v: boolean) => void;
+  toggleRailGroup: (name: string) => void;
   setTerminalFontSize: (n: number) => void;
   setTerminalFontFamily: (s: string) => void;
   setTerminalTheme: (t: TerminalTheme) => void;
@@ -156,6 +159,7 @@ type Persisted = Omit<
   | "setPaneDensity"
   | "setBrowserLayout"
   | "setRailExpanded"
+  | "toggleRailGroup"
   | "setTerminalFontSize"
   | "setTerminalFontFamily"
   | "setTerminalTheme"
@@ -181,6 +185,7 @@ const DEFAULTS: Persisted = {
   paneDensity: "comfortable",
   browserLayout: "single",
   railExpanded: false,
+  railCollapsedGroups: [],
   terminalFontSize: 13,
   terminalFontFamily:
     '"JetBrains Mono", "Fira Code", "Cascadia Code", Consolas, monospace',
@@ -236,6 +241,7 @@ function mutate<K extends keyof Persisted>(
     paneDensity: s.paneDensity,
     browserLayout: s.browserLayout,
     railExpanded: s.railExpanded,
+    railCollapsedGroups: s.railCollapsedGroups,
     terminalFontSize: s.terminalFontSize,
     terminalFontFamily: s.terminalFontFamily,
     terminalTheme: s.terminalTheme,
@@ -266,6 +272,15 @@ export const useSettings = create<SettingsState>((set, get) => ({
   setPaneDensity: (d) => mutate(set, get, "paneDensity", d),
   setBrowserLayout: (l) => mutate(set, get, "browserLayout", l),
   setRailExpanded: (v) => mutate(set, get, "railExpanded", v),
+  toggleRailGroup: (name) => {
+    const cur = get().railCollapsedGroups;
+    mutate(
+      set,
+      get,
+      "railCollapsedGroups",
+      cur.includes(name) ? cur.filter((g) => g !== name) : [...cur, name]
+    );
+  },
   setTerminalFontSize: (n) => mutate(set, get, "terminalFontSize", n),
   setTerminalFontFamily: (s) => mutate(set, get, "terminalFontFamily", s),
   setTerminalTheme: (t) => mutate(set, get, "terminalTheme", t),

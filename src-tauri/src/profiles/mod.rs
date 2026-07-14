@@ -52,6 +52,13 @@ pub struct ConnectionProfile {
     // profile is paired; absence means the user still needs to pair with a code.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_key: Option<String>,
+    // Rail organisation. `group` is a free-form folder name (absent = ungrouped);
+    // `sort_order` is the manual drag-and-drop position. Profiles without one
+    // sort after ordered ones, by protocol/name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_order: Option<u32>,
 }
 
 // Plain JSON file in the app data dir. v0.2 moves secrets into the OS
@@ -103,6 +110,19 @@ impl ProfileStore {
             *existing = profile;
         } else {
             g.push(profile);
+        }
+        self.write(&g)?;
+        Ok(())
+    }
+
+    /// Persist a manual rail order: each listed profile gets `sort_order` =
+    /// its index. Ids not in the store are skipped; one write for the batch.
+    pub async fn reorder(&self, ids: &[String]) -> Result<()> {
+        let mut g = self.inner.lock().await;
+        for (i, id) in ids.iter().enumerate() {
+            if let Some(p) = g.iter_mut().find(|p| &p.id == id) {
+                p.sort_order = Some(i as u32);
+            }
         }
         self.write(&g)?;
         Ok(())

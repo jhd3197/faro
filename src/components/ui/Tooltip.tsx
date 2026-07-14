@@ -42,11 +42,14 @@ export function Tooltip({
   children,
   side = "top",
   portal = false,
+  className,
 }: {
   label: ReactNode;
   children: ReactNode;
   side?: Side;
   portal?: boolean;
+  /** Extra classes for the wrapper span (e.g. `w-full` for list rows). */
+  className?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [coords, setCoords] = useState<{ left: number; top: number } | null>(
@@ -68,7 +71,7 @@ export function Tooltip({
   return (
     <span
       ref={ref}
-      className="relative inline-flex"
+      className={cn("relative inline-flex", className)}
       onMouseEnter={show}
       onMouseLeave={hide}
       onFocus={show}

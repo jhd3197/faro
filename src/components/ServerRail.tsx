@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import {
   Plus,
   Download,
@@ -17,6 +17,12 @@ import {
   HardDrive,
   ChevronsLeft,
   ChevronsRight,
+  ChevronDown,
+  ChevronRight,
+  Folder,
+  FolderOpen,
+  FolderPlus,
+  FolderMinus,
 } from "lucide-react";
 import { useConnections } from "@/stores/connectionsStore";
 import { useBridge } from "@/stores/bridgeStore";
@@ -26,6 +32,7 @@ import { ProfileEditor } from "./ProfileEditor";
 import { ImportDialog } from "./ImportDialog";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { Tooltip } from "./ui/Tooltip";
+import { useDialog } from "@/hooks/useDialog";
 import { monogram } from "@/lib/format";
 import {
   PROTOCOL_DEFAULT_PORT,
@@ -71,6 +78,8 @@ export function ServerRail() {
     deleteProfile,
     setActiveSession,
     saveProfile,
+    saveProfiles,
+    reorderProfiles,
   } = useConnections();
   const setTerminalOpen = useLayout((s) => s.setTerminalOpen);
   const openDialog = useLayout((s) => s.openDialog);
@@ -81,6 +90,8 @@ export function ServerRail() {
   // hover (Edge vertical-tabs style) — see `expanded` below.
   const pinned = useSettings((s) => s.railExpanded);
   const setRailExpanded = useSettings((s) => s.setRailExpanded);
+  const collapsedGroups = useSettings((s) => s.railCollapsedGroups);
+  const toggleRailGroup = useSettings((s) => s.toggleRailGroup);
 
   const enabledSessions = useBridge((s) => s.status.enabledSessions);
   const bridgeRunning = useBridge((s) => s.status.running);
@@ -102,10 +113,25 @@ export function ServerRail() {
   const [hovering, setHovering] = useState(false);
   const hoverTimer = useRef<number | null>(null);
 
+  // Drag-and-drop reorder state: the profile being dragged and where it would
+  // land if dropped now (between two rows, or into a group).
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<
+    | { kind: "row"; id: string; after: boolean }
+    | { kind: "group"; name: string }
+    | null
+  >(null);
+  // Naming/renaming a group happens through a small prompt dialog.
+  const [groupPrompt, setGroupPrompt] = useState<
+    | { kind: "assign"; profile: ConnectionProfile }
+    | { kind: "rename"; from: string }
+    | null
+  >(null);
+
   // Effective expanded state. Open when pinned, while hovering the collapsed
-  // rail, or while a rail menu / search popover is up (so the flyout doesn't
-  // collapse out from under what you're clicking).
-  const expanded = pinned || hovering || !!menu || searchOpen;
+  // rail, while a rail menu / search popover is up (so the flyout doesn't
+  // collapse out from under what you're clicking), or mid-drag.
+  const expanded = pinned || hovering || !!menu || searchOpen || !!dragId;
 
   const onRailEnter = () => {
     if (pinned) return;
@@ -186,9 +212,14 @@ export function ServerRail() {
     return set;
   }, [enabledSessions, sessions]);
 
+  // Manual drag-and-drop order first (sortOrder), then the learnable default
+  // (protocol group, name) for profiles that have never been dragged.
   const ordered = useMemo(
     () =>
       [...profiles].sort((a, b) => {
+        const sa = a.sortOrder ?? Number.MAX_SAFE_INTEGER;
+        const sb = b.sortOrder ?? Number.MAX_SAFE_INTEGER;
+        if (sa !== sb) return sa - sb;
         const ga = GROUP_ORDER.indexOf(a.protocol);
         const gb = GROUP_ORDER.indexOf(b.protocol);
         if (ga !== gb) return ga - gb;
@@ -196,6 +227,105 @@ export function ServerRail() {
       }),
     [profiles]
   );
+
+  // Rail sections: ungrouped servers first, then one folder per group name (in
+  // order of each group's first member). Groups exist purely as `profile.group`
+  // strings — no separate registry to keep in sync.
+  const sections = useMemo(() => {
+    const ungrouped: ConnectionProfile[] = [];
+    const groups = new Map<string, ConnectionProfile[]>();
+    for (const p of ordered) {
+      if (!p.group) ungrouped.push(p);
+      else if (groups.has(p.group)) groups.get(p.group)!.push(p);
+      else groups.set(p.group, [p]);
+    }
+    return { ungrouped, groups: [...groups.entries()] };
+  }, [ordered]);
+  const groupNames = useMemo(
+    () => sections.groups.map(([name]) => name),
+    [sections]
+  );
+
+  // ---- Drag-and-drop reorder ----
+
+  /** Every server in on-screen order (ungrouped, then each group's members). */
+  const flatOrder = () => [
+    ...sections.ungrouped,
+    ...sections.groups.flatMap(([, items]) => items),
+  ];
+
+  const endDrag = () => {
+    setDragId(null);
+    setDropTarget(null);
+  };
+
+  const onRowDragStart = (e: React.DragEvent, p: ConnectionProfile) => {
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", p.id);
+    setDragId(p.id);
+  };
+
+  const onRowDragOver = (e: React.DragEvent, p: ConnectionProfile) => {
+    if (!dragId || dragId === p.id) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const r = e.currentTarget.getBoundingClientRect();
+    const after = e.clientY > r.top + r.height / 2;
+    setDropTarget((cur) =>
+      cur?.kind === "row" && cur.id === p.id && cur.after === after
+        ? cur
+        : { kind: "row", id: p.id, after }
+    );
+  };
+
+  const onGroupDragOver = (e: React.DragEvent, name: string) => {
+    if (!dragId) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setDropTarget((cur) =>
+      cur?.kind === "group" && cur.name === name ? cur : { kind: "group", name }
+    );
+  };
+
+  // Dropping between rows adopts the neighbour's group; dropping on a group
+  // header appends to that group. One ipc round-trip persists both.
+  const commitDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const target = dropTarget;
+    const id = dragId;
+    endDrag();
+    if (!id || !target) return;
+    const rest = flatOrder().filter((p) => p.id !== id);
+    const dragged = profiles.find((p) => p.id === id);
+    if (!dragged) return;
+
+    let at: number;
+    let group: string | undefined;
+    if (target.kind === "row") {
+      const ti = rest.findIndex((p) => p.id === target.id);
+      if (ti < 0) return;
+      group = rest[ti].group;
+      at = ti + (target.after ? 1 : 0);
+    } else {
+      group = target.name;
+      at = rest.length;
+      for (let i = rest.length - 1; i >= 0; i--) {
+        if (rest[i].group === target.name) {
+          at = i + 1;
+          break;
+        }
+      }
+    }
+    const ids = [
+      ...rest.slice(0, at).map((p) => p.id),
+      id,
+      ...rest.slice(at).map((p) => p.id),
+    ];
+    void reorderProfiles(
+      ids,
+      dragged.group !== group ? { id, group } : undefined
+    );
+  };
 
   const rowState = (p: ConnectionProfile): RowState => {
     const isConnected = connectedIds.has(p.id);
@@ -250,6 +380,29 @@ export function ServerRail() {
       onClick: () => setEditing(p),
       separatorAfter: true,
     });
+    // Group membership: one flat item per existing group, plus "New group…".
+    for (const g of groupNames) {
+      if (g === p.group) continue;
+      items.push({
+        label: `Move to "${g}"`,
+        icon: <Folder size={14} />,
+        onClick: () => saveProfile({ ...p, group: g }),
+      });
+    }
+    items.push({
+      label: "New group…",
+      icon: <FolderPlus size={14} />,
+      onClick: () => setGroupPrompt({ kind: "assign", profile: p }),
+      separatorAfter: !p.group,
+    });
+    if (p.group) {
+      items.push({
+        label: "Remove from group",
+        icon: <FolderMinus size={14} />,
+        onClick: () => saveProfile({ ...p, group: undefined }),
+        separatorAfter: true,
+      });
+    }
     if (sid) {
       items.push({
         label: sessionBridged ? "Disable Agent Bridge" : "Enable Agent Bridge",
@@ -298,6 +451,48 @@ export function ServerRail() {
   const openMenuAt = (e: React.MouseEvent, items: MenuItem[]) => {
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
     setMenu({ x: r.right + 6, y: r.top, items });
+  };
+
+  const groupMenu = (e: React.MouseEvent, name: string) => {
+    e.preventDefault();
+    const members = sections.groups.find(([g]) => g === name)?.[1] ?? [];
+    openMenuAt(e, [
+      {
+        label: collapsedGroups.includes(name) ? "Expand group" : "Collapse group",
+        icon: collapsedGroups.includes(name) ? (
+          <ChevronDown size={14} />
+        ) : (
+          <ChevronRight size={14} />
+        ),
+        onClick: () => toggleRailGroup(name),
+        separatorAfter: true,
+      },
+      {
+        label: "Rename group…",
+        icon: <Pencil size={14} />,
+        onClick: () => setGroupPrompt({ kind: "rename", from: name }),
+      },
+      {
+        label: "Ungroup servers",
+        icon: <FolderMinus size={14} />,
+        onClick: () =>
+          void saveProfiles(members.map((m) => ({ ...m, group: undefined }))),
+      },
+    ]);
+  };
+
+  const submitGroupPrompt = (name: string) => {
+    const prompt = groupPrompt;
+    setGroupPrompt(null);
+    if (!prompt) return;
+    if (prompt.kind === "assign") {
+      void saveProfile({ ...prompt.profile, group: name });
+    } else {
+      const members =
+        sections.groups.find(([g]) => g === prompt.from)?.[1] ?? [];
+      void saveProfiles(members.map((m) => ({ ...m, group: name })));
+      if (collapsedGroups.includes(prompt.from)) toggleRailGroup(prompt.from);
+    }
   };
 
   const pickFromSearch = (p: ConnectionProfile) => {
@@ -358,16 +553,43 @@ export function ServerRail() {
     ]);
   };
 
+  const renderBubble = (p: ConnectionProfile) => (
+    <RailBubble
+      key={p.id}
+      profile={p}
+      state={rowState(p)}
+      bridged={bridgedIds.has(p.id)}
+      expanded={expanded}
+      dragging={dragId === p.id}
+      dropIndicator={
+        dropTarget?.kind === "row" && dropTarget.id === p.id
+          ? dropTarget.after
+            ? "below"
+            : "above"
+          : null
+      }
+      onClick={(e) => onBubbleClick(e, p)}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        openMenuAt(e, bubbleMenuItems(p));
+      }}
+      onDragStart={(e) => onRowDragStart(e, p)}
+      onDragOver={(e) => onRowDragOver(e, p)}
+      onDrop={commitDrop}
+      onDragEnd={endDrag}
+    />
+  );
+
   return (
     // Outer spacer reserves the rail's *layout* width (collapsed unless pinned),
     // so a hover flyout overlays the file panes instead of shoving them aside.
-    <div className={cn("relative h-full shrink-0", pinned ? "w-56" : "w-[68px]")}>
+    <div className={cn("relative h-full shrink-0", pinned ? "w-64" : "w-[68px]")}>
       <div
         onMouseEnter={onRailEnter}
         onMouseLeave={onRailLeave}
         className={cn(
           "absolute inset-y-0 left-0 z-dropdown flex flex-col border-r border-border bg-bg transition-[width] duration-150 motion-reduce:transition-none",
-          expanded ? "w-56" : "w-[68px]",
+          expanded ? "w-64" : "w-[68px]",
           !pinned && expanded && "shadow-elev-3"
         )}
       >
@@ -436,20 +658,30 @@ export function ServerRail() {
               />
             </div>
           ) : (
-            ordered.map((p) => (
-              <RailBubble
-                key={p.id}
-                profile={p}
-                state={rowState(p)}
-                bridged={bridgedIds.has(p.id)}
-                expanded={expanded}
-                onClick={(e) => onBubbleClick(e, p)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  openMenuAt(e, bubbleMenuItems(p));
-                }}
-              />
-            ))
+            <>
+              {sections.ungrouped.map(renderBubble)}
+              {sections.groups.map(([name, items]) => {
+                const collapsed = collapsedGroups.includes(name);
+                return (
+                  <Fragment key={name}>
+                    <RailGroupHeader
+                      name={name}
+                      count={items.length}
+                      collapsed={collapsed}
+                      expanded={expanded}
+                      isDropTarget={
+                        dropTarget?.kind === "group" && dropTarget.name === name
+                      }
+                      onToggle={() => toggleRailGroup(name)}
+                      onContextMenu={(e) => groupMenu(e, name)}
+                      onDragOver={(e) => onGroupDragOver(e, name)}
+                      onDrop={commitDrop}
+                    />
+                    {!collapsed && items.map(renderBubble)}
+                  </Fragment>
+                );
+              })}
+            </>
           )}
         </div>
 
@@ -561,14 +793,29 @@ export function ServerRail() {
         />
       )}
       {importing && <ImportDialog onClose={() => setImporting(false)} />}
+      {groupPrompt && (
+        <GroupNameDialog
+          title={
+            groupPrompt.kind === "assign"
+              ? `Group for “${groupPrompt.profile.name}”`
+              : `Rename “${groupPrompt.from}”`
+          }
+          initial={groupPrompt.kind === "rename" ? groupPrompt.from : ""}
+          existing={groupNames}
+          onSubmit={submitGroupPrompt}
+          onClose={() => setGroupPrompt(null)}
+        />
+      )}
       </div>
     </div>
   );
 }
 
 // Shared rail row: in compact mode it's a tooltip-wrapped icon button; in
-// expanded mode the tooltip is dropped and a name/label column is shown to the
-// right of the bubble (so you can actually read which server is which).
+// expanded mode a name/label column is shown to the right of the bubble and the
+// tooltip only appears when the label is actually clipped (long server names).
+// NOTE: the row must be the same height in both modes — the rail flies open on
+// hover, and any height change would shift the list under the cursor.
 function RailRow({
   expanded,
   tooltip,
@@ -586,14 +833,25 @@ function RailRow({
   bubble: React.ReactNode;
   label: React.ReactNode;
 }) {
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const [clipped, setClipped] = useState(false);
+  // Measured at hover time (the rail may still be mid-expansion on mount).
+  const measure = () => {
+    const els = btnRef.current?.querySelectorAll<HTMLElement>(".truncate");
+    setClipped(
+      !!els && [...els].some((el) => el.scrollWidth > el.clientWidth + 1)
+    );
+  };
   const btn = (
     <button
+      ref={btnRef}
       onClick={onClick}
       onContextMenu={onContextMenu}
+      onMouseEnter={expanded ? measure : undefined}
       aria-label={ariaLabel}
       className={cn(
         "relative flex items-center rounded-2xl",
-        expanded && "w-full gap-2.5 px-2 py-1 text-left transition-colors hover:bg-bg-hover"
+        expanded && "w-full gap-2.5 px-2 text-left transition-colors hover:bg-bg-hover"
       )}
     >
       {bubble}
@@ -602,7 +860,17 @@ function RailRow({
       )}
     </button>
   );
-  if (expanded) return btn;
+  if (expanded)
+    return (
+      <Tooltip
+        portal
+        side="right"
+        label={clipped ? tooltip : null}
+        className="w-full min-w-0"
+      >
+        {btn}
+      </Tooltip>
+    );
   return (
     <Tooltip portal side="right" label={tooltip}>
       {btn}
@@ -615,15 +883,27 @@ function RailBubble({
   state,
   bridged,
   expanded,
+  dragging,
+  dropIndicator,
   onClick,
   onContextMenu,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
 }: {
   profile: ConnectionProfile;
   state: RowState;
   bridged: boolean;
   expanded: boolean;
+  dragging: boolean;
+  dropIndicator: "above" | "below" | null;
   onClick: (e: React.MouseEvent) => void;
   onContextMenu: (e: React.MouseEvent) => void;
+  onDragStart: (e: React.DragEvent) => void;
+  onDragOver: (e: React.DragEvent) => void;
+  onDrop: (e: React.DragEvent) => void;
+  onDragEnd: () => void;
 }) {
   const focused = state === "focused";
   const connected = state === "focused" || state === "connected";
@@ -667,11 +947,27 @@ function RailBubble({
 
   return (
     <div
+      draggable
+      onDragStart={onDragStart}
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      onDragEnd={onDragEnd}
       className={cn(
         "group relative flex w-full items-center",
-        expanded ? "justify-start pr-2" : "justify-center"
+        expanded ? "justify-start pr-2" : "justify-center",
+        dragging && "opacity-40"
       )}
     >
+      {/* Drop-position line while another server is dragged over this row. */}
+      {dropIndicator && (
+        <span
+          aria-hidden
+          className={cn(
+            "pointer-events-none absolute left-2 right-2 z-10 h-0.5 rounded-full bg-accent",
+            dropIndicator === "above" ? "-top-1" : "-bottom-1"
+          )}
+        />
+      )}
       {/* Active / connected pill on the rail's left edge. */}
       <span
         aria-hidden
@@ -711,6 +1007,154 @@ function RailBubble({
           </span>
         }
       />
+    </div>
+  );
+}
+
+// A collapsible folder heading in the rail. Same height in compact and
+// expanded modes (see RailRow's note) — compact shows a folder glyph, expanded
+// shows the name, a count and a disclosure chevron. Also a drop target: drag a
+// server onto it to file the server into the group.
+function RailGroupHeader({
+  name,
+  count,
+  collapsed,
+  expanded,
+  isDropTarget,
+  onToggle,
+  onContextMenu,
+  onDragOver,
+  onDrop,
+}: {
+  name: string;
+  count: number;
+  collapsed: boolean;
+  expanded: boolean;
+  isDropTarget: boolean;
+  onToggle: () => void;
+  onContextMenu: (e: React.MouseEvent) => void;
+  onDragOver: (e: React.DragEvent) => void;
+  onDrop: (e: React.DragEvent) => void;
+}) {
+  const btn = (
+    <button
+      onClick={onToggle}
+      onContextMenu={onContextMenu}
+      aria-label={`${name} group, ${count} server${count === 1 ? "" : "s"}`}
+      aria-expanded={!collapsed}
+      className={cn(
+        "flex h-6 items-center rounded-md text-text-dim transition-colors hover:bg-bg-hover hover:text-text",
+        expanded ? "w-full gap-1 px-2 text-left" : "w-9 justify-center",
+        isDropTarget && "bg-accent-soft text-accent"
+      )}
+    >
+      {expanded ? (
+        <>
+          {collapsed ? (
+            <ChevronRight size={11} className="shrink-0" />
+          ) : (
+            <ChevronDown size={11} className="shrink-0" />
+          )}
+          <span className="min-w-0 flex-1 truncate text-[10px] font-semibold uppercase tracking-wider">
+            {name}
+          </span>
+          <span className="shrink-0 text-[10px] tabular-nums">{count}</span>
+        </>
+      ) : collapsed ? (
+        <Folder size={14} />
+      ) : (
+        <FolderOpen size={14} />
+      )}
+    </button>
+  );
+  return (
+    <div
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      className={cn(
+        "mt-1.5 flex w-full items-center",
+        expanded ? "justify-start px-1" : "justify-center"
+      )}
+    >
+      {expanded ? (
+        btn
+      ) : (
+        <Tooltip
+          portal
+          side="right"
+          label={`${name} — ${count} server${count === 1 ? "" : "s"}`}
+        >
+          {btn}
+        </Tooltip>
+      )}
+    </div>
+  );
+}
+
+// Minimal prompt for naming a group (create via "New group…" or rename). A
+// datalist offers the existing names so joining a group is one pick away.
+function GroupNameDialog({
+  title,
+  initial,
+  existing,
+  onSubmit,
+  onClose,
+}: {
+  title: string;
+  initial: string;
+  existing: string[];
+  onSubmit: (name: string) => void;
+  onClose: () => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  useDialog(panelRef, { onClose });
+  useEffect(() => inputRef.current?.select(), []);
+  const name = value.trim();
+  const submit = () => name && onSubmit(name);
+  return (
+    <div className="fixed inset-0 z-modal flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        className="anim-modal w-72 rounded-xl border border-border bg-bg-panel p-4 shadow-elev-3"
+      >
+        <div className="mb-3 text-sm font-semibold">{title}</div>
+        <input
+          ref={inputRef}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") submit();
+          }}
+          list="rail-group-names"
+          placeholder="Group name"
+          aria-label="Group name"
+          className="w-full rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-sm outline-none focus:border-accent"
+        />
+        <datalist id="rail-group-names">
+          {existing.map((g) => (
+            <option key={g} value={g} />
+          ))}
+        </datalist>
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-bg-hover"
+            onClick={onClose}
+          >
+            Cancel
+          </button>
+          <button
+            className="btn-accent rounded-md px-3 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+            disabled={!name}
+            onClick={submit}
+          >
+            Save
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -821,8 +1265,10 @@ function RailIconButton({
       onClick={onClick}
       aria-label={label}
       className={cn(
-        "flex items-center rounded-xl transition-colors",
-        expanded ? "w-full gap-2.5 px-2 py-1.5 text-left" : "h-9 w-9 justify-center",
+        // h-9 in BOTH modes — hover-expansion must not change row heights (the
+        // list would shift under the cursor).
+        "flex h-9 items-center rounded-xl transition-colors",
+        expanded ? "w-full gap-2.5 px-2 text-left" : "w-9 justify-center",
         active
           ? "bg-accent-soft text-accent"
           : "text-text-muted hover:bg-bg-hover hover:text-text"

@@ -28,6 +28,11 @@ export interface ConnectionProfile {
   // Faro Agent (protocol === "faro-agent"): the paired daemon's pinned public
   // key (base64). Present === paired; absent === still needs a pairing code.
   agentKey?: string;
+  /** Rail folder this server lives in. Absent = ungrouped (top of the rail). */
+  group?: string;
+  /** Manual drag-and-drop position in the rail. Absent = sorted after ordered
+   *  profiles, by protocol then name. */
+  sortOrder?: number;
 }
 
 export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {

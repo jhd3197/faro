@@ -31,6 +31,16 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
     case "delete_profile":
       data.setProfiles(data.profiles.filter((x) => x.id !== a.id));
       return null;
+    case "reorder_profiles": {
+      const order = a.ids as string[];
+      data.setProfiles(
+        data.profiles.map((p) => {
+          const i = order.indexOf(p.id);
+          return i >= 0 ? { ...p, sortOrder: i } : p;
+        })
+      );
+      return null;
+    }
 
     // ---- sessions ----
     case "connect":

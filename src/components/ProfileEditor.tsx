@@ -58,7 +58,13 @@ function guessProvider(endpoint?: string): S3Provider {
 export function ProfileEditor({ profile, prefill, onClose }: Props) {
   const saveProfile = useConnections((s) => s.saveProfile);
   const connectProfile = useConnections((s) => s.connect);
+  const profiles = useConnections((s) => s.profiles);
   const defaultPort = useSettings((s) => s.defaultPort);
+
+  // Existing rail groups, offered as datalist suggestions for the Group field.
+  const knownGroups = Array.from(
+    new Set(profiles.map((p) => p.group).filter((g): g is string => !!g))
+  );
 
   // Seed values: the profile being edited, or a deep-link prefill for a new
   // one. `profile` still gates "is this an edit" (title, pairing persistence).
@@ -91,6 +97,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
     seed?.defaultRemotePath ?? "."
   );
   const [autoConnect, setAutoConnect] = useState(profile?.autoConnect ?? false);
+  const [group, setGroup] = useState(seed?.group ?? "");
 
   // S3-only state.
   const [bucket, setBucket] = useState(seed?.bucket ?? "");
@@ -170,6 +177,8 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
       endpoint: isObject ? endpoint || undefined : undefined,
       account: isAzure ? azureAccount : undefined,
       agentKey: isAgent ? agentKey : undefined,
+      group: group.trim() || undefined,
+      sortOrder: profile?.sortOrder,
     };
   };
 
@@ -230,14 +239,30 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
           {profile ? "Edit connection" : "New connection"}
         </div>
 
-        <Field label="Name">
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder={isS3 ? "my-bucket" : "my-prod-box"}
-            className={inputCls}
-          />
-        </Field>
+        <div className="flex gap-2">
+          <Field label="Name" className="flex-1">
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder={isS3 ? "my-bucket" : "my-prod-box"}
+              className={inputCls}
+            />
+          </Field>
+          <Field label="Group (optional)" className="w-40">
+            <input
+              value={group}
+              onChange={(e) => setGroup(e.target.value)}
+              placeholder="e.g. Production"
+              list="profile-editor-groups"
+              className={inputCls}
+            />
+            <datalist id="profile-editor-groups">
+              {knownGroups.map((g) => (
+                <option key={g} value={g} />
+              ))}
+            </datalist>
+          </Field>
+        </div>
 
         <Field label="Protocol">
           <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-bg-subtle p-1">

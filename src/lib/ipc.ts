@@ -44,6 +44,10 @@ export const ipc = {
   saveProfile: (profile: ConnectionProfile) =>
     invoke<void>("save_profile", { profile }),
 
+  /** Persist a manual rail order: every profile id, in display order. */
+  reorderProfiles: (ids: string[]) =>
+    invoke<void>("reorder_profiles", { ids }),
+
   deleteProfile: (id: string) => invoke<void>("delete_profile", { id }),
 
   connect: (profileId: string) =>

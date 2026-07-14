@@ -24,6 +24,14 @@ interface ConnectionsState {
 
   loadProfiles: () => Promise<void>;
   saveProfile: (p: ConnectionProfile) => Promise<void>;
+  /** Save several profiles with a single reload at the end (group rename etc). */
+  saveProfiles: (ps: ConnectionProfile[]) => Promise<void>;
+  /** Persist a drag-and-drop rail order (every profile id, display order).
+   *  Optionally re-homes the dragged profile into a new group first. */
+  reorderProfiles: (
+    ids: string[],
+    groupChange?: { id: string; group: string | undefined }
+  ) => Promise<void>;
   deleteProfile: (id: string) => Promise<void>;
   /** Connect to a profile, or focus its existing session if already open. */
   connect: (profileId: string) => Promise<void>;
@@ -48,6 +56,20 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
 
   saveProfile: async (p) => {
     await ipc.saveProfile(p);
+    await get().loadProfiles();
+  },
+
+  saveProfiles: async (ps) => {
+    for (const p of ps) await ipc.saveProfile(p);
+    await get().loadProfiles();
+  },
+
+  reorderProfiles: async (ids, groupChange) => {
+    if (groupChange) {
+      const p = get().profiles.find((x) => x.id === groupChange.id);
+      if (p) await ipc.saveProfile({ ...p, group: groupChange.group });
+    }
+    await ipc.reorderProfiles(ids);
     await get().loadProfiles();
   },
 

@@ -36,6 +36,16 @@ pub async fn save_profile(
     state.profiles.upsert(profile).await.map_err(err)
 }
 
+/// Persist the rail's drag-and-drop order: `ids` is every profile id in the
+/// desired display order; each gets `sort_order` = its index in one write.
+#[tauri::command]
+pub async fn reorder_profiles(
+    ids: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.profiles.reorder(&ids).await.map_err(err)
+}
+
 #[tauri::command]
 pub async fn delete_profile(
     id: String,

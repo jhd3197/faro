@@ -116,6 +116,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_profiles,
             commands::save_profile,
+            commands::reorder_profiles,
             commands::delete_profile,
             commands::connect,
             commands::disconnect,
