@@ -107,10 +107,11 @@ impl RemoteFs for AgentFs {
         // implement (there's no PTY channel). It's false so those buttons don't
         // appear and fail. This does NOT affect the AI's exec: the Agent Bridge
         // runs commands through the daemon's own exec path, gated by `canExec`,
-        // independent of this flag. chmod only means something on a POSIX daemon.
-        let is_unix = self.session.system_info.os != "windows";
+        // independent of this flag. chmod only means something on a POSIX daemon
+        // — and Android's emulated storage ignores modes, so it's excluded too.
+        let os = self.session.system_info.os.as_str();
         Capabilities {
-            can_chmod: is_unix,
+            can_chmod: os != "windows" && os != "android",
             can_symlink: false,
             can_rename: true,
             has_directories: true,

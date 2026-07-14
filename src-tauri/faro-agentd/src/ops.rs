@@ -61,7 +61,7 @@ pub async fn handle(req: Request, policy: Policy) -> Response {
 pub fn system_info() -> SystemInfo {
     SystemInfo {
         os: os_name().to_string(),
-        hostname: gethostname::gethostname().to_string_lossy().to_string(),
+        hostname: crate::agent_name(),
         arch: std::env::consts::ARCH.to_string(),
         shell: shell_name().to_string(),
         username: whoami_user(),
@@ -77,6 +77,8 @@ fn os_name() -> &'static str {
         "windows"
     } else if cfg!(target_os = "macos") {
         "macos"
+    } else if cfg!(target_os = "android") {
+        "android"
     } else {
         "linux"
     }

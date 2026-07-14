@@ -45,7 +45,7 @@ impl Advertisement {
     }
 
     fn register(&mut self, pairable: bool) -> Result<()> {
-        let host = gethostname::gethostname().to_string_lossy().to_string();
+        let host = crate::agent_name();
         // Instance name is the hostname; keep it stable so re-announcing updates
         // rather than duplicates.
         let instance = sanitize(&host);

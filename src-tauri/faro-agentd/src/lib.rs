@@ -13,3 +13,15 @@ pub mod service;
 
 pub use config::{config_dir, config_path, identity_path, Config, Policy};
 pub use server::{handle_paired, pair_connection, pair_handshake, serve, Daemon, PairingWindow};
+
+/// The name this machine reports in `SystemInfo` and advertises over mDNS.
+/// `FARO_AGENT_NAME` overrides it for hosts where the OS hostname is useless —
+/// Android phones all report "localhost" — and embedders (the Android agent's
+/// JNI layer) set it to the user-chosen device name before starting the daemon.
+pub fn agent_name() -> String {
+    std::env::var("FARO_AGENT_NAME")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| gethostname::gethostname().to_string_lossy().to_string())
+}
