@@ -11,6 +11,7 @@ pub mod agent;
 mod agent_host;
 mod deeplink;
 mod editor;
+mod foldersync;
 pub mod importers;
 mod known_hosts;
 pub mod profiles;
@@ -28,6 +29,7 @@ pub struct AppState {
     pub editors: Arc<editor::EditManager>,
     pub bridge: Arc<bridge::BridgeState>,
     pub agent_host: Arc<agent_host::AgentHost>,
+    pub foldersync: Arc<foldersync::FolderSync>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -72,6 +74,10 @@ pub fn run() {
                     agent_host::AgentHost::load(&handle)
                         .expect("failed to initialise agent host settings"),
                 ),
+                foldersync: Arc::new(
+                    foldersync::FolderSync::load(&handle)
+                        .expect("failed to initialise folder sync settings"),
+                ),
             };
             app.manage(state);
 
@@ -89,6 +95,13 @@ pub fn run() {
             let host_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 host.auto_start_if_enabled(host_handle).await;
+            });
+
+            // Restart any folder-sync pairs the user left enabled.
+            let foldersync = app.state::<AppState>().foldersync.clone();
+            let foldersync_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                foldersync.auto_start_if_enabled(foldersync_handle).await;
             });
 
             // faro:// deep links. `on_open_url` covers the app-already-running
@@ -129,6 +142,11 @@ pub fn run() {
             agent_host::agent_host_close_pairing,
             agent_host::agent_host_set_policy,
             agent_host::agent_host_revoke_peer,
+            foldersync::foldersync_list,
+            foldersync::foldersync_upsert,
+            foldersync::foldersync_remove,
+            foldersync::foldersync_set_enabled,
+            foldersync::foldersync_sync_now,
             commands::list_agent_jobs,
             commands::kill_agent_job,
             commands::respond_to_host_prompt,
