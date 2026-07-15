@@ -360,12 +360,11 @@ async fn reconcile(
 
     let result = reconcile_inner(app, &state, pair, session_id).await;
     match result {
-        Ok(in_flight_done) => {
-            set_state(app, status, PairState::Idle, move |s| {
+        Ok(()) => {
+            set_state(app, status, PairState::Idle, |s| {
                 s.in_flight = 0;
                 s.last_synced = Some(now_ms());
                 s.last_error = None;
-                let _ = in_flight_done;
             })
             .await;
         }

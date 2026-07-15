@@ -30,10 +30,12 @@ import {
   Radio,
   Columns2,
   MessageSquare,
+  FolderSync,
 } from "lucide-react";
 import { useEditor } from "./stores/editorStore";
 import { useToasts, type ToastVariant } from "./stores/toastStore";
 import { useBridge } from "./stores/bridgeStore";
+import { useSync } from "./stores/syncStore";
 import { useSettings } from "./stores/settingsStore";
 import { onDeepLink } from "./lib/ipc";
 import { openTerminalWindow } from "./lib/popout";
@@ -77,6 +79,24 @@ export default function App() {
   const [editsMenuOpen, setEditsMenuOpen] = useState(false);
 
   useShortcuts();
+
+  // Boot the Folder Sync store: fetch the current pairs and attach the
+  // "foldersync://changed" listener so background syncs keep the UI live.
+  useEffect(() => {
+    let cleanup: (() => void) | undefined;
+    let cancelled = false;
+    useSync
+      .getState()
+      .init()
+      .then((c) => {
+        if (cancelled) c();
+        else cleanup = c;
+      });
+    return () => {
+      cancelled = true;
+      cleanup?.();
+    };
+  }, []);
 
   return (
     <div className="flex h-screen w-screen flex-col">
@@ -189,6 +209,9 @@ function StatusBar({
   const consoleRunning = useBridge((s) =>
     s.console.filter((e) => e.status === "running").length
   );
+  const syncPairs = useSync((s) => s.pairs);
+  const syncRunning = syncPairs.filter((p) => p.running).length;
+  const syncActive = syncPairs.filter((p) => p.state === "syncing").length;
   const openDialog = useLayout((s) => s.openDialog);
   const bridgeDialogOpen = useLayout((s) => s.dialog === "agentBridge");
   const consoleOpen = useLayout((s) => s.consoleOpen);
@@ -372,6 +395,31 @@ function StatusBar({
           </div>
         )}
       </div>
+      <PillButton
+        onClick={() => openDialog("settings")}
+        icon={
+          <FolderSync
+            size={11}
+            className={cn(
+              syncActive
+                ? "animate-pulse text-warning"
+                : syncRunning
+                  ? "text-success"
+                  : undefined
+            )}
+          />
+        }
+        badge={syncPairs.length > 0 ? syncPairs.length : undefined}
+        title={
+          syncPairs.length === 0
+            ? "Folder Sync — keep folders mirrored to your servers"
+            : `Folder Sync — ${syncRunning} running${
+                syncActive ? `, ${syncActive} syncing` : ""
+              } of ${syncPairs.length}`
+        }
+      >
+        Sync
+      </PillButton>
       <PillButton
         active={bridgeDialogOpen}
         onClick={() => openDialog("agentBridge")}

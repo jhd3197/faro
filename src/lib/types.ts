@@ -186,6 +186,32 @@ export interface SyncPlan {
   totalBytes: number;
 }
 
+// ---- Folder Sync (continuous watched sync pairs; mirrors foldersync.rs) ----
+
+export type PairState = "idle" | "scanning" | "syncing" | "error";
+
+/** A configured, persisted sync pair (the user-editable half). */
+export interface SyncPair {
+  id: string; // "" when creating; backend assigns a uuid
+  name: string;
+  localRoot: string;
+  profileId: string; // a ConnectionProfile.id
+  remoteRoot: string;
+  direction: SyncDirection;
+  strategy: SyncStrategy;
+  enabled: boolean;
+  pollIntervalSecs: number; // default 60
+}
+
+/** A sync pair plus its live runtime status (what the backend returns). */
+export interface PairView extends SyncPair {
+  running: boolean;
+  state: PairState;
+  inFlight: number;
+  lastSynced: number | null; // ms epoch
+  lastError: string | null;
+}
+
 // ---- Edit-in-place ----
 
 export interface EditStartedEvent {
