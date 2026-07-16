@@ -1,4 +1,4 @@
-# Plan 9 — Fleet Skills (AI-authored, MCP-native automations)
+# Plan 8 — Fleet Skills (AI-authored, MCP-native automations)
 
 ## Context
 

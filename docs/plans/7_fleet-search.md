@@ -1,4 +1,4 @@
-# Plan 8 — Fleet Search (name + content, any backend)
+# Plan 7 — Fleet Search (name + content, any backend)
 
 ## Context
 

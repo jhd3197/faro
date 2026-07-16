@@ -1,4 +1,4 @@
-# Plan 6 — Disk Usage Explorer (WinDirStat / WizTree, for any backend)
+# Plan 4 — Disk Usage Explorer (WinDirStat / WizTree, for any backend)
 
 ## Context
 

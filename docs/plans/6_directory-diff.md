@@ -1,4 +1,4 @@
-# Plan 7 — Directory Diff (GUI + CLI + MCP)
+# Plan 6 — Directory Diff (GUI + CLI + MCP)
 
 ## Context
 

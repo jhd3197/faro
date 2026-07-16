@@ -37,13 +37,15 @@ direction, strategy, enabled, poll_interval, conflict_policy }`.
 Reuses the existing `SyncDirection` (LocalToRemote/RemoteToLocal) and
 `SyncStrategy` (Additive/Mirror) enums from `sync.rs`.
 
-**State index** — the piece that turns *copy* into *sync*. A local **SQLite**
-DB (one row per file per pair): `sync_state(pair_id, rel_path, local_mtime,
-local_size, local_hash?, remote_signal, last_synced_rev, state)`. Without this
-the engine can't tell "deleted on the remote" from "never existed," nor detect
-that nothing changed since last run. Today's `SyncReason`
-(Missing/Newer/SizeChanged) compares the two *live* sides — fine for one-shot,
-insufficient for continuous. The index is the engine's memory.
+**State index → cut out into [Plan 3](3_scan-index-foundation.md).** The
+piece that turns *copy* into *sync* — a persisted per-file index — is **shared
+infrastructure** (Plan 4's scan cache, Plan 6's hash cache, and Plan 7's search
+index want the same `faro.db`), so it was moved out of this plan into the
+foundation plan. Phases 1–2 shipped **without** it, on live two-sided diff
+(`SyncReason` Missing/Newer/SizeChanged) — correct for one-way, but blind to
+same-size edits and unable to distinguish a remote delete from never-existed.
+Plan 3 adds the index (and the `change_signal` capability below); **bidirectional
+sync depends on it.**
 
 **Local watcher** — the [`notify`](https://docs.rs/notify) crate
 (inotify / FSEvents / ReadDirectoryChangesW), debounced, marks dirty rel-paths.
@@ -70,6 +72,8 @@ about). Emits Tauri events like the agent host does.
 **Capabilities the engine queries** (via the existing `Capabilities` struct):
 - *change signal*: cheapest reliable "did this file change" — S3 ETag,
   mtime+size, or a content hash (backends differ; ask, don't assume).
+  **Added in [Plan 3](3_scan-index-foundation.md)** as `change_signal` +
+  an optional `DirEntry.etag`.
 - *has real directories* / *atomic rename*: object stores fake dirs (key
   prefixes) and have no atomic rename (copy+delete). `object.rs` already fakes
   folders; the engine must treat folderness/rename as flags, not givens.
@@ -78,11 +82,12 @@ about). Emits Tauri events like the agent host does.
 
 ## Phases
 
-### Phase 1 — Continuous one-way, real files (LocalToRemote)
-Watcher + poller + SQLite state index + reconciler on top of `sync.rs`. Ship
-**Additive** first (copy new/changed up), then **Mirror** (also delete remote
-files gone locally). Per-pair status + tray indicator. This alone delivers
-"attach a folder → edits auto-push to S3 / Azure / SFTP / the phone."
+### Phase 1 — Continuous one-way, real files (LocalToRemote) — ✅ shipped
+Watcher + poller + reconciler on top of `sync.rs`, diffing the two **live**
+sides (the persistent index is [Plan 3](3_scan-index-foundation.md), not
+here). Ship **Additive** first (copy new/changed up), then **Mirror** (also
+delete remote files gone locally). Per-pair status + a StatusBar pill. This alone
+delivers "attach a folder → edits auto-push to S3 / Azure / SFTP / the phone."
 
 ### Phase 2 — Continuous one-way, RemoteToLocal
 Same engine, reversed authority (remote is source → download mirror). Enables
@@ -105,19 +110,22 @@ Flag this as its own sub-decision when we reach it.
 ### Deferred — bidirectional + conflict resolution
 Out of scope here, matching the existing note at `sync.rs:5` ("Bidirectional …
 needs conflict resolution UI that's a project of its own"). Bidirectional needs
-the state index (Phase 1 builds it) plus a conflict policy (newest-wins /
-keep-both "conflicted copy" / prompt). Its own future plan.
+the state index ([Plan 3](3_scan-index-foundation.md) builds it) plus a
+conflict policy (newest-wins / keep-both "conflicted copy" / prompt). Its own
+future plan.
 
 ---
 
 ## Key files
-- `src-tauri/src/sync.rs` (existing one-shot engine → refactor into `sync/`)
-- new `src-tauri/src/sync/{engine.rs,index.rs,watcher.rs,poller.rs,pairs.rs}`
-- `src-tauri/src/transfer.rs` (reuse chunked transfer)
-- `src-tauri/src/remotefs/mod.rs` (`Capabilities` — add a `change_signal` hint)
-- new SQLite store + a `sync-pairs.json` config; Tauri commands mirroring
-  `agent_host.rs` (`sync_pair_list/add/remove/set_enabled/status`)
-- frontend: a Sync panel + tray status
+- `src-tauri/src/foldersync.rs` (the shipped engine — pairs, watcher, poller,
+  reconciler; JSON config `foldersync.json`). Mirrors `agent_host.rs`; Tauri
+  commands `foldersync_*` registered in `lib.rs`.
+- `src-tauri/src/sync.rs` (one-shot `plan()`/`execute()`, reused as primitives)
+- `src-tauri/src/transfer.rs` (chunked transfer)
+- **Persistence + `change_signal`: [Plan 3](3_scan-index-foundation.md)** —
+  the state index (`faro.db`) and the `Capabilities.change_signal` hint live
+  there, not here.
+- frontend: a Sync panel in `Settings.tsx` + a StatusBar pill
 
 ## Risks / gotchas
 - **No remote change feed** on S3/Azure/SFTP/FTP/Agent → polling cost, latency,
