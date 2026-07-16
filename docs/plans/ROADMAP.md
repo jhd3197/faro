@@ -93,6 +93,19 @@ surface for those agents).
 
 ---
 
+## Track E — Brand & protocol logos (Plan 5)
+
+Additive icon layer for recognizable brand marks (S3/Azure/SSH/WordPress) via
+Iconify, bundled offline. Deliberately does **not** touch the file-type icons
+(Material Icon Theme — more complete + has the extension mapping) or the lucide
+UI icons.
+
+- ✅ Files already use Material Icon Theme; UI uses lucide. *(shipped/present)*
+- ⬜ **Phase 1–2** — Iconify offline foundation + protocol logos on the rail,
+  connection list, and New-Connection picker (logo *plus* the colour monogram).
+- ⬜ Phase 3 — tech badges elsewhere. ⬜ Phase 4 — (deferred) evaluate
+  consolidating lucide UI icons onto Iconify.
+
 ## Recommended global sequence
 
 1. **Track A safety hardening + runtime test** — finish making the shipped sync

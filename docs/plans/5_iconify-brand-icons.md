@@ -1,0 +1,99 @@
+# Plan 5 — Iconify for brand & protocol logos
+
+## Context
+
+The app runs two icon systems today, each doing its own job well:
+- **lucide** — all UI chrome (buttons, menus, the rail, status bar).
+- **Material Icon Theme** — file-type icons in the browser (`.psd → Photoshop`,
+  `.py → Python`), driven by its extension→icon manifest (see
+  `packages/file-ui/src/lib/materialIcons.ts`).
+
+Neither gives **recognizable brand/protocol logos** — an actual AWS S3, Azure,
+SSH, WordPress, or Postgres mark. That's the gap this plan fills, using
+[Iconify](https://iconify.design), which aggregates 200+ open-source icon sets
+behind one component and, crucially, can be **bundled offline** (no CDN/network).
+
+## Scope
+
+**In:** brand/protocol logos where recognizability adds value — connection
+bubbles in the rail, the connection list, the New Connection protocol picker,
+and a reusable `<BrandIcon>` for tech badges.
+
+**Explicitly out (do not do):**
+- **Do NOT route file-type icons through Iconify.** Iconify's Material Icon
+  Theme set is **903 icons and carries no extension→icon mapping**; the
+  standalone `material-icon-theme` package has **1250 icons + the manifest**.
+  Switching would lose icons *and* the mapping. File icons stay as-is.
+- **Do NOT rip out lucide** for UI chrome. A single-system consolidation is a
+  large refactor and a separate future decision (Phase 4), not this plan.
+
+So this is **additive**: Iconify covers a domain (brand logos) that neither
+existing system does. No icon is imported twice.
+
+## Approach — offline, no network
+
+- Use **`@iconify/react`** + per-set JSON bundles **`@iconify-json/<prefix>`** —
+  NOT the hosted Iconify API/CDN. Register only the sets we use via
+  `addCollection(...)` once at startup (or import specific icons), so the bundle
+  carries only what we reference and makes **zero network calls**.
+- **Sets (permissive licences only):** `logos` (CC0) for colour brand marks,
+  `simple-icons` (CC0) for monochrome brands, `devicon` (MIT) for dev/tech,
+  `mdi` / `material-symbols` (Apache-2.0) as neutral fallbacks. **Avoid GPL and
+  CC-BY-SA;** CC-BY-4.0 is usable but needs visible attribution — prefer CC0/MIT/
+  Apache to keep attribution trivial. Record whatever ships in
+  `THIRD_PARTY_LICENSES.md` (already exists).
+- A single **`protocolIcon(protocol)`** map is the core data:
+  | protocol | icon |
+  |---|---|
+  | `sftp` / ssh | an SSH/terminal glyph (`logos:` or `simple-icons:openssh`) |
+  | `ftp` / `ftps` | network-folder glyph |
+  | `s3` | `logos:aws-s3` |
+  | `azure` | `logos:microsoft-azure` |
+  | `faro-agent` | the Faro lighthouse mark |
+
+## Phases
+
+### Phase 1 — Foundation
+Add `@iconify/react` + the chosen `@iconify-json/*` sets. New
+`src/lib/brandIcons.ts`: registers the sets offline (`addCollection`) and exports
+`protocolIcon(protocol)` + a thin `<BrandIcon icon size />` wrapper over
+`@iconify/react`'s `<Icon>`. Confirm the offline registration makes no request to
+`api.iconify.design`. Attribution in `THIRD_PARTY_LICENSES.md`.
+
+### Phase 2 — Protocol logos on connections
+Wire `protocolIcon()` into:
+- `src/components/ServerRail.tsx` — the connection bubble (behind/beside the
+  colour monogram; keep the monogram as the fallback and identity colour).
+- the connection list rows.
+- `src/components/ProfileEditor.tsx` — the New Connection protocol picker, so
+  each protocol shows its real logo.
+
+### Phase 3 — Tech badges (optional polish)
+A `<BrandIcon>` for known services elsewhere (a WordPress/Docker/Postgres mark
+where the type is known), and the ServerKit/DeviceKit hand-off surfaces.
+
+### Phase 4 — Consolidation (deferred, separate decision)
+Evaluate moving lucide UI icons onto Iconify for a single icon system across the
+app. Large refactor; only if the maintenance simplification is judged worth it.
+Not part of shipping Phases 1–3.
+
+## Integration points
+- `package.json` — `@iconify/react`, `@iconify-json/logos`,
+  `@iconify-json/simple-icons`, `@iconify-json/devicon` (as chosen).
+- new `src/lib/brandIcons.ts` — offline registration + `protocolIcon` + `BrandIcon`.
+- `src/components/ServerRail.tsx`, the connection list, `src/components/ProfileEditor.tsx`.
+- `THIRD_PARTY_LICENSES.md` — attribution for any CC-BY set (ideally none).
+
+## Risks
+- **Bundle size** if whole sets are imported — prefer per-icon imports or a
+  curated subset; measure the delta (the app already warns near 500 KB).
+- **Licensing** — stay on CC0/MIT/Apache; attribute CC-BY; never GPL/CC-BY-SA.
+- **Identity regression** — connections rely on the colour monogram; add the
+  logo without removing that recognizability (logo + colour, not logo instead).
+- **Keep Material Icon Theme untouched** — this plan must not change file icons.
+
+## Verification
+`tsc` clean + `vite build`; **offline check** (disable network / grep the build
+for `api.iconify.design` → must be absent) so logos render with no connection;
+visually confirm protocol logos on the rail, list, and protocol picker without
+losing the monogram/colour.
