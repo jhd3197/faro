@@ -40,7 +40,7 @@ thematic detail.
 | 2 | `2_continuous-folder-sync` | 🔄 Phases 1–2 + safety merged; runtime test left | The shipped sync engine. |
 | 3 | `3_scan-index-foundation` | ✅ built (runtime test on a live backend left) | Shared scan engine + `faro.db`. Substrate for 4/6/7 and the sync state index. |
 | 4 | `4_disk-usage-explorer` | ✅ built (GUI click-through on a live backend left) | First *visible*, read-only consumer of #3 — proves the foundation at low risk. |
-| 5 | `5_additional-backends` | ⬜ | More `RemoteFs` impls (S3 presets → GCS → WebDAV → SMB → OAuth clouds). Independent; can slot anywhere. |
+| 5 | `5_additional-backends` | 🔄 Phases 0–2 shipped (S3 presets, GCS, WebDAV) | More `RemoteFs` impls. Remaining: SMB (blocked on MSVC/libsmbclient), read-only HTTP, OAuth clouds. |
 | 6 | `6_directory-diff` | ⬜ | Reuses #3's scan engine (two trees) + `change_signal`/`etag`. |
 | 7 | `7_fleet-search` | ⬜ | Reuses #3's scan engine; later a `faro.db` filename index. |
 | 8 | `8_fleet-skills` | ⬜ | AI-authored fleet automations over the bridge. Independent. |
@@ -103,14 +103,18 @@ transfer / sync for free.
 
 - ✅ Already present (pre-existing): SFTP, FTP/FTPS, S3, **Azure Blob** (via
   `object_store`), Faro Agent, local.
-- 🔄 **Phase 0** — S3-compatible presets: AWS/R2/B2 shipped; Wasabi, MinIO,
-  Spaces, Storj, Hetzner + long tail remain. ~No backend code. *Cheapest win.*
-- ⬜ **Phase 1** — native GCS: `object_store` `gcp` feature, same one-builder
-  move that shipped Azure. Nearly free.
-- ⬜ **Phase 2** — WebDAV (Nextcloud/ownCloud/Storage Box/generic). Low effort,
-  high coverage.
+- ✅ **Phase 0** — S3-compatible presets: AWS/R2/B2 + Wasabi, DO Spaces, MinIO,
+  Storj, Hetzner, Scaleway, Oracle OCI, IBM COS, Supabase, and a generic
+  self-hosted preset. No backend code. *Shipped.*
+- ✅ **Phase 1** — native GCS: `object_store` `gcp` feature + one builder, same
+  one-builder move that shipped Azure. *Shipped.*
+- ✅ **Phase 2** — WebDAV (Nextcloud/ownCloud/Storage Box/generic): new
+  `RemoteFs` impl, PROPFIND/GET/PUT/DELETE/MKCOL/MOVE, ETag change signal.
+  Verified against a live wsgidav server. *Shipped.*
 - ⬜ **Phase 3** — SMB/CIFS (NAS/Windows shares; Azure Files for free). Biggest
-  single gap. NFS as stretch.
+  single gap. **Blocked on the Windows dev box:** `pavao` links libsmbclient
+  (Samba C lib, no MSVC build) and the pure-Rust `smb` crate is still immature —
+  re-evaluate at build time, and it needs a live NAS to verify. NFS as stretch.
 - ⬜ **Phase 4** — read-only HTTP(S) source (autoindex browse + direct URL).
   Optional mini-phase.
 - ⬜ **Phase 5** — OAuth clouds, easiest API first: Dropbox → OneDrive → Drive →

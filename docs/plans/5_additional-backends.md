@@ -23,44 +23,51 @@ Each backend is the same recipe:
 
 ## Phases (priority order)
 
-### Phase 0 — More S3-compatible presets (≈ no backend code) — partially shipped
-`S3_PROVIDER_PRESETS` (`src/lib/types.ts`) + `guessProvider` already ship
-**AWS, Cloudflare R2, Backblaze B2**. Extend the same table:
-- **First tier:** Wasabi, MinIO, DigitalOcean Spaces, Storj, Hetzner Object
-  Storage, GCS interop mode (HMAC keys — superseded by Phase 1 native auth but
-  still zero-code).
-- **Long tail (cheap to add, judge demand):** Scaleway, Linode/Akamai, Vultr,
-  Oracle OCI, IBM COS, Supabase Storage; self-hosted **Ceph RGW, Garage,
-  SeaweedFS** (one generic "S3-compatible / self-hosted" preset may cover all
-  three).
-Work per entry: preset row (label, endpoint hint, default region) + a
-`guessProvider` endpoint pattern. Highest value-to-effort in the whole plan.
+### Phase 0 — More S3-compatible presets (≈ no backend code) — ✅ shipped
+`S3_PROVIDER_PRESETS` (`src/lib/types.ts`) + `guessProvider` now ship **AWS,
+Cloudflare R2, Backblaze B2, Wasabi, DigitalOcean Spaces, MinIO, Storj, Hetzner
+Object Storage, Scaleway, Oracle OCI, IBM COS, Supabase**, and a generic
+**S3-compatible / self-hosted** preset (covers Ceph RGW, Garage, SeaweedFS).
+Each carries a vendor sub-label, endpoint template, and default region; the
+provider grid renders straight from the table and `guessProvider` recognizes
+every endpoint pattern. GCS interop mode was skipped in favour of Phase 1's
+native auth. (Linode/Akamai and Vultr not added — judge demand.)
 
-### Phase 1 — Native Google Cloud Storage (nearly free now)
-Azure Blob shipped by flipping `object_store`'s `azure` feature and adding one
-builder in `session/object.rs` — **GCS is the identical move**: enable the
-`gcp` feature, `GoogleCloudStorageBuilder` with service-account JSON (file
-path or pasted key), protocol `"gcs"`, one `ProfileEditor` section. No new
-files, no new crate. Do this before WebDAV; it was budgeted as a whole crate
-(`google-cloud-storage`) when this plan was first written and is now an
-afternoon.
+### Phase 1 — Native Google Cloud Storage (nearly free now) — ✅ shipped
+Shipped exactly as the Azure move: `object_store`'s `gcp` feature +
+`gcs_connect` in `session/object.rs` using `GoogleCloudStorageBuilder` with a
+service-account key (JSON file path via Key auth, or pasted JSON via Password
+auth), protocol `"gcs"`, one `GcsSection` in `ProfileEditor`. A GCS session is
+an `ObjectSession`, so browse/transfer/sync/disk-usage/rename all work through
+the existing `ObjectFs` + object transfer arms unchanged. No new files, no new
+crate.
 
-### Phase 2 — WebDAV (`webdav.rs`)
+### Phase 2 — WebDAV (`webdav.rs`) — ✅ shipped
 One protocol covers **Nextcloud, ownCloud, Hetzner Storage Box, Koofr, Yandex
 Disk, Fastmail Files, Synology WebDAV, and a long tail of generic servers**.
-`reqwest` + `PROPFIND` (list/stat), `GET`/`PUT` (read/write, ranged),
-`DELETE`, `MKCOL` (mkdir), `MOVE` (rename). Auth: Basic or Bearer.
-Capabilities: real directories yes, `chmod` no, rename via `MOVE`,
-`change_signal: Etag` (populate `DirEntry.etag` from `getetag`; servers that
-omit it degrade to mtime+size).
-- Ship **WebDAV provider presets** (the Phase 0 idea generalized beyond S3):
-  Nextcloud/ownCloud prefill the `/remote.php/dav/files/<user>/` path
-  template; Hetzner Storage Box prefills `https://<user>.your-storagebox.de`.
-- Note: `object_store` has an `http` feature that lists via PROPFIND, but it
-  imposes object semantics (no real dirs) — hand-roll this one so
-  `has_directories: true` is honest.
+Shipped as `session/webdav.rs` (`WebdavSession`: shared `reqwest` client, base
+URL carrying the DAV root, Basic/Bearer auth, connect-time depth-0 PROPFIND
+validation) + `remotefs/webdav.rs` (`WebdavFs`: `PROPFIND` list, `MOVE` rename,
+`DELETE`, `MKCOL`, no chmod). Byte transfer streams via `GET`/`PUT` in
+`transfer.rs`; edit-in-place wired in `editor.rs`. `change_signal: Etag` from
+`getetag`, with the mtime+size the entries still carry as the fallback.
+- Shipped **WebDAV provider presets** (`WEBDAV_PROVIDER_PRESETS`): Nextcloud /
+  ownCloud prefill `…/remote.php/dav/files/<user>/`, Hetzner Storage Box
+  `https://<user>.your-storagebox.de`, plus a generic template; the
+  `WebdavSection` also has a Basic/Bearer auth toggle.
+- Hand-rolled (not `object_store`'s `http` feature) so `has_directories: true`
+  is honest. The multistatus parser is namespace-prefix agnostic (Nextcloud
+  `d:`, Apache `D:`/`lp1:`, bare); RFC1123 `getlastmodified` is parsed without a
+  date crate. Verified by parser unit tests + a live `#[ignore]` end-to-end test
+  (connect → MKCOL → PUT → PROPFIND → GET → MOVE → DELETE) against wsgidav.
 
-### Phase 3 — SMB/CIFS (`smb.rs`) + the LAN/NAS tier
+### Phase 3 — SMB/CIFS (`smb.rs`) + the LAN/NAS tier — ⬜ blocked on Windows
+**Build-time re-evaluation (2026-07):** `pavao` links **libsmbclient** (Samba's
+C library), which has no practical MSVC build — a hard blocker on the mandated
+Windows toolchain — and the pure-Rust `smb` crate is still immature. SMB also
+needs a live NAS/Windows share to verify, which isn't available in the dev
+environment. Deferred until either the pure-Rust client firms up or a
+libsmbclient build path exists. Everything below stands as the original spec.
 Windows shares and **every NAS** (Synology, QNAP, TrueNAS). LAN-first, plain
 user/pass — no OAuth. Options: [`pavao`](https://crates.io/crates/pavao)
 (wraps libsmbclient, C FFI build cost) vs the pure-Rust `smb` crate that has
