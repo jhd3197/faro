@@ -95,17 +95,37 @@ Verified by parser unit tests + a live `#[ignore]` end-to-end test against
 
 ### Phase 5 — OAuth consumer clouds (Dropbox / OneDrive / Drive / Box) — the hard tier
 Big user draw, meaningfully harder. Shared infrastructure first:
-- **`oauth.rs` helper** used by all of them: loopback/PKCE flow (the `oauth2`
-  crate), token storage (OS keychain — see cross-cutting), refresh handling.
-- Rate limits + retry/backoff.
+- ✅ **`oauth.rs` helper** — **shipped and reusable.** Hand-rolled loopback +
+  PKCE (S256) authorization-code flow (no `oauth2` crate): a fixed-port
+  (`:53682`) local listener catches the redirect, the code is exchanged against
+  a configurable token endpoint, refresh is a second form POST. Endpoints are
+  `OAuthConfig` fields, so a new provider is just a different config. Tokens live
+  in the OS keychain (`keyring`, native backends), never in profile JSON.
+- Rate limits + retry/backoff: a transparent 401→refresh-retry is in place;
+  broader backoff is future work.
 
 Then sequence by API friction, **not** brand size:
-1. **Dropbox** — API v2 is *path-based*; slots straight into the trait. Pilot
-   the OAuth infra here.
-2. **OneDrive** — Microsoft Graph supports path addressing
-   (`/drive/root:/path`); near-Dropbox effort.
-3. **Google Drive** — strictly ID-addressed; needs the path↔ID resolver/cache.
-4. **Box** — enterprise draw; ID-addressed like Drive, reuses its resolver.
+1. ✅ **Dropbox** — **shipped.** API v2 path-based → straight into the trait.
+   `session/dropbox.rs` (`DropboxSession`: bearer RPC/content helpers,
+   transparent refresh) + `remotefs/dropbox.rs` (`DropboxFs`: list_folder+continue,
+   move_v2, delete_v2, create_folder_v2; `rev` as the change token) +
+   streaming download / simple upload in `transfer.rs` (>150 MB refused pending
+   chunked `upload_session`) + a `dropbox_authorize` command driving the browser
+   flow + a `DropboxSection` "Connect with Dropbox" editor. Verified by parser
+   unit tests + a live `#[ignore]` end-to-end test (`tests/dropbox_mock.py`)
+   covering token exchange, the 401→refresh retry, and
+   list/create/upload/download/move/delete.
+   **Maintainer prerequisite to go live:** register a scoped Dropbox app
+   (<https://www.dropbox.com/developers/apps>), redirect URI
+   `http://localhost:53682/`, enable the `account_info.read` /
+   `files.metadata.read` / `files.content.read` / `files.content.write` scopes,
+   and set the App key in `session/dropbox.rs` (`DROPBOX_APP_KEY`) or via
+   `FARO_DROPBOX_APP_KEY`. PKCE ⇒ no app secret. The browser-consent leg needs a
+   real app key + account and is the only unverified step.
+2. ⬜ **OneDrive** — Microsoft Graph supports path addressing
+   (`/drive/root:/path`); near-Dropbox effort, reuses `oauth.rs`.
+3. ⬜ **Google Drive** — strictly ID-addressed; needs the path↔ID resolver/cache.
+4. ⬜ **Box** — enterprise draw; ID-addressed like Drive, reuses its resolver.
 5. *(Optional)* **pCloud** — path-based API, small effort, smaller audience.
 
 Dropbox, Drive, and OneDrive all expose **delta cursors**

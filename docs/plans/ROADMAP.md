@@ -40,7 +40,7 @@ thematic detail.
 | 2 | `2_continuous-folder-sync` | 🔄 Phases 1–2 + safety merged; runtime test left | The shipped sync engine. |
 | 3 | `3_scan-index-foundation` | ✅ built (runtime test on a live backend left) | Shared scan engine + `faro.db`. Substrate for 4/6/7 and the sync state index. |
 | 4 | `4_disk-usage-explorer` | ✅ built (GUI click-through on a live backend left) | First *visible*, read-only consumer of #3 — proves the foundation at low risk. |
-| 5 | `5_additional-backends` | 🔄 Phases 0–2 + 4 shipped (S3 presets, GCS, WebDAV, HTTP) | More `RemoteFs` impls. Remaining: SMB (blocked on MSVC/libsmbclient), OAuth clouds. |
+| 5 | `5_additional-backends` | 🔄 Phases 0–2, 4 + OAuth infra & Dropbox shipped | More `RemoteFs` impls. Remaining: SMB (blocked on MSVC/libsmbclient), OneDrive/Drive/Box. |
 | 6 | `6_directory-diff` | ⬜ | Reuses #3's scan engine (two trees) + `change_signal`/`etag`. |
 | 7 | `7_fleet-search` | ⬜ | Reuses #3's scan engine; later a `faro.db` filename index. |
 | 8 | `8_fleet-skills` | ⬜ | AI-authored fleet automations over the bridge. Independent. |
@@ -118,8 +118,10 @@ transfer / sync for free.
 - ✅ **Phase 4** — read-only HTTP(S) source: nginx/Apache autoindex browse +
   nginx JSON + direct-URL mode, streaming GET reads, mutations refused. Verified
   against `python -m http.server`. *Shipped.*
-- ⬜ **Phase 5** — OAuth clouds, easiest API first: Dropbox → OneDrive → Drive →
-  Box. Hardest (OAuth + ID-vs-path for Drive/Box).
+- 🔄 **Phase 5** — OAuth clouds. Shared `oauth.rs` (loopback+PKCE, keychain) +
+  **Dropbox shipped** (needs a maintainer-registered app key to go live;
+  verified against a mock). Remaining: OneDrive → Drive → Box (reuse `oauth.rs`;
+  Drive/Box add an ID↔path resolver).
 
 ## Track C — On-demand virtual folders (Plan 9)
 
