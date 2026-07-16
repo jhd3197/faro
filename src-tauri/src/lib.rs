@@ -9,6 +9,7 @@ pub mod bridge;
 mod commands;
 pub mod agent;
 mod agent_host;
+pub mod db;
 mod deeplink;
 mod editor;
 mod foldersync;
@@ -30,6 +31,9 @@ pub struct AppState {
     pub bridge: Arc<bridge::BridgeState>,
     pub agent_host: Arc<agent_host::AgentHost>,
     pub foldersync: Arc<foldersync::FolderSync>,
+    /// Shared `faro.db` — the per-connection index (sync_state today; scan/search
+    /// caches later). See `db.rs`.
+    pub db: Arc<db::Db>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -61,6 +65,14 @@ pub fn run() {
                 profiles::ProfileStore::load_or_create(&handle)
                     .expect("failed to initialise profile store"),
             );
+            let db = {
+                let dir = handle
+                    .path()
+                    .app_data_dir()
+                    .expect("resolving app_data_dir for faro.db");
+                std::fs::create_dir_all(&dir).ok();
+                Arc::new(db::Db::open(&dir.join("faro.db")).expect("failed to open faro.db"))
+            };
             let state = AppState {
                 sessions: Arc::new(session::SessionManager::new()),
                 ptys: Arc::new(terminal::PtyManager::new()),
@@ -78,6 +90,7 @@ pub fn run() {
                     foldersync::FolderSync::load(&handle)
                         .expect("failed to initialise folder sync settings"),
                 ),
+                db,
             };
             app.manage(state);
 

@@ -65,6 +65,12 @@ bytes = "1"
 # Importers — quick-xml for FileZilla's sitemanager.xml.
 quick-xml = "0.36"
 
+# Shared connection index (faro.db). The `bundled` feature compiles SQLite from
+# source so there's no system-SQLite dependency. One DB under app_data_dir holds
+# per-feature tables (sync_state today; scan_cache / search_index / diff_hash
+# later). See docs/plans/3_scan-index-foundation.md.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
 # Misc
 anyhow = "1"
 thiserror = "1"
