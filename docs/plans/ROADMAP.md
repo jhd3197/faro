@@ -39,7 +39,7 @@ thematic detail.
 | 1 | `1_faro-agent-pairing-and-distribution` | ✅ shipped | The agent — foundation everything else leans on. |
 | 2 | `2_continuous-folder-sync` | 🔄 Phases 1–2 + safety merged; runtime test left | The shipped sync engine. |
 | 3 | `3_scan-index-foundation` | ✅ built (runtime test on a live backend left) | Shared scan engine + `faro.db`. Substrate for 4/6/7 and the sync state index. |
-| 4 | `4_disk-usage-explorer` | ⬜ **next** | First *visible*, read-only consumer of #3 — proves the foundation at low risk. |
+| 4 | `4_disk-usage-explorer` | ✅ built (GUI click-through on a live backend left) | First *visible*, read-only consumer of #3 — proves the foundation at low risk. |
 | 5 | `5_additional-backends` | ⬜ | More `RemoteFs` impls (S3 presets → GCS → WebDAV → SMB → OAuth clouds). Independent; can slot anywhere. |
 | 6 | `6_directory-diff` | ⬜ | Reuses #3's scan engine (two trees) + `change_signal`/`etag`. |
 | 7 | `7_fleet-search` | ⬜ | Reuses #3's scan engine; later a `faro.db` filename index. |
@@ -172,11 +172,17 @@ differentiator vs the desktop tools: it works on **remote servers and buckets**,
 with a shell `du` fast path (SSH/Agent) and object-store flat listing so it's
 actually fast at scale.
 
-- ⬜ **Phase 1–2** — the Canvas treemap tab and size list on top of the
-  **Track A2 scan engine** (the walk + `du`/flat-listing strategies live there).
-  ⬜ Phase 3 — wire the exec `du`/`find` + object flat-listing fast paths.
-  ⬜ Phase 4 — delete/reveal actions + `faro.db` "remember last scan per
-  connection" + polish.
+- ✅ **Phase 1–2** — a Canvas treemap + size-ranked list on top of the
+  **Track A2 scan engine**, opening as a full-screen explorer overlay from the
+  file-browser toolbar / a directory's context menu.
+  ✅ Phase 3 — exec `find -printf` fast path (SSH + Faro Agent, exec-gated,
+  falls back to the walk) + object-store flat listing; the chosen strategy shows
+  as a header badge with a fallback note.
+  ✅ Phase 4 — reveal / copy-path / delete (live tree prune) from the map +
+  colour-by type/depth + rescan. "Remember last scan per connection" deferred
+  (the entry point always carries the current dir — no `faro.db` table yet).
+  ⬜ Remaining: GUI click-through on a live SSH/S3/agent backend (core scan
+  verified at runtime against a real filesystem; app boots clean).
 
 **Built on Track A2** (scan engine + `faro.db`). This is the first *visible*
 consumer of the foundation and it's read-only, so it's the lowest-risk way to
