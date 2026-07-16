@@ -1,5 +1,5 @@
 use crate::session::{
-    FtpSession, HttpSession, ObjectSession, Session, SshSession, WebdavSession,
+    DropboxSession, FtpSession, HttpSession, ObjectSession, Session, SshSession, WebdavSession,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -265,6 +265,16 @@ impl TransferManager {
                     )
                     .await
                 }
+                Session::Dropbox(dbx) => {
+                    mgr.run_dropbox_download(
+                        &id_for_task,
+                        dbx.clone(),
+                        &remote_path,
+                        &final_path,
+                        &app,
+                    )
+                    .await
+                }
                 Session::Agent(agent) => {
                     mgr.run_agent_download(
                         &id_for_task,
@@ -472,6 +482,16 @@ impl TransferManager {
                 }
                 Session::Http(_) => {
                     Err(anyhow::anyhow!("HTTP source is read-only — upload not supported"))
+                }
+                Session::Dropbox(dbx) => {
+                    mgr.run_dropbox_upload(
+                        &id_for_task,
+                        dbx.clone(),
+                        &local,
+                        &final_remote,
+                        &app,
+                    )
+                    .await
                 }
                 Session::Agent(agent) => {
                     mgr.run_agent_upload(
@@ -1085,6 +1105,120 @@ impl TransferManager {
         self.update(id, |t| t.transferred = transferred).await;
         Ok(())
     }
+
+    /// Stream a Dropbox download: POST `/2/files/download` (path in the
+    /// `Dropbox-API-Arg` header), written chunk by chunk.
+    async fn run_dropbox_download(
+        &self,
+        id: &str,
+        session: Arc<DropboxSession>,
+        remote_path: &str,
+        local_path: &Path,
+        app: &AppHandle,
+    ) -> Result<()> {
+        use futures::StreamExt;
+
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+
+        let dbx = crate::remotefs::dropbox::dropbox_api_path(remote_path);
+        let arg = serde_json::json!({ "path": dbx }).to_string();
+        let resp = session.content_get("/2/files/download", &arg).await?;
+
+        let mut file = tokio::fs::File::create(local_path)
+            .await
+            .with_context(|| format!("create {}", local_path.display()))?;
+        let mut stream = resp.bytes_stream();
+        let mut transferred: u64 = 0;
+        let mut last_emit = Instant::now();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.with_context(|| format!("dropbox chunk for {remote_path}"))?;
+            file.write_all(&chunk).await?;
+            transferred += chunk.len() as u64;
+            if last_emit.elapsed() > Duration::from_millis(100) {
+                self.update(id, |t| t.transferred = transferred).await;
+                if let Some(t) = self.get(id).await {
+                    let _ = app.emit("transfer://progress", &t);
+                }
+                last_emit = Instant::now();
+            }
+        }
+        file.flush().await?;
+        self.update(id, |t| t.transferred = transferred).await;
+        Ok(())
+    }
+
+    /// Upload a file to Dropbox via `/2/files/upload` (overwrite mode). Simple
+    /// single-shot upload; Dropbox caps that at 150 MB, so larger files are
+    /// refused with a clear message (chunked upload_session is a follow-up).
+    async fn run_dropbox_upload(
+        &self,
+        id: &str,
+        session: Arc<DropboxSession>,
+        local_path: &Path,
+        remote_path: &str,
+        app: &AppHandle,
+    ) -> Result<()> {
+        use tokio_util::io::ReaderStream;
+
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+        let _ = app; // Dropbox reports at completion, like the FTP/WebDAV paths.
+
+        let size = tokio::fs::metadata(local_path)
+            .await
+            .with_context(|| format!("stat {}", local_path.display()))?
+            .len();
+        const SIMPLE_UPLOAD_MAX: u64 = 150 * 1024 * 1024;
+        if size > SIMPLE_UPLOAD_MAX {
+            return Err(anyhow::anyhow!(
+                "{} exceeds Dropbox's 150 MB single-request upload limit \
+                 (chunked upload not yet implemented)",
+                local_path.display()
+            ));
+        }
+
+        let dbx = crate::remotefs::dropbox::dropbox_api_path(remote_path);
+        let arg = serde_json::json!({
+            "path": dbx, "mode": "overwrite", "autorename": false, "mute": true
+        })
+        .to_string();
+        let url = format!("{}/2/files/upload", session.content_base);
+
+        // Proactive refresh covers the common case; on a hard 401 we refresh and
+        // retry once, re-opening the file for a fresh streamed body.
+        let mut attempt = 0;
+        loop {
+            let token = session.access_token().await?;
+            let file = tokio::fs::File::open(local_path)
+                .await
+                .with_context(|| format!("open {}", local_path.display()))?;
+            let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
+            let resp = session
+                .client
+                .post(&url)
+                .bearer_auth(&token)
+                .header("Dropbox-API-Arg", &arg)
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(body)
+                .send()
+                .await
+                .with_context(|| format!("PUT {remote_path}"))?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
+                attempt += 1;
+                session.force_refresh().await?;
+                continue;
+            }
+            if !resp.status().is_success() {
+                let code = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!("upload {remote_path} failed ({code}): {text}"));
+            }
+            break;
+        }
+        self.update(id, |t| t.transferred = size).await;
+        Ok(())
+    }
 }
 
 /// Build a RemoteFs handle for the right backend.
@@ -1097,6 +1231,7 @@ fn fs_for_session(session: &Arc<Session>) -> Box<dyn crate::remotefs::RemoteFs> 
         }
         Session::Webdav(dav) => Box::new(crate::remotefs::webdav::WebdavFs::new(dav.clone())),
         Session::Http(http) => Box::new(crate::remotefs::http::HttpFs::new(http.clone())),
+        Session::Dropbox(dbx) => Box::new(crate::remotefs::dropbox::DropboxFs::new(dbx.clone())),
         Session::Agent(agent) => Box::new(crate::remotefs::agent::AgentFs::new(agent.clone())),
     }
 }
@@ -1175,6 +1310,9 @@ async fn remote_size(session: &Arc<Session>, path: &str) -> Result<u64> {
         }
         Session::Webdav(dav) => Ok(webdav_head(dav, path).await.0),
         Session::Http(http) => Ok(http_size(http, path).await),
+        Session::Dropbox(dbx) => {
+            Ok(dbx.size(&crate::remotefs::dropbox::dropbox_api_path(path)).await)
+        }
         Session::Agent(agent) => Ok(agent_stat(agent, path).await.0),
     }
 }
@@ -1272,6 +1410,27 @@ async fn remote_resolve(
             // Read-only: no upload will actually run (run_http_upload errors), so
             // resolution is a no-op that just echoes the target back.
             Ok((initial_remote.to_string(), false))
+        }
+        Session::Dropbox(dbx) => {
+            let dbx_path = crate::remotefs::dropbox::dropbox_api_path(initial_remote);
+            let exists = dbx.exists(&dbx_path).await;
+            Ok(match policy {
+                OverwritePolicy::Overwrite => (initial_remote.to_string(), false),
+                OverwritePolicy::Skip => (initial_remote.to_string(), exists),
+                OverwritePolicy::Rename if !exists => (initial_remote.to_string(), false),
+                OverwritePolicy::Rename => {
+                    let mut candidate = initial_remote.to_string();
+                    for i in 1..=999 {
+                        let (stem, ext) = split_ext(initial_remote);
+                        candidate = format!("{stem}_{i}{ext}");
+                        let p = crate::remotefs::dropbox::dropbox_api_path(&candidate);
+                        if !dbx.exists(&p).await {
+                            break;
+                        }
+                    }
+                    (candidate, false)
+                }
+            })
         }
         Session::Agent(agent) => {
             let (_, exists) = agent_stat(agent, initial_remote).await;

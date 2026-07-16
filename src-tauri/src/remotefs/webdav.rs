@@ -363,8 +363,9 @@ fn month_num(m: &str) -> Option<i64> {
 }
 
 /// Days since the Unix epoch for a civil (proleptic Gregorian) date. Howard
-/// Hinnant's `days_from_civil` algorithm.
-fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+/// Hinnant's `days_from_civil` algorithm. Shared with the Dropbox backend's
+/// ISO-8601 timestamp parser.
+pub(crate) fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = (if y >= 0 { y } else { y - 399 }) / 400;
     let yoe = y - era * 400; // [0, 399]

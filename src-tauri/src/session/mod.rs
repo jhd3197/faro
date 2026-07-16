@@ -1,9 +1,11 @@
 pub mod agent;
+pub mod dropbox;
 pub mod ftp;
 pub mod http;
 pub mod object;
 pub mod webdav;
 pub use agent::{agent_pair, AgentSession};
+pub use dropbox::{dropbox_connect, DropboxSession};
 pub use ftp::{ftp_connect, FtpSession};
 pub use http::{http_connect, HttpSession};
 pub use object::{object_connect, ObjectSession};
@@ -1126,6 +1128,10 @@ pub async fn open_session(
             let http = http_connect(profile).await?;
             Ok(Session::Http(Arc::new(http)))
         }
+        "dropbox" => {
+            let dbx = dropbox_connect(profile).await?;
+            Ok(Session::Dropbox(Arc::new(dbx)))
+        }
         other => Err(anyhow!("unsupported protocol: {other}")),
     }
 }
@@ -1379,6 +1385,7 @@ pub enum Session {
     Object(Arc<ObjectSession>),
     Webdav(Arc<WebdavSession>),
     Http(Arc<HttpSession>),
+    Dropbox(Arc<DropboxSession>),
     Agent(Arc<AgentSession>),
 }
 
@@ -1390,6 +1397,7 @@ impl Session {
             Self::Object(s) => &s.profile,
             Self::Webdav(s) => &s.profile,
             Self::Http(s) => &s.profile,
+            Self::Dropbox(s) => &s.profile,
             Self::Agent(s) => &s.profile,
         }
     }
@@ -1401,6 +1409,7 @@ impl Session {
             Self::Object(s) => s.profile.protocol.as_str(),
             Self::Webdav(_) => "webdav",
             Self::Http(_) => "http",
+            Self::Dropbox(_) => "dropbox",
             Self::Agent(_) => "faro-agent",
         }
     }
@@ -1488,6 +1497,12 @@ impl SessionManager {
                 let id = http.id.clone();
                 (id, Session::Http(Arc::new(http)))
             }
+            "dropbox" => {
+                let _ = app; // OAuth tokens loaded from the keychain; no prompt.
+                let dbx = dropbox_connect(&profile).await?;
+                let id = dbx.id.clone();
+                (id, Session::Dropbox(Arc::new(dbx)))
+            }
             "faro-agent" => {
                 let agent = AgentSession::connect(profile).await?;
                 let id = agent.id.clone();
@@ -1564,6 +1579,9 @@ impl SessionManager {
                 }
                 Session::Http(_) => {
                     // Read-only HTTP is stateless — nothing to close.
+                }
+                Session::Dropbox(_) => {
+                    // Dropbox is stateless HTTP — nothing to close.
                 }
                 Session::Agent(agent) => {
                     agent.disconnect().await;

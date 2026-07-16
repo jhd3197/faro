@@ -409,6 +409,21 @@ async fn download_to(
             }
             file.flush().await?;
         }
+        Session::Dropbox(dbx) => {
+            use futures::StreamExt;
+            let arg = serde_json::json!({
+                "path": crate::remotefs::dropbox::dropbox_api_path(remote_path)
+            })
+            .to_string();
+            let resp = dbx.content_get("/2/files/download", &arg).await?;
+            let mut file = tokio::fs::File::create(local_path).await?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk).await?;
+            }
+            file.flush().await?;
+        }
         Session::Agent(agent) => {
             use base64::Engine as _;
             use faro_agent_proto::msg::{Request, Response};
@@ -520,6 +535,32 @@ async fn upload_from(
             return Err(anyhow::anyhow!(
                 "HTTP source is read-only — saving edits is not supported"
             ));
+        }
+        Session::Dropbox(dbx) => {
+            use tokio_util::io::ReaderStream;
+            let arg = serde_json::json!({
+                "path": crate::remotefs::dropbox::dropbox_api_path(remote_path),
+                "mode": "overwrite", "autorename": false, "mute": true
+            })
+            .to_string();
+            let token = dbx.access_token().await?;
+            let f = tokio::fs::File::open(&local).await?;
+            let body = reqwest::Body::wrap_stream(ReaderStream::new(f));
+            let resp = dbx
+                .client
+                .post(format!("{}/2/files/upload", dbx.content_base))
+                .bearer_auth(&token)
+                .header("Dropbox-API-Arg", &arg)
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(body)
+                .send()
+                .await
+                .with_context(|| format!("dropbox upload {remote_path}"))?;
+            if !resp.status().is_success() {
+                let code = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!("dropbox upload {remote_path} ({code}): {text}"));
+            }
         }
         Session::Agent(agent) => {
             use base64::Engine as _;
