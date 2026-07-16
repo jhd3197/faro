@@ -79,13 +79,19 @@ Biggest single real-world gap for a FileZilla-class tool.
 - **Stretch — NFS:** rounds out the NAS story; Rust client crates (e.g.
   `nfs3_client`) are immature, so read-mostly first or defer until they firm up.
 
-### Phase 4 — Read-only HTTP(S) source (optional mini-phase)
-Browse any static file server: nginx/Apache autoindex (HTML or nginx JSON
-listing) parsed into `list_dir`; ranged `GET` for reads. Capabilities: all
-mutations `false`; change signal from `ETag`/`Last-Modified` headers. Listing
-parse is inherently fragile — scope it to the two common autoindex formats
-plus a "no listing, paste a direct URL" mode. Small code, occasionally magic:
-pull a release artifact straight into any pane.
+### Phase 4 — Read-only HTTP(S) source (optional mini-phase) — ✅ shipped
+Shipped as `session/http.rs` (`HttpSession`: shared `reqwest` client, optional
+Basic auth, HEAD reachability probe; connect picks **Listing** vs **DirectFile**
+mode from the URL shape) + `remotefs/http.rs` (`HttpFs`: `list_dir` parses
+nginx/Apache autoindex HTML — anchor-based, survives the `<pre>` and `<table>`
+variants — or nginx JSON; `GET` reads; every mutation returns a read-only
+error). DirectFile mode HEADs a pasted file URL and surfaces one entry, so you
+can pull a release artifact straight into a pane with no listing. Capabilities:
+all mutations `false`, `change_signal: Etag` (from the file's own
+ETag/Last-Modified, populated on read/HEAD — a listing carries none). Byte reads
+stream via `GET` in `transfer.rs`; edit-in-place opens read-only (save errors).
+Verified by parser unit tests + a live `#[ignore]` end-to-end test against
+`python -m http.server` in both listing and direct-file modes.
 
 ### Phase 5 — OAuth consumer clouds (Dropbox / OneDrive / Drive / Box) — the hard tier
 Big user draw, meaningfully harder. Shared infrastructure first:
