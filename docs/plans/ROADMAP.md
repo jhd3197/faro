@@ -118,6 +118,34 @@ actually fast at scale.
   + the Canvas treemap tab and size list. ⬜ Phase 3 — `du`/`find` + flat-listing
   fast paths. ⬜ Phase 4 — delete/reveal actions + polish.
 
+## Track G — Directory Diff (Plan 7)
+Meld/Beyond Compare for any two backends (incl. remote↔remote), surfaced in the
+**GUI, `faro-cli`, and as an MCP `faro_diff` tool**. Reuses `sync.rs`'s diff. ⬜
+
+## Track H — Fleet Search (Plan 8)
+Name + content search across any connection; exec `rg`/`grep` fast path on
+SSH/agent, walk fallback. GUI + CLI + `faro_search` MCP tool. ⬜
+
+## Track I — Fleet Skills (Plan 9)
+Reusable, parameterized, **AI-authorable** automations over the fleet, MCP-native
+(the AI composes/saves Skills, then runs them across servers). Builds on the
+bridge's existing saved-commands + `faro_exec` + approvals. Safety-gated. ⬜
+
+## Track J — Scoped connection sharing (Plan 10)
+Share a box read-only / path-jailed / time-boxed **without a login system**, by
+extending the agent's pairing + policy + revocation with scope + expiry. A
+browser-served Faro (code-server-style) is the deferred, login-requiring 10b. ⬜
+
+## Near-term quick wins (small, high-value)
+- **Editable permissions dialog** — today Properties *shows* mode read-only; add
+  a FileZilla-style chmod editor (rwx checkboxes + octal). Backend (`chmod_path`,
+  `can_chmod`) already exists. Also the visual foundation for idea #10
+  (permissions/security view).
+- **CLI conflict policy** — expose `--overwrite` / `--on-conflict
+  overwrite|skip|rename` on `faro-cli` single-file `upload`/`download`/`cp`
+  (only `upload-dir` has it today; default is rename). Backend `OverwritePolicy`
+  already supports all three.
+
 ## Recommended global sequence
 
 1. **Track A safety hardening + runtime test** — finish making the shipped sync
