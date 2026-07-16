@@ -106,6 +106,18 @@ UI icons.
 - ⬜ Phase 3 — tech badges elsewhere. ⬜ Phase 4 — (deferred) evaluate
   consolidating lucide UI icons onto Iconify.
 
+## Track F — Disk Usage Explorer (Plan 6)
+
+A WinDirStat/WizTree-style treemap + size-ranked tree, but over **any** backend
+(SFTP/S3/FTP/Agent/local) — opens as a workspace tab like the SSH terminal. The
+differentiator vs the desktop tools: it works on **remote servers and buckets**,
+with a shell `du` fast path (SSH/Agent) and object-store flat listing so it's
+actually fast at scale.
+
+- ⬜ **Phase 1–2** — cross-backend scan engine (RemoteFs walk, progress/cancel)
+  + the Canvas treemap tab and size list. ⬜ Phase 3 — `du`/`find` + flat-listing
+  fast paths. ⬜ Phase 4 — delete/reveal actions + polish.
+
 ## Recommended global sequence
 
 1. **Track A safety hardening + runtime test** — finish making the shipped sync
