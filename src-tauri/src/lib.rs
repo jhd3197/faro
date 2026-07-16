@@ -16,6 +16,7 @@ mod editor;
 mod foldersync;
 pub mod importers;
 mod known_hosts;
+pub mod oauth;
 pub mod profiles;
 pub mod remotefs;
 pub mod scan;

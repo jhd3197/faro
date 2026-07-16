@@ -92,6 +92,11 @@ percent-encoding = "2"
 # uploads it back on every save.
 notify = "6"
 
+# OS keychain for OAuth tokens (Dropbox et al., Plan 5 Phase 5). Native backends
+# only (Windows Credential Manager / macOS Keychain / Linux keyutils) so there's
+# no dbus/secret-service build dependency.
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+
 # Windows-only: registry access for the PuTTY sessions importer.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
