@@ -38,8 +38,8 @@ thematic detail.
 |---|-----------|--------|----------|
 | 1 | `1_faro-agent-pairing-and-distribution` | ✅ shipped | The agent — foundation everything else leans on. |
 | 2 | `2_continuous-folder-sync` | 🔄 Phases 1–2 + safety merged; runtime test left | The shipped sync engine. |
-| 3 | `3_scan-index-foundation` | ⬜ **next** | Shared scan engine + `faro.db`. Substrate for 4/6/7 and the sync state index. |
-| 4 | `4_disk-usage-explorer` | ⬜ | First *visible*, read-only consumer of #3 — proves the foundation at low risk. |
+| 3 | `3_scan-index-foundation` | ✅ built (runtime test on a live backend left) | Shared scan engine + `faro.db`. Substrate for 4/6/7 and the sync state index. |
+| 4 | `4_disk-usage-explorer` | ⬜ **next** | First *visible*, read-only consumer of #3 — proves the foundation at low risk. |
 | 5 | `5_additional-backends` | ⬜ | More `RemoteFs` impls (S3 presets → WebDAV → SMB → …). Independent; can slot anywhere. |
 | 6 | `6_directory-diff` | ⬜ | Reuses #3's scan engine (two trees) + `change_signal`/`etag`. |
 | 7 | `7_fleet-search` | ⬜ | Reuses #3's scan engine; later a `faro.db` filename index. |
@@ -83,10 +83,15 @@ consumer is the folder-sync **state index** (`sync_state`) — same-size-edit
 detection, remote-delete vs never-existed, resume-without-re-upload, and the
 prerequisite for bidirectional.
 
-- ⬜ **Phase 1** — `faro.db` + migrations in `AppState`.
-- ⬜ **Phase 2** — extract `sync.rs::walk` → `scan.rs` (the poller switches to it).
-- ⬜ **Phase 3** — `change_signal` + `etag` across all backends.
-- ⬜ **Phase 4** — state index live in the reconciler.
+- ✅ **Phase 1** — `faro.db` + migrations in `AppState` (`db.rs`, rusqlite bundled).
+- ✅ **Phase 2** — extract `sync.rs::walk` → `scan.rs`, bounded-concurrency, with
+  progress/cancel hooks; `sync::plan` calls it.
+- ✅ **Phase 3** — `change_signal` + `etag` across all backends (object stores
+  report ETag; SFTP/FTP/local/agent report mtime+size).
+- ✅ **Phase 4** — `sync_state` index live in the reconciler: `sync::plan_indexed`
+  catches same-size edits (`SyncReason::Edited`), snapshots the source after each
+  pass (seed + prune), resume is a no-op. Verified via a real-Db + real-files
+  test; a live-backend runtime pass (phone agent / S3) is the remaining check.
 
 Disk Usage (Track F), Diff (Track G), and Search (Track H) build on this — the
 scan engine and `faro.db` become additive callers + tables, not new subsystems.
