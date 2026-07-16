@@ -40,6 +40,9 @@ Thumbs.db
 # Local one-shot execution runbook (not shipped; the plans beside it are)
 docs/plans/prompt.md
 
+# PR description drafts from the create-pr skill (local scratch, not shipped)
+.pr/
+
 # Generated demo screenshots — rebuild with `npm run shots` (already covered by
 # the global *.png rule above; listed explicitly so the intent is clear).
 docs/screenshots/*.png
