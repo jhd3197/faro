@@ -201,6 +201,8 @@ export interface SyncPair {
   strategy: SyncStrategy;
   enabled: boolean;
   pollIntervalSecs: number; // default 60
+  exclude: string[]; // gitignore-style patterns; never pushed nor mirror-deleted
+  mirrorDeleteCap: number; // max deletes per Mirror reconcile; 0 = unlimited
 }
 
 /** A sync pair plus its live runtime status (what the backend returns). */
