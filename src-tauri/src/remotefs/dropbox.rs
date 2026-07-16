@@ -241,4 +241,131 @@ mod tests {
         assert_eq!(file.etag.as_deref(), Some("0158abc"));
         assert_eq!(file.modified, Some(1_721_035_800));
     }
+
+    /// End-to-end against the Dropbox mock (`tests/dropbox_mock.py`). Skipped
+    /// unless FARO_DROPBOX_MOCK_URL is set; run with
+    /// `cargo test -p faro -- --ignored dropbox_roundtrip` after starting the
+    /// mock. Exercises the whole client path — the 401→refresh retry,
+    /// get_current_account, list/create/upload/download/move/delete — through
+    /// Faro's own DropboxSession/DropboxFs, no real account needed.
+    #[tokio::test]
+    #[ignore = "requires the Dropbox mock (FARO_DROPBOX_MOCK_URL)"]
+    async fn live_dropbox_roundtrip() {
+        use crate::oauth::{self, TokenSet};
+        use crate::profiles::{AuthMethod, ConnectionProfile};
+        use crate::session::dropbox::{dropbox_config, dropbox_connect, DROPBOX_SERVICE};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let Ok(mock) = std::env::var("FARO_DROPBOX_MOCK_URL") else {
+            eprintln!("skip: FARO_DROPBOX_MOCK_URL unset");
+            return;
+        };
+        std::env::set_var("FARO_DROPBOX_APP_KEY", "test-app-key");
+        std::env::set_var("FARO_DROPBOX_TOKEN_URL", format!("{mock}/oauth2/token"));
+        std::env::set_var("FARO_DROPBOX_API_BASE", &mock);
+        std::env::set_var("FARO_DROPBOX_CONTENT_BASE", &mock);
+
+        // First: a real token exchange against the mock (the code path authorize
+        // uses after the browser redirect).
+        let exchanged = oauth::exchange_code(&dropbox_config(), "authcode", "verifier")
+            .await
+            .expect("exchange");
+        assert_eq!(exchanged["access_token"], "ACCESS1");
+        assert_eq!(exchanged["refresh_token"], "REFRESH1");
+
+        // Seed a deliberately-stale-but-unexpired access token so the very first
+        // API call 401s and drives the force-refresh retry path.
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+        let pid = "dropbox-mock-test";
+        oauth::store_tokens(
+            DROPBOX_SERVICE,
+            pid,
+            &TokenSet {
+                access_token: "STALE".into(),
+                refresh_token: Some("REFRESH1".into()),
+                expires_at: now + 99_999,
+            },
+        )
+        .expect("seed tokens");
+
+        let profile = ConnectionProfile {
+            id: pid.into(),
+            name: "dbx".into(),
+            protocol: "dropbox".into(),
+            host: "dropbox.com".into(),
+            port: 443,
+            username: String::new(),
+            auth: AuthMethod::Password { password: String::new() },
+            default_remote_path: None,
+            color: None,
+            auto_connect: None,
+            bucket: None,
+            region: None,
+            endpoint: None,
+            account: None,
+            agent_key: None,
+            group: None,
+            sort_order: None,
+        };
+        let session = Arc::new(dropbox_connect(&profile).await.expect("connect"));
+
+        // First API call uses the STALE token → 401 → force_refresh → succeeds.
+        let label = session.account_label().await.expect("account");
+        assert_eq!(label, "tester@example.com");
+
+        let fs = DropboxFs::new(session.clone());
+        fs.create_dir("/faro-test").await.expect("mkdir");
+
+        // Upload through the content endpoint (same call the transfer manager makes).
+        let token = session.access_token().await.unwrap();
+        let arg = serde_json::json!({
+            "path": "/faro-test/hello.txt", "mode": "overwrite"
+        })
+        .to_string();
+        let put = session
+            .client
+            .post(format!("{}/2/files/upload", session.content_base))
+            .bearer_auth(&token)
+            .header("Dropbox-API-Arg", &arg)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body("hello dropbox")
+            .send()
+            .await
+            .expect("upload");
+        assert!(put.status().is_success());
+
+        // List sees it with the right size.
+        let entries = fs.list_dir("/faro-test").await.expect("list");
+        let hello = entries.iter().find(|e| e.name == "hello.txt").expect("hello");
+        assert_eq!(hello.kind, FileKind::File);
+        assert_eq!(hello.size, 13);
+
+        // Download round-trips the bytes.
+        let dl = session
+            .content_get(
+                "/2/files/download",
+                &serde_json::json!({"path": "/faro-test/hello.txt"}).to_string(),
+            )
+            .await
+            .expect("download")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(dl, "hello dropbox");
+
+        // Move, then delete.
+        fs.rename("/faro-test/hello.txt", "/faro-test/renamed.txt")
+            .await
+            .expect("move");
+        let entries = fs.list_dir("/faro-test").await.expect("list2");
+        assert!(entries.iter().any(|e| e.name == "renamed.txt"));
+        assert!(!entries.iter().any(|e| e.name == "hello.txt"));
+
+        fs.delete("/faro-test", true).await.expect("delete");
+        let root = fs.list_dir("/").await.expect("list root");
+        assert!(!root.iter().any(|e| e.name == "faro-test"));
+
+        oauth::delete_tokens(DROPBOX_SERVICE, pid);
+        eprintln!("live_dropbox_roundtrip: OK");
+    }
 }
