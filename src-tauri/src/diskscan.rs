@@ -729,4 +729,52 @@ mod tests {
         assert_eq!(root.children[0].path, "/etc");
         assert_eq!(root.children[0].children[0].path, "/etc/hosts");
     }
+
+    #[test]
+    fn parse_find_output_matches_the_walk_shape() {
+        // What `find <root> -type f -printf '%s\t%p\n'` prints — including a
+        // non-zero-noise CRLF line and an unparseable line that must be skipped.
+        let out = "10\t/data/a/b.txt\r\n20\t/data/a/c.txt\n5\t/data/d.txt\ngarbage line\n";
+        let tree = parse_find("/data", out);
+        assert_eq!(tree.files.len(), 3);
+        assert_eq!(tree.files["a/b.txt"].size, 10);
+        assert_eq!(tree.files["a/c.txt"].size, 20);
+        assert_eq!(tree.files["d.txt"].size, 5);
+        // Aggregates identically to the generic walk.
+        let root = build_tree("/data", &tree);
+        assert_eq!(root.size, 35);
+        assert_eq!(root.children[0].name, "a");
+        assert_eq!(root.children[0].size, 30);
+    }
+
+    // A real end-to-end run of the "always works" generic strategy: walk an
+    // actual temp directory over LocalFs and fold it into the size tree. This is
+    // the runtime observation the whole feature leans on (every backend falls
+    // back to it), exercised without the Tauri/event plumbing.
+    #[tokio::test]
+    async fn walks_a_real_directory_into_a_size_tree() {
+        use crate::remotefs::local::LocalFs;
+        let base = std::env::temp_dir()
+            .join(format!("faro_diskscan_walk_{}", std::process::id()));
+        let sub = base.join("sub");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(base.join("top.bin"), vec![0u8; 100]).unwrap();
+        std::fs::write(sub.join("inner.bin"), vec![0u8; 250]).unwrap();
+
+        let root_str = base.to_string_lossy().to_string();
+        let tree = crate::scan::walk_tree(&LocalFs, &root_str).await.unwrap();
+        let node = build_tree(&root_str, &tree);
+
+        assert_eq!(node.size, 350);
+        assert_eq!(node.kind, FileKind::Directory);
+        // Largest-first: the 250-byte "sub" dir leads the 100-byte file.
+        assert_eq!(node.children[0].name, "sub");
+        assert_eq!(node.children[0].size, 250);
+        assert_eq!(node.children[0].kind, FileKind::Directory);
+        assert_eq!(node.children[1].name, "top.bin");
+        assert_eq!(node.children[1].size, 100);
+
+        std::fs::remove_dir_all(&base).ok();
+    }
 }
