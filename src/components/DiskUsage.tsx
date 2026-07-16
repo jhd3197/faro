@@ -10,13 +10,30 @@ import {
   Folder,
   Palette,
   AlertCircle,
+  Eye,
+  Copy,
+  Trash2,
 } from "lucide-react";
-import { useDiskScan, resolveNode, type ColorMode } from "@/stores/diskScanStore";
+import { useDiskScan, resolveNode } from "@/stores/diskScanStore";
+import { useLayout } from "@/stores/layoutStore";
+import { toast } from "@/stores/toastStore";
 import type { DuNode, ScanStrategy } from "@/lib/types";
 import { fmtSize } from "@/lib/format";
-import { materialIconUrl } from "@faro/file-ui";
+import {
+  materialIconUrl,
+  ContextMenu,
+  ConfirmModal,
+  type MenuItem,
+} from "@faro/file-ui";
 import { cn } from "@/lib/cn";
 import { DiskTreemap } from "./DiskTreemap";
+
+/** Parent directory of a POSIX/Windows path (its own root when at top). */
+function parentDir(p: string): string {
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  if (i <= 0) return p.startsWith("/") ? "/" : p;
+  return p.slice(0, i);
+}
 
 const STRATEGY_LABEL: Record<ScanStrategy, string> = {
   generic: "Walk",
@@ -51,8 +68,56 @@ function DiskUsage() {
   const drillTo = useDiskScan((s) => s.drillTo);
   const navigateTo = useDiskScan((s) => s.navigateTo);
   const setColorMode = useDiskScan((s) => s.setColorMode);
+  const removeNode = useDiskScan((s) => s.removeNode);
+  const sessionId = useDiskScan((s) => s.sessionId);
+  const requestReveal = useLayout((s) => s.requestReveal);
 
   const [hover, setHover] = useState<DuNode | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(
+    null
+  );
+  const [confirmDel, setConfirmDel] = useState<DuNode | null>(null);
+
+  const reveal = (node: DuNode) => {
+    if (!sessionId) return;
+    const dir = node.kind === "directory" ? node.path : parentDir(node.path);
+    requestReveal(sessionId, dir);
+    close();
+  };
+
+  const copyPath = (node: DuNode) => {
+    navigator.clipboard.writeText(node.path);
+    toast.info("Path copied", node.path);
+  };
+
+  const openMenu = (node: DuNode, x: number, y: number) => {
+    const isRoot = node.path === (tree?.path ?? "");
+    const items: MenuItem[] = [
+      {
+        label:
+          node.kind === "directory"
+            ? "Open in file browser"
+            : "Reveal in file browser",
+        icon: <Eye size={12} />,
+        onClick: () => reveal(node),
+      },
+      {
+        label: "Copy path",
+        icon: <Copy size={12} />,
+        onClick: () => copyPath(node),
+        separatorAfter: !isRoot,
+      },
+    ];
+    if (!isRoot) {
+      items.push({
+        label: "Delete",
+        icon: <Trash2 size={12} />,
+        destructive: true,
+        onClick: () => setConfirmDel(node),
+      });
+    }
+    setMenu({ x, y, items });
+  };
 
   // Esc closes the explorer (matches every other overlay).
   useEffect(() => {
@@ -196,6 +261,7 @@ function DiskUsage() {
                   colorMode={colorMode}
                   onDrill={(n) => drillTo(n)}
                   onHover={setHover}
+                  onContext={openMenu}
                 />
               ) : (
                 <div className="flex h-full items-center justify-center text-xs text-text-dim">
@@ -227,8 +293,39 @@ function DiskUsage() {
           <RankedList
             node={current}
             onDrill={(n) => drillTo(n)}
+            onContext={openMenu}
           />
         </div>
+      )}
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menu.items}
+          onClose={() => setMenu(null)}
+        />
+      )}
+      {confirmDel && (
+        <ConfirmModal
+          title={`Delete ${confirmDel.name}?`}
+          message={
+            `Path: ${confirmDel.path}` +
+            (confirmDel.kind === "directory"
+              ? `\nThis folder and everything under it (${fmtSize(
+                  confirmDel.size
+                )}) will be permanently removed.`
+              : `\n${fmtSize(confirmDel.size)} will be permanently removed.`)
+          }
+          destructive
+          confirmLabel="Delete"
+          onClose={() => setConfirmDel(null)}
+          onConfirm={() => {
+            const n = confirmDel;
+            setConfirmDel(null);
+            void removeNode(n);
+          }}
+        />
       )}
     </div>,
     document.body
@@ -240,9 +337,11 @@ const MAX_ROWS = 500;
 function RankedList({
   node,
   onDrill,
+  onContext,
 }: {
   node: DuNode | null;
   onDrill: (n: DuNode) => void;
+  onContext: (node: DuNode, x: number, y: number) => void;
 }) {
   const children = node?.children ?? [];
   const parentSize = node?.size ?? 0;
@@ -269,7 +368,10 @@ function RankedList({
               <button
                 key={c.path}
                 onClick={() => isDir && onDrill(c)}
-                disabled={!isDir}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  onContext(c, e.clientX, e.clientY);
+                }}
                 title={c.path}
                 className={cn(
                   "flex w-full items-center gap-2 border-b border-border-subtle px-3 py-1.5 text-left text-xs",

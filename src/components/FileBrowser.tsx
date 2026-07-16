@@ -23,6 +23,9 @@ export function FileBrowser() {
   const profile = profiles.find((p) => p.id === activeProfileId) || null;
 
   const browseLocal = useLayout((s) => s.browseLocal);
+  const setBrowseLocal = useLayout((s) => s.setBrowseLocal);
+  const revealTarget = useLayout((s) => s.revealTarget);
+  const clearReveal = useLayout((s) => s.clearReveal);
   const defaultDownloadFolder = useSettings((s) => s.defaultDownloadFolder);
 
   const enqueueDownloads = useTransfers((s) => s.enqueueDownloads);
@@ -41,6 +44,22 @@ export function FileBrowser() {
   const serverSid = activeSessionId;
   const serverRemotePath =
     (serverSid && remotePaths[serverSid]) || profile?.defaultRemotePath || ".";
+
+  // Honour a "reveal in browser" request from the Disk Usage explorer: point the
+  // pane at the target directory on the matching session, then clear the signal.
+  useEffect(() => {
+    if (!revealTarget) return;
+    if (revealTarget.sessionId === LOCAL_SESSION) {
+      setBrowseLocal(true);
+      setLocalPath(revealTarget.path);
+      clearReveal();
+    } else if (revealTarget.sessionId === serverSid) {
+      setBrowseLocal(false);
+      setRemotePaths((m) => ({ ...m, [serverSid]: revealTarget.path }));
+      clearReveal();
+    }
+    // A reveal for a non-active session is left pending until it becomes active.
+  }, [revealTarget, serverSid, setBrowseLocal, clearReveal]);
 
   // Re-list the directory whenever a batch of transfers drains to zero, so an
   // upload's result shows up without a manual refresh.

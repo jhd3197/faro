@@ -158,6 +158,7 @@ export function DiskTreemap({
   colorMode,
   onDrill,
   onHover,
+  onContext,
 }: {
   root: DuNode;
   colorMode: ColorMode;
@@ -165,6 +166,8 @@ export function DiskTreemap({
   onDrill: (node: DuNode) => void;
   /** The deepest node under the cursor (null when the cursor leaves). */
   onHover: (node: DuNode | null) => void;
+  /** Right-click on the deepest node under the cursor. */
+  onContext: (node: DuNode, x: number, y: number) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -286,6 +289,15 @@ export function DiskTreemap({
     if (cell) onDrill(cell.node);
   };
 
+  const onContextMenu = (e: React.MouseEvent) => {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const cell = cellAt(e.clientX - rect.left, e.clientY - rect.top, false);
+    if (cell) {
+      e.preventDefault();
+      onContext(cell.node, e.clientX, e.clientY);
+    }
+  };
+
   return (
     <div ref={wrapRef} className="relative h-full w-full overflow-hidden">
       <canvas
@@ -295,6 +307,7 @@ export function DiskTreemap({
         onMouseMove={onMove}
         onMouseLeave={onLeave}
         onClick={onClick}
+        onContextMenu={onContextMenu}
         title={
           hoverPath
             ? undefined

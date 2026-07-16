@@ -48,6 +48,11 @@ interface DiskScanStoreState {
   /** Close the overlay and forget the backend scan. */
   close: () => void;
 
+  /** Delete a node on the backend, then prune it from the tree in place
+   *  (subtracting its size from every ancestor) so the map updates without a
+   *  full rescan. */
+  removeNode: (node: DuNode) => Promise<void>;
+
   /** Drill into a directory node (by walking to it from the tree root). */
   drillTo: (node: DuNode) => void;
   /** Jump the breadcrumb to depth `k` (−1 = the root). */
@@ -68,6 +73,29 @@ function fromSnapshot(s: ScanSnapshot) {
     note: s.note ?? null,
     tree: s.tree ?? null,
   };
+}
+
+/** Rebuild `node` without the descendant at `targetPath`, subtracting its size
+ *  from every ancestor along the way. */
+function pruneNode(node: DuNode, targetPath: string): DuNode {
+  if (!node.children) return node;
+  let removed = 0;
+  const children: DuNode[] = [];
+  for (const c of node.children) {
+    if (c.path === targetPath) {
+      removed += c.size;
+      continue;
+    }
+    if (targetPath.startsWith(c.path + "/")) {
+      const before = c.size;
+      const pruned = pruneNode(c, targetPath);
+      removed += before - pruned.size;
+      children.push(pruned);
+    } else {
+      children.push(c);
+    }
+  }
+  return { ...node, size: node.size - removed, children };
 }
 
 /** Resolve the currently-shown node by walking `crumbs` from the tree root. */
@@ -184,6 +212,21 @@ export const useDiskScan = create<DiskScanStoreState>((set, get) => ({
       crumbs: [],
       unlisten: null,
     });
+  },
+
+  removeNode: async (node) => {
+    const { sessionId, tree, root } = get();
+    if (!sessionId || !tree) return;
+    // Never let the scan root itself be deleted from here.
+    if (node.path === tree.path || node.path === root) return;
+    try {
+      await ipc.deletePath(sessionId, node.path, node.kind === "directory");
+    } catch (e) {
+      toast.error("Delete failed", String(e));
+      return;
+    }
+    set({ tree: pruneNode(tree, node.path) });
+    toast.success("Deleted", node.name);
   },
 
   drillTo: (node) => {
