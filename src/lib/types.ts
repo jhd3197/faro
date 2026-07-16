@@ -13,6 +13,7 @@ export type Protocol =
   | "s3"
   | "azure"
   | "gcs"
+  | "webdav"
   | "faro-agent";
 
 export interface ConnectionProfile {
@@ -49,6 +50,7 @@ export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {
   s3: 443,
   azure: 443,
   gcs: 443,
+  webdav: 443,
   "faro-agent": 8722,
 };
 
@@ -59,6 +61,7 @@ export const PROTOCOL_LABEL: Record<Protocol, string> = {
   s3: "S3",
   azure: "Azure",
   gcs: "GCS",
+  webdav: "WebDAV",
   "faro-agent": "Faro Agent",
 };
 
@@ -407,6 +410,52 @@ export const S3_PROVIDER_PRESETS: Record<S3Provider, S3ProviderPreset> = {
     description: "Any S3 API server (Ceph RGW, Garage, SeaweedFS, …).",
     endpointHint: "https://s3.example.com",
     defaultRegion: "us-east-1",
+  },
+};
+
+export type WebdavProvider = "nextcloud" | "owncloud" | "storagebox" | "generic";
+
+export interface WebdavProviderPreset {
+  label: string;
+  vendor: string;
+  description: string;
+  /** URL template shown as a placeholder; `<user>` is substituted from the
+   *  username when a preset is applied. */
+  urlHint: string;
+  /** Whether this preset expects a username (Basic auth). */
+  wantsUser: boolean;
+}
+
+// WebDAV presets (the Phase-0 preset idea generalized beyond S3). Selecting one
+// prefills the server-URL template; the user swaps in their host/username.
+export const WEBDAV_PROVIDER_PRESETS: Record<WebdavProvider, WebdavProviderPreset> = {
+  nextcloud: {
+    label: "Nextcloud",
+    vendor: "Nextcloud",
+    description: "Use an app password (Settings → Security → Devices & sessions).",
+    urlHint: "https://cloud.example.com/remote.php/dav/files/<user>/",
+    wantsUser: true,
+  },
+  owncloud: {
+    label: "ownCloud",
+    vendor: "ownCloud",
+    description: "Same DAV path as Nextcloud; an app password is recommended.",
+    urlHint: "https://cloud.example.com/remote.php/dav/files/<user>/",
+    wantsUser: true,
+  },
+  storagebox: {
+    label: "Storage Box",
+    vendor: "Hetzner",
+    description: "Hetzner Storage Box over WebDAV. Enable WebDAV in the panel.",
+    urlHint: "https://<user>.your-storagebox.de",
+    wantsUser: true,
+  },
+  generic: {
+    label: "Generic",
+    vendor: "WebDAV",
+    description: "Any WebDAV server. Basic auth, or leave the user blank for a bearer token.",
+    urlHint: "https://dav.example.com/",
+    wantsUser: true,
   },
 };
 

@@ -365,6 +365,28 @@ async fn download_to(
             }
             file.flush().await?;
         }
+        Session::Webdav(dav) => {
+            use futures::StreamExt;
+            let url = dav.url_for(remote_path, false);
+            let resp = dav
+                .request(reqwest::Method::GET, url)
+                .send()
+                .await
+                .with_context(|| format!("webdav get {remote_path}"))?;
+            if !resp.status().is_success() {
+                return Err(anyhow::anyhow!(
+                    "webdav get {remote_path}: HTTP {}",
+                    resp.status().as_u16()
+                ));
+            }
+            let mut file = tokio::fs::File::create(local_path).await?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk).await?;
+            }
+            file.flush().await?;
+        }
         Session::Agent(agent) => {
             use base64::Engine as _;
             use faro_agent_proto::msg::{Request, Response};
@@ -452,6 +474,25 @@ async fn upload_from(
                 .put(&p, bytes::Bytes::from(buf).into())
                 .await
                 .with_context(|| format!("object put {key}"))?;
+        }
+        Session::Webdav(dav) => {
+            use tokio_util::io::ReaderStream;
+            let file = tokio::fs::File::open(&local).await?;
+            let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
+            let url = dav.url_for(remote_path, false);
+            let resp = dav
+                .request(reqwest::Method::PUT, url)
+                .header(reqwest::header::CONTENT_LENGTH, size)
+                .body(body)
+                .send()
+                .await
+                .with_context(|| format!("webdav put {remote_path}"))?;
+            if !resp.status().is_success() {
+                return Err(anyhow::anyhow!(
+                    "webdav put {remote_path}: HTTP {}",
+                    resp.status().as_u16()
+                ));
+            }
         }
         Session::Agent(agent) => {
             use base64::Engine as _;

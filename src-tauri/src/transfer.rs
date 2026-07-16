@@ -1,4 +1,4 @@
-use crate::session::{FtpSession, ObjectSession, Session, SshSession};
+use crate::session::{FtpSession, ObjectSession, Session, SshSession, WebdavSession};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -243,6 +243,16 @@ impl TransferManager {
                     )
                     .await
                 }
+                Session::Webdav(dav) => {
+                    mgr.run_webdav_download(
+                        &id_for_task,
+                        dav.clone(),
+                        &remote_path,
+                        &final_path,
+                        &app,
+                    )
+                    .await
+                }
                 Session::Agent(agent) => {
                     mgr.run_agent_download(
                         &id_for_task,
@@ -432,6 +442,16 @@ impl TransferManager {
                     mgr.run_object_upload(
                         &id_for_task,
                         obj.clone(),
+                        &local,
+                        &final_remote,
+                        &app,
+                    )
+                    .await
+                }
+                Session::Webdav(dav) => {
+                    mgr.run_webdav_upload(
+                        &id_for_task,
+                        dav.clone(),
                         &local,
                         &final_remote,
                         &app,
@@ -906,6 +926,100 @@ impl TransferManager {
         self.update(id, |t| t.transferred = transferred).await;
         Ok(())
     }
+
+    /// Stream a WebDAV download: a single ranged-capable `GET`, written to the
+    /// local file chunk by chunk so progress is real (not 0→size at the end).
+    async fn run_webdav_download(
+        &self,
+        id: &str,
+        session: Arc<WebdavSession>,
+        remote_path: &str,
+        local_path: &Path,
+        app: &AppHandle,
+    ) -> Result<()> {
+        use futures::StreamExt;
+
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+
+        let url = session.url_for(remote_path, false);
+        let resp = session
+            .request(reqwest::Method::GET, url)
+            .send()
+            .await
+            .with_context(|| format!("GET {remote_path}"))?;
+        if !resp.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "download {remote_path} failed: HTTP {}",
+                resp.status().as_u16()
+            ));
+        }
+
+        let mut file = tokio::fs::File::create(local_path)
+            .await
+            .with_context(|| format!("create {}", local_path.display()))?;
+        let mut stream = resp.bytes_stream();
+        let mut transferred: u64 = 0;
+        let mut last_emit = Instant::now();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.with_context(|| format!("webdav chunk for {remote_path}"))?;
+            file.write_all(&chunk).await?;
+            transferred += chunk.len() as u64;
+            if last_emit.elapsed() > Duration::from_millis(100) {
+                self.update(id, |t| t.transferred = transferred).await;
+                if let Some(t) = self.get(id).await {
+                    let _ = app.emit("transfer://progress", &t);
+                }
+                last_emit = Instant::now();
+            }
+        }
+        file.flush().await?;
+        self.update(id, |t| t.transferred = transferred).await;
+        Ok(())
+    }
+
+    /// Upload via WebDAV `PUT`, streaming the file body straight off disk (no
+    /// full-file buffering) with an explicit Content-Length so servers accept it.
+    async fn run_webdav_upload(
+        &self,
+        id: &str,
+        session: Arc<WebdavSession>,
+        local_path: &Path,
+        remote_path: &str,
+        app: &AppHandle,
+    ) -> Result<()> {
+        use tokio_util::io::ReaderStream;
+
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+        let _ = app; // WebDAV PUT reports at completion, like the FTP path.
+
+        let size = tokio::fs::metadata(local_path)
+            .await
+            .with_context(|| format!("stat {}", local_path.display()))?
+            .len();
+        let file = tokio::fs::File::open(local_path)
+            .await
+            .with_context(|| format!("open {}", local_path.display()))?;
+        let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
+
+        let url = session.url_for(remote_path, false);
+        let resp = session
+            .request(reqwest::Method::PUT, url)
+            .header(reqwest::header::CONTENT_LENGTH, size)
+            .body(body)
+            .send()
+            .await
+            .with_context(|| format!("PUT {remote_path}"))?;
+        if !resp.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "upload {remote_path} failed: HTTP {}",
+                resp.status().as_u16()
+            ));
+        }
+        self.update(id, |t| t.transferred = size).await;
+        Ok(())
+    }
 }
 
 /// Build a RemoteFs handle for the right backend.
@@ -916,7 +1030,26 @@ fn fs_for_session(session: &Arc<Session>) -> Box<dyn crate::remotefs::RemoteFs> 
         Session::Object(obj) => {
             Box::new(crate::remotefs::object::ObjectFs::new(obj.clone()))
         }
+        Session::Webdav(dav) => Box::new(crate::remotefs::webdav::WebdavFs::new(dav.clone())),
         Session::Agent(agent) => Box::new(crate::remotefs::agent::AgentFs::new(agent.clone())),
+    }
+}
+
+/// HEAD a WebDAV resource, returning its size (from Content-Length) and whether
+/// it exists. Best-effort: a server that rejects HEAD reports (0, false).
+async fn webdav_head(session: &Arc<WebdavSession>, path: &str) -> (u64, bool) {
+    let url = session.url_for(path, false);
+    match session.request(reqwest::Method::HEAD, url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let size = resp
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            (size, true)
+        }
+        _ => (0, false),
     }
 }
 
@@ -960,6 +1093,7 @@ async fn remote_size(session: &Arc<Session>, path: &str) -> Result<u64> {
                 .with_context(|| format!("object head {key}"))?;
             Ok(meta.size as u64)
         }
+        Session::Webdav(dav) => Ok(webdav_head(dav, path).await.0),
         Session::Agent(agent) => Ok(agent_stat(agent, path).await.0),
     }
 }
@@ -1027,6 +1161,25 @@ async fn remote_resolve(
                         let key = candidate.trim_start_matches('/');
                         let p = object_store::path::Path::from(key);
                         if obj.store.head(&p).await.is_err() {
+                            break;
+                        }
+                    }
+                    (candidate, false)
+                }
+            })
+        }
+        Session::Webdav(dav) => {
+            let (_, exists) = webdav_head(dav, initial_remote).await;
+            Ok(match policy {
+                OverwritePolicy::Overwrite => (initial_remote.to_string(), false),
+                OverwritePolicy::Skip => (initial_remote.to_string(), exists),
+                OverwritePolicy::Rename if !exists => (initial_remote.to_string(), false),
+                OverwritePolicy::Rename => {
+                    let mut candidate = initial_remote.to_string();
+                    for i in 1..=999 {
+                        let (stem, ext) = split_ext(initial_remote);
+                        candidate = format!("{stem}_{i}{ext}");
+                        if !webdav_head(dav, &candidate).await.1 {
                             break;
                         }
                     }

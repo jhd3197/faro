@@ -6,12 +6,14 @@ import {
   PROTOCOL_DEFAULT_PORT,
   PROTOCOL_LABEL,
   S3_PROVIDER_PRESETS,
+  WEBDAV_PROVIDER_PRESETS,
   isObjectProtocol,
   isAgentProtocol,
   type AuthMethod,
   type ConnectionProfile,
   type Protocol,
   type S3Provider,
+  type WebdavProvider,
   type DiscoveredAgent,
 } from "@/lib/types";
 import {
@@ -19,6 +21,7 @@ import {
   ShieldOff,
   Terminal as TerminalIcon,
   Cloud,
+  Globe,
   Eye,
   EyeOff,
   Wand2,
@@ -43,6 +46,15 @@ interface Props {
 
 function genId(): string {
   return crypto.randomUUID();
+}
+
+/// Best-effort hostname from a WebDAV server URL, for the rail label.
+function hostFromUrl(u: string): string {
+  try {
+    return new URL(u.includes("://") ? u : `https://${u}`).hostname;
+  } catch {
+    return u;
+  }
 }
 
 /// Guess which provider a saved S3 profile belongs to from its endpoint URL.
@@ -151,6 +163,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
   const isS3 = protocol === "s3";
   const isAzure = protocol === "azure";
   const isGcs = protocol === "gcs";
+  const isWebdav = protocol === "webdav";
   const isObject = isObjectProtocol(protocol);
   const isAgent = isAgentProtocol(protocol);
 
@@ -175,9 +188,11 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             ? `${azureAccount}/${bucket}`
             : isGcs
               ? `${bucket}@gcs`
-              : isAgent
-                ? `Agent @ ${host}`
-                : `${username}@${host}`),
+              : isWebdav
+                ? `${username ? `${username}@` : ""}${hostFromUrl(endpoint)}`
+                : isAgent
+                  ? `Agent @ ${host}`
+                  : `${username}@${host}`),
       protocol,
       host: isObject
         ? endpoint ||
@@ -186,7 +201,9 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             : isGcs
               ? "storage.googleapis.com"
               : "s3.amazonaws.com")
-        : host,
+        : isWebdav
+          ? hostFromUrl(endpoint)
+          : host,
       port,
       username: isAzure ? azureAccount : isAgent || isGcs ? "" : username,
       auth: isAgent ? { kind: "password", password: "" } : auth,
@@ -195,7 +212,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
       autoConnect: autoConnect || undefined,
       bucket: isObject ? bucket : undefined,
       region: isS3 ? region : undefined,
-      endpoint: isObject ? endpoint || undefined : undefined,
+      endpoint: isObject || isWebdav ? endpoint || undefined : undefined,
       account: isAzure ? azureAccount : undefined,
       agentKey: isAgent ? agentKey : undefined,
       group: group.trim() || undefined,
@@ -236,9 +253,11 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
       ? !!azureAccount && !!bucket && !!password
       : isGcs
         ? !!bucket && gcsCredOk
-        : isAgent
-          ? !!host && !!agentKey
-          : !!host && !!username;
+        : isWebdav
+          ? !!endpoint && !!password
+          : isAgent
+            ? !!host && !!agentKey
+            : !!host && !!username;
   // Name what's still required so a disabled Save isn't a dead end.
   const missing = (
     isS3
@@ -250,9 +269,11 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
               !bucket && "bucket",
               !gcsCredOk && (authKind === "key" ? "key file path" : "JSON key"),
             ]
-          : isAgent
-            ? [!host && "host", !agentKey && "pairing"]
-            : [!host && "host", !username && "username"]
+          : isWebdav
+            ? [!endpoint && "server URL", !password && "password / token"]
+            : isAgent
+              ? [!host && "host", !agentKey && "pairing"]
+              : [!host && "host", !username && "username"]
   ).filter(Boolean);
 
   return (
@@ -295,7 +316,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
 
         <Field label="Protocol">
           <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-bg-subtle p-1">
-            {(["sftp", "ftp", "ftps", "s3", "azure", "gcs", "faro-agent"] as Protocol[]).map((p) => (
+            {(["sftp", "ftp", "ftps", "s3", "azure", "gcs", "webdav", "faro-agent"] as Protocol[]).map((p) => (
               <ProtocolButton
                 key={p}
                 active={protocol === p}
@@ -343,6 +364,15 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             setKeyPath={setKeyPath}
             keyJson={password}
             setKeyJson={setPassword}
+          />
+        ) : isWebdav ? (
+          <WebdavSection
+            url={endpoint}
+            setUrl={setEndpoint}
+            username={username}
+            setUsername={setUsername}
+            password={password}
+            setPassword={setPassword}
           />
         ) : isAgent ? (
           <AgentSection
@@ -825,6 +855,116 @@ function AzureSection({
   );
 }
 
+function WebdavSection({
+  url,
+  setUrl,
+  username,
+  setUsername,
+  password,
+  setPassword,
+}: {
+  url: string;
+  setUrl: (v: string) => void;
+  username: string;
+  setUsername: (v: string) => void;
+  password: string;
+  setPassword: (v: string) => void;
+}) {
+  const [provider, setProvider] = useState<WebdavProvider>("nextcloud");
+  // Bearer mode = no username (the value in `password` is the token).
+  const [mode, setMode] = useState<"basic" | "bearer">(
+    !username && password ? "bearer" : "basic"
+  );
+  const preset = WEBDAV_PROVIDER_PRESETS[provider];
+
+  const applyPreset = (p: WebdavProvider) => {
+    setProvider(p);
+    const tpl = WEBDAV_PROVIDER_PRESETS[p].urlHint;
+    // Prefill the URL template, substituting a known username where it appears.
+    setUrl(username ? tpl.replace("<user>", username) : tpl);
+  };
+
+  return (
+    <>
+      <Field label="Provider">
+        <div className="grid grid-cols-4 gap-1 rounded-md border border-border bg-bg-subtle p-1">
+          {(Object.keys(WEBDAV_PROVIDER_PRESETS) as WebdavProvider[]).map((p) => {
+            const data = WEBDAV_PROVIDER_PRESETS[p];
+            return (
+              <button
+                key={p}
+                type="button"
+                onClick={() => applyPreset(p)}
+                className={
+                  "flex flex-col items-start rounded-sm px-2 py-1.5 text-left transition-colors " +
+                  (provider === p
+                    ? "bg-accent-soft text-text ring-1 ring-inset ring-accent/40"
+                    : "text-text-muted hover:bg-bg-hover hover:text-text")
+                }
+              >
+                <span className="flex items-center gap-1 text-[11px] font-semibold">
+                  <Globe size={11} className={provider === p ? "text-accent" : ""} />
+                  {data.label}
+                </span>
+                <span className="text-[10px] text-text-dim">{data.vendor}</span>
+              </button>
+            );
+          })}
+        </div>
+      </Field>
+
+      <Hint>{preset.description}</Hint>
+
+      <Field label="Server URL">
+        <input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder={preset.urlHint}
+          className={inputCls}
+        />
+      </Field>
+
+      <Field label="Auth">
+        <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-bg-subtle p-1">
+          {(["basic", "bearer"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => {
+                setMode(m);
+                if (m === "bearer") setUsername("");
+              }}
+              className={
+                "rounded-sm px-2 py-1.5 text-[11px] font-semibold transition-colors " +
+                (mode === m
+                  ? "bg-accent-soft text-text ring-1 ring-inset ring-accent/40"
+                  : "text-text-muted hover:bg-bg-hover hover:text-text")
+              }
+            >
+              {m === "basic" ? "Username + password" : "Bearer token"}
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      {mode === "basic" && (
+        <Field label="Username">
+          <input
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            placeholder="alice"
+            className={inputCls}
+          />
+        </Field>
+      )}
+
+      <Field label={mode === "basic" ? "Password" : "Bearer token"}>
+        <PasswordInput value={password} onChange={setPassword} />
+      </Field>
+    </>
+  );
+}
+
 function GcsSection({
   bucket,
   setBucket,
@@ -1026,6 +1166,8 @@ function protocolHint(p: Protocol): string {
       return "Blob · :443";
     case "gcs":
       return "Object · :443";
+    case "webdav":
+      return "HTTP · :443";
     case "faro-agent":
       return "Machine · :8722";
   }
@@ -1046,6 +1188,7 @@ function ProtocolButton({
   if (label === "FTPS") Icon = ShieldCheck;
   else if (label === "FTP") Icon = ShieldOff;
   else if (label === "S3" || label === "Azure" || label === "GCS") Icon = Cloud;
+  else if (label === "WebDAV") Icon = Globe;
   else if (label === "Faro Agent") Icon = MonitorSmartphone;
   return (
     <button
