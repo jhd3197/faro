@@ -37,6 +37,9 @@ Thumbs.db
 *.png
 /.claude/skills
 
+# Local one-shot execution runbook (not shipped; the plans in docs/plans/ are)
+/prompt.md
+
 # Generated demo screenshots — rebuild with `npm run shots` (already covered by
 # the global *.png rule above; listed explicitly so the intent is clear).
 docs/screenshots/*.png
