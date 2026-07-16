@@ -40,7 +40,7 @@ thematic detail.
 | 2 | `2_continuous-folder-sync` | 🔄 Phases 1–2 + safety merged; runtime test left | The shipped sync engine. |
 | 3 | `3_scan-index-foundation` | ✅ built (runtime test on a live backend left) | Shared scan engine + `faro.db`. Substrate for 4/6/7 and the sync state index. |
 | 4 | `4_disk-usage-explorer` | ⬜ **next** | First *visible*, read-only consumer of #3 — proves the foundation at low risk. |
-| 5 | `5_additional-backends` | ⬜ | More `RemoteFs` impls (S3 presets → WebDAV → SMB → …). Independent; can slot anywhere. |
+| 5 | `5_additional-backends` | ⬜ | More `RemoteFs` impls (S3 presets → GCS → WebDAV → SMB → OAuth clouds). Independent; can slot anywhere. |
 | 6 | `6_directory-diff` | ⬜ | Reuses #3's scan engine (two trees) + `change_signal`/`etag`. |
 | 7 | `7_fleet-search` | ⬜ | Reuses #3's scan engine; later a `faro.db` filename index. |
 | 8 | `8_fleet-skills` | ⬜ | AI-authored fleet automations over the bridge. Independent. |
@@ -103,12 +103,18 @@ transfer / sync for free.
 
 - ✅ Already present (pre-existing): SFTP, FTP/FTPS, S3, **Azure Blob** (via
   `object_store`), Faro Agent, local.
-- ⬜ **Phase 0** — S3-compatible presets (R2/B2/Wasabi/MinIO/Spaces): UI presets,
-  ~no backend code. *Cheapest win.*
-- ⬜ **Phase 1** — WebDAV (Nextcloud/ownCloud/generic). Low effort, high coverage.
-- ⬜ **Phase 2** — SMB/CIFS (NAS/Windows shares). Biggest single gap.
-- ⬜ **Phase 3** — native GCS (Azure already works).
-- ⬜ **Phase 4** — OAuth clouds (Drive/OneDrive/Dropbox). Hardest (OAuth + ID-vs-path).
+- 🔄 **Phase 0** — S3-compatible presets: AWS/R2/B2 shipped; Wasabi, MinIO,
+  Spaces, Storj, Hetzner + long tail remain. ~No backend code. *Cheapest win.*
+- ⬜ **Phase 1** — native GCS: `object_store` `gcp` feature, same one-builder
+  move that shipped Azure. Nearly free.
+- ⬜ **Phase 2** — WebDAV (Nextcloud/ownCloud/Storage Box/generic). Low effort,
+  high coverage.
+- ⬜ **Phase 3** — SMB/CIFS (NAS/Windows shares; Azure Files for free). Biggest
+  single gap. NFS as stretch.
+- ⬜ **Phase 4** — read-only HTTP(S) source (autoindex browse + direct URL).
+  Optional mini-phase.
+- ⬜ **Phase 5** — OAuth clouds, easiest API first: Dropbox → OneDrive → Drive →
+  Box. Hardest (OAuth + ID-vs-path for Drive/Box).
 
 ## Track C — On-demand virtual folders (Plan 9)
 
