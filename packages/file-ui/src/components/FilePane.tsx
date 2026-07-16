@@ -43,6 +43,7 @@ import { usePathHistory } from "../hooks/usePathHistory";
 import { cn } from "../lib/cn";
 import { fmtSize, fmtMtime, formatMode } from "../lib/format";
 import { isImage, type FileIconSpec } from "../lib/fileIcons";
+import { materialIconUrl } from "../lib/materialIcons";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { PromptModal } from "./PromptModal";
 import { ConfirmModal } from "./ConfirmModal";
@@ -1256,12 +1257,28 @@ function Row({
     entry.kind === "file"
       ? "Double-click to transfer • Right-click for more"
       : "Double-click to open • Right-click for more";
-  const iconEl = <Icon size={13} className={cn("shrink-0", iconColor)} />;
+  // Prefer a Material Icon Theme SVG for known file types; fall back to the
+  // lucide glyph for folders, symlinks, and unmatched files.
+  const matUrl = entry.kind === "file" ? materialIconUrl(entry.name) : undefined;
+  const glyph = (size: number) =>
+    matUrl ? (
+      <img
+        src={matUrl}
+        width={size}
+        height={size}
+        alt=""
+        draggable={false}
+        className="shrink-0 select-none"
+      />
+    ) : (
+      <Icon size={size} className={cn("shrink-0", iconColor)} />
+    );
+  const iconEl = glyph(13);
   // Show a real image preview in the grid when the adapter can supply bytes.
   const canThumb = !!loadThumb && !!sessionId && isImage(entry);
 
   if (viewMode === "grid") {
-    const bigIcon = <Icon size={30} className={cn("shrink-0", iconColor)} />;
+    const bigIcon = glyph(30);
     return (
       <div
         data-idx={index}
