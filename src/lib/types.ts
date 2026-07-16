@@ -6,7 +6,14 @@ export type AuthMethod =
   | { kind: "key"; path: string; passphrase?: string }
   | { kind: "agent" };
 
-export type Protocol = "sftp" | "ftp" | "ftps" | "s3" | "azure" | "faro-agent";
+export type Protocol =
+  | "sftp"
+  | "ftp"
+  | "ftps"
+  | "s3"
+  | "azure"
+  | "gcs"
+  | "faro-agent";
 
 export interface ConnectionProfile {
   id: string;
@@ -41,6 +48,7 @@ export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {
   ftps: 21,
   s3: 443,
   azure: 443,
+  gcs: 443,
   "faro-agent": 8722,
 };
 
@@ -50,11 +58,12 @@ export const PROTOCOL_LABEL: Record<Protocol, string> = {
   ftps: "FTPS",
   s3: "S3",
   azure: "Azure",
+  gcs: "GCS",
   "faro-agent": "Faro Agent",
 };
 
 export function isObjectProtocol(p: Protocol): boolean {
-  return p === "s3" || p === "azure";
+  return p === "s3" || p === "azure" || p === "gcs";
 }
 
 /** A Faro Agent connection controls a whole remote machine, not a login on a

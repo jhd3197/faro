@@ -382,7 +382,7 @@ function ProtocolBadge({ protocol }: { protocol: Protocol }) {
   let label = protocol.toUpperCase();
   if (protocol === "ftp") Icon = ShieldOff;
   else if (protocol === "ftps") Icon = ShieldCheck;
-  else if (protocol === "s3" || protocol === "azure") Icon = Cloud;
+  else if (protocol === "s3" || protocol === "azure" || protocol === "gcs") Icon = Cloud;
   return (
     <span className="flex h-5 items-center gap-1 rounded bg-bg-subtle px-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
       <Icon size={9} />

@@ -645,7 +645,7 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
                   const isSsh = p.protocol === "sftp";
                   const isAgent = p.protocol === "faro-agent";
                   const canExec = isSsh || isAgent;
-                  const isObject = p.protocol === "s3" || p.protocol === "azure";
+                  const isObject = p.protocol === "s3" || p.protocol === "azure" || p.protocol === "gcs";
                   return (
                     <div
                       key={sessionId}

@@ -178,7 +178,7 @@ export function listDir(sessionId: string, path: string): DirEntry[] {
   let base: Array<Omit<DirEntry, "path">>;
   if (sessionId === "local") {
     base = path === "C:\\" || path === "/" ? LOCAL_C : LOCAL_GENERIC;
-  } else if (proto === "s3" || proto === "azure") {
+  } else if (proto === "s3" || proto === "azure" || proto === "gcs") {
     base = S3_ROOT;
   } else {
     base = REMOTE[path] ?? REMOTE_GENERIC;
@@ -191,7 +191,7 @@ export function capabilities(sessionId: string): Capabilities {
   if (sessionId === "local") {
     return { canChmod: false, canSymlink: true, canRename: true, hasDirectories: true, hasShell: false };
   }
-  if (proto === "s3" || proto === "azure") {
+  if (proto === "s3" || proto === "azure" || proto === "gcs") {
     return { canChmod: false, canSymlink: false, canRename: true, hasDirectories: false, hasShell: false };
   }
   if (proto === "ftp" || proto === "ftps") {

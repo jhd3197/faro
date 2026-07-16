@@ -1110,7 +1110,7 @@ pub async fn open_session(
             let ftp = ftp_connect(profile).await?;
             Ok(Session::Ftp(Arc::new(ftp)))
         }
-        "s3" | "azure" => {
+        "s3" | "azure" | "gcs" => {
             let obj = object_connect(profile).await?;
             Ok(Session::Object(Arc::new(obj)))
         }
@@ -1452,7 +1452,7 @@ impl SessionManager {
                 let id = ftp.id.clone();
                 (id, Session::Ftp(Arc::new(ftp)))
             }
-            "s3" | "azure" => {
+            "s3" | "azure" | "gcs" => {
                 let _ = app; // Object stores have no per-connect UI prompts.
                 let obj = object_connect(&profile).await?;
                 let id = obj.id.clone();

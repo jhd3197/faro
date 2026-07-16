@@ -37,6 +37,7 @@ import { monogram } from "@/lib/format";
 import {
   PROTOCOL_DEFAULT_PORT,
   PROTOCOL_LABEL,
+  isObjectProtocol,
   type ConnectionProfile,
   type Protocol,
 } from "@/lib/types";
@@ -46,13 +47,14 @@ type RowState = "focused" | "connected" | "connecting" | "error" | "idle";
 
 // Servers sort by protocol (SFTP first — the primary use), then by name, so the
 // rail order stays learnable as connections come and go.
-const GROUP_ORDER: Protocol[] = ["sftp", "ftps", "ftp", "s3", "azure", "faro-agent"];
+const GROUP_ORDER: Protocol[] = ["sftp", "ftps", "ftp", "s3", "azure", "gcs", "faro-agent"];
 
 const fallbackColor = "rgb(var(--accent))";
 
 function profileAddress(p: ConnectionProfile): string {
   if (p.protocol === "s3") return `s3://${p.bucket ?? "?"}`;
   if (p.protocol === "azure") return `az://${p.account ?? "?"}/${p.bucket ?? "?"}`;
+  if (p.protocol === "gcs") return `gs://${p.bucket ?? "?"}`;
   const port =
     p.port !== PROTOCOL_DEFAULT_PORT[p.protocol] ? `:${p.port}` : "";
   // A Faro Agent connection controls a machine, not a login — no username.
@@ -1374,7 +1376,7 @@ function RailSearch({
           </div>
         ) : (
           results.map((p) => {
-            const isObject = p.protocol === "s3" || p.protocol === "azure";
+            const isObject = isObjectProtocol(p.protocol);
             const ProtoIcon = isObject ? Cloud : Server;
             const online = connectedIds.has(p.id);
             return (

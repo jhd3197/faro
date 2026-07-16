@@ -128,8 +128,10 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
       setPort(PROTOCOL_DEFAULT_PORT[p]);
     }
     if (isObjectProtocol(p)) {
-      // Object stores only do key auth — coerce to password.
-      setAuthKind("password");
+      // Object stores authenticate by key material, not interactive login. S3 /
+      // Azure carry it in the password field; GCS uses a service-account JSON,
+      // which defaults to a key *file* path (Password mode pastes the JSON).
+      setAuthKind(p === "gcs" ? "key" : "password");
     }
     if ((p === "ftp" || p === "ftps") && authKind !== "password") {
       setAuthKind("password");
@@ -148,6 +150,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
   const isFtp = protocol === "ftp" || protocol === "ftps";
   const isS3 = protocol === "s3";
   const isAzure = protocol === "azure";
+  const isGcs = protocol === "gcs";
   const isObject = isObjectProtocol(protocol);
   const isAgent = isAgentProtocol(protocol);
 
@@ -170,13 +173,22 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
           ? `${bucket}@${s3Provider}`
           : isAzure
             ? `${azureAccount}/${bucket}`
-            : isAgent
-              ? `Agent @ ${host}`
-              : `${username}@${host}`),
+            : isGcs
+              ? `${bucket}@gcs`
+              : isAgent
+                ? `Agent @ ${host}`
+                : `${username}@${host}`),
       protocol,
-      host: isObject ? endpoint || (isAzure ? "blob.core.windows.net" : "s3.amazonaws.com") : host,
+      host: isObject
+        ? endpoint ||
+          (isAzure
+            ? "blob.core.windows.net"
+            : isGcs
+              ? "storage.googleapis.com"
+              : "s3.amazonaws.com")
+        : host,
       port,
-      username: isAzure ? azureAccount : isAgent ? "" : username,
+      username: isAzure ? azureAccount : isAgent || isGcs ? "" : username,
       auth: isAgent ? { kind: "password", password: "" } : auth,
       defaultRemotePath: defaultRemotePath || undefined,
       color: profile?.color,
@@ -217,22 +229,30 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
     void connectProfile(id);
   };
 
+  const gcsCredOk = authKind === "key" ? !!keyPath : !!password;
   const canSave = isS3
     ? !!bucket && !!username && !!password
     : isAzure
       ? !!azureAccount && !!bucket && !!password
-      : isAgent
-        ? !!host && !!agentKey
-        : !!host && !!username;
+      : isGcs
+        ? !!bucket && gcsCredOk
+        : isAgent
+          ? !!host && !!agentKey
+          : !!host && !!username;
   // Name what's still required so a disabled Save isn't a dead end.
   const missing = (
     isS3
       ? [!bucket && "bucket", !username && "access key ID", !password && "secret key"]
       : isAzure
         ? [!azureAccount && "account", !bucket && "container", !password && "access key"]
-        : isAgent
-          ? [!host && "host", !agentKey && "pairing"]
-          : [!host && "host", !username && "username"]
+        : isGcs
+          ? [
+              !bucket && "bucket",
+              !gcsCredOk && (authKind === "key" ? "key file path" : "JSON key"),
+            ]
+          : isAgent
+            ? [!host && "host", !agentKey && "pairing"]
+            : [!host && "host", !username && "username"]
   ).filter(Boolean);
 
   return (
@@ -275,7 +295,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
 
         <Field label="Protocol">
           <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-bg-subtle p-1">
-            {(["sftp", "ftp", "ftps", "s3", "azure", "faro-agent"] as Protocol[]).map((p) => (
+            {(["sftp", "ftp", "ftps", "s3", "azure", "gcs", "faro-agent"] as Protocol[]).map((p) => (
               <ProtocolButton
                 key={p}
                 active={protocol === p}
@@ -312,6 +332,17 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             setAccessKey={setPassword}
             endpoint={endpoint}
             setEndpoint={setEndpoint}
+          />
+        ) : isGcs ? (
+          <GcsSection
+            bucket={bucket}
+            setBucket={setBucket}
+            keyMode={authKind === "key" ? "file" : "paste"}
+            setKeyMode={(m) => setAuthKind(m === "file" ? "key" : "password")}
+            keyPath={keyPath}
+            setKeyPath={setKeyPath}
+            keyJson={password}
+            setKeyJson={setPassword}
           />
         ) : isAgent ? (
           <AgentSection
@@ -794,6 +825,87 @@ function AzureSection({
   );
 }
 
+function GcsSection({
+  bucket,
+  setBucket,
+  keyMode,
+  setKeyMode,
+  keyPath,
+  setKeyPath,
+  keyJson,
+  setKeyJson,
+}: {
+  bucket: string;
+  setBucket: (v: string) => void;
+  keyMode: "file" | "paste";
+  setKeyMode: (v: "file" | "paste") => void;
+  keyPath: string;
+  setKeyPath: (v: string) => void;
+  keyJson: string;
+  setKeyJson: (v: string) => void;
+}) {
+  return (
+    <>
+      <Hint>
+        Google Cloud Storage. Create a service account with Storage access, then
+        use its JSON key (Cloud console → IAM &amp; Admin → Service accounts →
+        Keys). Point at the downloaded file, or paste the key directly.
+      </Hint>
+
+      <Field label="Bucket">
+        <input
+          value={bucket}
+          onChange={(e) => setBucket(e.target.value)}
+          placeholder="my-gcs-bucket"
+          className={inputCls}
+        />
+      </Field>
+
+      <Field label="Service account key">
+        <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-bg-subtle p-1">
+          {(["file", "paste"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setKeyMode(m)}
+              className={
+                "rounded-sm px-2 py-1.5 text-[11px] font-semibold transition-colors " +
+                (keyMode === m
+                  ? "bg-accent-soft text-text ring-1 ring-inset ring-accent/40"
+                  : "text-text-muted hover:bg-bg-hover hover:text-text")
+              }
+            >
+              {m === "file" ? "Key file path" : "Paste JSON"}
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      {keyMode === "file" ? (
+        <Field label="Key file path">
+          <input
+            value={keyPath}
+            onChange={(e) => setKeyPath(e.target.value)}
+            placeholder="~/keys/service-account.json"
+            className={inputCls}
+          />
+        </Field>
+      ) : (
+        <Field label="Service account JSON">
+          <textarea
+            value={keyJson}
+            onChange={(e) => setKeyJson(e.target.value)}
+            placeholder='{ "type": "service_account", ... }'
+            spellCheck={false}
+            rows={5}
+            className={cn(inputCls, "resize-y font-mono text-[11px] leading-snug")}
+          />
+        </Field>
+      )}
+    </>
+  );
+}
+
 function S3Section({
   provider,
   onProviderChange,
@@ -912,6 +1024,8 @@ function protocolHint(p: Protocol): string {
       return "Object · :443";
     case "azure":
       return "Blob · :443";
+    case "gcs":
+      return "Object · :443";
     case "faro-agent":
       return "Machine · :8722";
   }
@@ -931,7 +1045,7 @@ function ProtocolButton({
   let Icon = TerminalIcon;
   if (label === "FTPS") Icon = ShieldCheck;
   else if (label === "FTP") Icon = ShieldOff;
-  else if (label === "S3" || label === "Azure") Icon = Cloud;
+  else if (label === "S3" || label === "Azure" || label === "GCS") Icon = Cloud;
   else if (label === "Faro Agent") Icon = MonitorSmartphone;
   return (
     <button
