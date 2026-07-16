@@ -417,13 +417,26 @@ async fn reconcile_inner(
         Box::new(crate::remotefs::local::LocalFs);
     let remote_fs = crate::commands::fs_for_session(&session);
 
-    let mut plan = crate::sync::plan(
+    // The index tracks the *source* side (authoritative for one-way sync); its
+    // change signal comes from that backend's capabilities.
+    let source_signal = match pair.direction {
+        SyncDirection::LocalToRemote => local_fs.capabilities().change_signal,
+        SyncDirection::RemoteToLocal => remote_fs.capabilities().change_signal,
+    };
+    let index = state.db.load_sync_state(&pair.id).unwrap_or_else(|e| {
+        tracing::warn!("folder sync '{}': reading sync_state: {e:#}", pair.name);
+        Default::default()
+    });
+
+    let (mut plan, source_tree) = crate::sync::plan_indexed(
         local_fs.as_ref(),
         remote_fs.as_ref(),
         &pair.local_root,
         &pair.remote_root,
         pair.direction,
         pair.strategy,
+        Some(&index),
+        source_signal,
     )
     .await
     .context("planning sync")?;
@@ -444,6 +457,10 @@ async fn reconcile_inner(
     let warning = apply_safety(&mut plan, pair, source_available);
 
     if plan.copies.is_empty() && plan.deletes.is_empty() {
+        // Nothing to transfer — but still snapshot the source so a first run
+        // seeds the index (later same-size edits become detectable) and a delete
+        // prunes its row.
+        snapshot_index(&state.db, &pair.id, &source_tree, &index);
         return Ok(warning);
     }
 
@@ -452,7 +469,37 @@ async fn reconcile_inner(
         .context("executing sync")?;
 
     wait_for_transfers(state, ids).await;
+
+    // Record what the source looks like now, so the next reconcile compares
+    // against reality rather than re-uploading (resume) and catches in-place
+    // edits the live size/mtime diff would miss.
+    snapshot_index(&state.db, &pair.id, &source_tree, &index);
     Ok(warning)
+}
+
+/// Persist the current source tree into `sync_state`: upsert a row per file and
+/// prune rows for files that have disappeared from the source. Best-effort — a
+/// DB hiccup here only costs the optimization, never correctness (the live diff
+/// still runs every reconcile).
+fn snapshot_index(
+    db: &crate::db::Db,
+    pair_id: &str,
+    source_tree: &crate::scan::ScanTree,
+    before: &std::collections::HashMap<String, crate::db::SyncStateRow>,
+) {
+    let now = now_ms();
+    for (rel, e) in &source_tree.files {
+        if let Err(err) =
+            db.upsert_sync_state(pair_id, rel, e.size, e.modified, e.etag.as_deref(), now)
+        {
+            tracing::warn!("folder sync: sync_state upsert '{rel}': {err:#}");
+        }
+    }
+    for rel in before.keys() {
+        if !source_tree.files.contains_key(rel) {
+            let _ = db.delete_sync_state(pair_id, rel);
+        }
+    }
 }
 
 /// Return a live `Arc<Session>` for the pair, reusing the cached session id when
@@ -817,6 +864,8 @@ pub async fn foldersync_remove(
     state: State<'_, AppState>,
 ) -> Result<Vec<PairView>, String> {
     state.foldersync.remove(&id).await.map_err(err)?;
+    // Drop the pair's index rows so a future pair reusing the id starts clean.
+    let _ = state.db.clear_pair(&id);
     Ok(state.foldersync.views().await)
 }
 

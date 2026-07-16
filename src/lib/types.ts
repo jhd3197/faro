@@ -159,7 +159,7 @@ export interface ImporterPaths {
 
 export type SyncDirection = "localToRemote" | "remoteToLocal";
 export type SyncStrategy = "additive" | "mirror";
-export type SyncReason = "missing" | "newer" | "sizeChanged";
+export type SyncReason = "missing" | "newer" | "sizeChanged" | "edited";
 
 export interface SyncFile {
   relative: string;

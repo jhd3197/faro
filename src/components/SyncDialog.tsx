@@ -421,7 +421,9 @@ function ReasonBadge({ reason }: { reason: SyncReason }) {
       ? "new"
       : reason === "newer"
         ? "newer"
-        : "size";
+        : reason === "edited"
+          ? "edited"
+          : "size";
   const tone =
     reason === "missing" ? "bg-success/15 text-success" : "bg-accent-soft text-accent";
   return (

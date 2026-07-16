@@ -201,6 +201,32 @@ mod tests {
     }
 
     #[test]
+    fn open_creates_file_and_persists_across_reopen() {
+        // Exercises the exact code path startup uses: Db::open on a real path,
+        // WAL pragma, migrations, and durability across a reopen.
+        let mut path = std::env::temp_dir();
+        path.push(format!("faro_db_open_test_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        {
+            let db = Db::open(&path).unwrap();
+            db.upsert_sync_state("p", "f.txt", 1, 2, None, 3).unwrap();
+        }
+        assert!(path.exists(), "Db::open must create the file");
+
+        // Reopen: migrations don't re-run destructively and data survives.
+        let db = Db::open(&path).unwrap();
+        let rows = db.load_sync_state("p").unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows["f.txt"].size, 1);
+
+        drop(db);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("db-wal"));
+        let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
     fn migrate_is_idempotent_across_opens() {
         // Running migrate twice on the same connection must not error or duplicate.
         let conn = Connection::open_in_memory().unwrap();
