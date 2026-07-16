@@ -33,6 +33,8 @@ import type {
   AgentPairResult,
   AgentHostStatus,
   DeepLink,
+  SyncPair,
+  PairView,
 } from "./types";
 
 // Typed wrappers around the Tauri command surface. The string names must match
@@ -280,6 +282,18 @@ export const ipc = {
   // Write the agent console text to disk (Downloads) and return the saved path.
   exportAgentLog: (content: string, name: string) =>
     invoke<string>("export_agent_log", { content, name }),
+
+  // ---- Folder Sync (continuous watched sync pairs) ----
+  // Every command returns the full, updated list of pairs.
+  folderSyncList: () => invoke<PairView[]>("foldersync_list"),
+  folderSyncUpsert: (pair: SyncPair) =>
+    invoke<PairView[]>("foldersync_upsert", { pair }),
+  folderSyncRemove: (id: string) =>
+    invoke<PairView[]>("foldersync_remove", { id }),
+  folderSyncSetEnabled: (id: string, enabled: boolean) =>
+    invoke<PairView[]>("foldersync_set_enabled", { id, enabled }),
+  folderSyncSyncNow: (id: string) =>
+    invoke<PairView[]>("foldersync_sync_now", { id }),
 };
 
 export async function onEditSaved(
@@ -355,6 +369,14 @@ export async function onAgentHostPaired(
   return listen<{ name: string; key: string }>("agent-host://paired", (e) =>
     cb(e.payload)
   );
+}
+
+/** A folder-sync pair changed (config edited, or a background sync updated its
+ *  runtime state). Payload is empty — re-fetch the list on receipt. */
+export async function onFolderSyncChanged(
+  cb: () => void
+): Promise<UnlistenFn> {
+  return listen("foldersync://changed", () => cb());
 }
 
 /** A faro:// deep link was opened (from a hosting panel like ServerKit). */

@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { X, Palette, ArrowDownUp, FolderTree, TerminalSquare, Plug, Radio, Bot, Ban, Check, Info, MonitorSmartphone } from "lucide-react";
+import { X, Palette, ArrowDownUp, FolderTree, TerminalSquare, Plug, Radio, Bot, Ban, Check, Info, MonitorSmartphone, FolderSync } from "lucide-react";
 import { useDialog } from "@/hooks/useDialog";
 import { ACCENTS } from "@/lib/accent";
 import {
@@ -19,6 +19,7 @@ import { useBridge } from "@/stores/bridgeStore";
 import { open } from "@tauri-apps/plugin-dialog";
 import { cn } from "@/lib/cn";
 import { RemoteControlSettings } from "./RemoteControlSettings";
+import { SyncSettings } from "./SyncSettings";
 
 interface Props {
   onClose: () => void;
@@ -31,6 +32,7 @@ type SectionId =
   | "terminal"
   | "connections"
   | "remoteControl"
+  | "sync"
   | "bridge"
   | "agent";
 
@@ -41,6 +43,7 @@ const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
   { id: "terminal", label: "Terminal", icon: <TerminalSquare size={14} /> },
   { id: "connections", label: "Connections", icon: <Plug size={14} /> },
   { id: "remoteControl", label: "Remote control", icon: <MonitorSmartphone size={14} /> },
+  { id: "sync", label: "Folder Sync", icon: <FolderSync size={14} /> },
   { id: "bridge", label: "Agent Bridge", icon: <Radio size={14} /> },
   { id: "agent", label: "Chat", icon: <Bot size={14} /> },
 ];
@@ -360,6 +363,9 @@ export function Settings({ onClose }: Props) {
 
       case "remoteControl":
         return <RemoteControlSettings />;
+
+      case "sync":
+        return <SyncSettings />;
 
       case "bridge":
         return (
