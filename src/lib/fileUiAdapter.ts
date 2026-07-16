@@ -8,6 +8,7 @@ import { ipc } from "./ipc";
 import { useEditor } from "@/stores/editorStore";
 import { useTerminals } from "@/stores/terminalsStore";
 import { useLayout } from "@/stores/layoutStore";
+import { useDiskScan } from "@/stores/diskScanStore";
 
 // POSIX single-quote a path so a `cd` survives spaces / shell metacharacters.
 function shQuote(p: string): string {
@@ -46,6 +47,12 @@ export const tauriFileSystem: FileSystemAdapter = {
   openTerminal: async (sessionId, path) => {
     useLayout.getState().setTerminalOpen(true);
     useTerminals.getState().openTab(sessionId, `cd ${shQuote(path)}\n`);
+  },
+
+  // Open the Disk Usage explorer and kick off a scan of `path`. The store owns
+  // the scan lifecycle (progress events, cancel, drill-down); this just triggers it.
+  analyzeDiskUsage: async (sessionId, path) => {
+    await useDiskScan.getState().openFor(sessionId, path);
   },
 
   // Image previews for the grid view. Local files only for now — the backend

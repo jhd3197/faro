@@ -49,6 +49,7 @@ import { KeyboardShortcutsDialog } from "./components/KeyboardShortcutsDialog";
 import { AgentBridge, AgentBridgeHost } from "./components/AgentBridge";
 import { AgentConsoleDock } from "./components/AgentConsole";
 import { AgentChatDock } from "./components/AgentChat";
+import { DiskUsageHost } from "./components/DiskUsage";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { relTime } from "./lib/format";
 import { cn } from "./lib/cn";
@@ -118,6 +119,7 @@ export default function App() {
       <Toaster />
       <AgentBridgeHost />
       <OverwriteDialogHost />
+      <DiskUsageHost />
       <CommandPalette />
       <KeyboardShortcutsDialog />
       <div className="flex flex-1 overflow-hidden">

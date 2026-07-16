@@ -214,6 +214,47 @@ export interface PairView extends SyncPair {
   lastError: string | null;
 }
 
+// ---- Disk Usage Explorer (mirrors src-tauri/src/diskscan.rs) ----
+
+export type ScanState = "scanning" | "done" | "error" | "canceled";
+/** Which strategy produced the scan. Phase 1 is always "generic"; the exec and
+ *  object-store fast paths report "shell" / "objectFlat". */
+export type ScanStrategy = "generic" | "shell" | "objectFlat";
+
+/** One node in the aggregated size tree. `size` is total bytes under the node
+ *  (own size for a file, sum of descendants for a directory). */
+export interface DuNode {
+  name: string;
+  path: string;
+  kind: FileKind;
+  size: number;
+  children?: DuNode[];
+}
+
+/** A scan snapshot: live progress while scanning, the `tree` once done. */
+export interface ScanSnapshot {
+  id: string;
+  sessionId: string;
+  root: string;
+  state: ScanState;
+  strategy: ScanStrategy;
+  dirsScanned: number;
+  filesFound: number;
+  totalBytes: number;
+  error?: string;
+  tree?: DuNode;
+  startedAt: number;
+}
+
+/** The lightweight `diskscan://progress` event body. */
+export interface DiskScanProgress {
+  id: string;
+  dirsScanned: number;
+  filesFound: number;
+  totalBytes: number;
+  strategy: ScanStrategy;
+}
+
 // ---- Edit-in-place ----
 
 export interface EditStartedEvent {

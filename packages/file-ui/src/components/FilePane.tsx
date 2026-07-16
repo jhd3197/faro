@@ -14,6 +14,7 @@ import {
   ExternalLink,
   FileArchive,
   TerminalSquare,
+  PieChart,
   Info,
   Search,
   X,
@@ -569,6 +570,18 @@ export function FilePane({
               .catch((e) => setError(String(e))),
         });
       }
+      // Analyze disk usage under this folder (treemap + size breakdown). Works
+      // on every backend — no shell needed, the scan falls back to a walk.
+      if (single.kind === "directory" && fs.analyzeDiskUsage) {
+        items.push({
+          label: "Analyze disk usage",
+          icon: <PieChart size={12} />,
+          onClick: () =>
+            fs
+              .analyzeDiskUsage!(sessionId!, single.path)
+              .catch((e) => setError(String(e))),
+        });
+      }
       // Duplicate needs a server-side copy (cp over SSH) or local fs copy; object
       // stores / FTP can't, so hide it there.
       if (fs.duplicate && (sessionId === LOCAL_SESSION || caps?.hasShell)) {
@@ -813,6 +826,21 @@ export function FilePane({
             title="Upload files or a folder to this directory"
           >
             <Upload size={11} /> Upload
+          </button>
+        )}
+        {fs.analyzeDiskUsage && (
+          <button
+            onClick={() =>
+              sessionId &&
+              fs
+                .analyzeDiskUsage!(sessionId, path)
+                .catch((e) => setError(String(e)))
+            }
+            disabled={!sessionId}
+            className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"
+            title="Analyze disk usage in this folder"
+          >
+            <PieChart size={13} />
           </button>
         )}
         {caps?.hasDirectories !== false && (
