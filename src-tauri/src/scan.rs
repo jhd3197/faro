@@ -139,8 +139,7 @@ pub async fn walk<F: FnMut(ScanProgress)>(
                                 absolute: entry.path.clone(),
                                 size: entry.size,
                                 modified: entry.modified.unwrap_or(0),
-                                // Phase 3 populates this from `entry.etag`.
-                                etag: None,
+                                etag: entry.etag.clone(),
                             },
                         );
                     }

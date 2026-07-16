@@ -3,7 +3,7 @@
 //! session's encrypted channel; the daemon enforces its own write policy, so a
 //! refusal surfaces here as an error the UI shows.
 
-use super::{Capabilities, DirEntry, FileKind, RemoteFs};
+use super::{Capabilities, ChangeSignal, DirEntry, FileKind, RemoteFs};
 use crate::session::AgentSession;
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -38,6 +38,7 @@ fn convert(e: ProtoEntry) -> DirEntry {
         size: e.size,
         modified: e.modified,
         mode: e.mode,
+        etag: None,
     }
 }
 
@@ -116,6 +117,9 @@ impl RemoteFs for AgentFs {
             can_rename: true,
             has_directories: true,
             has_shell: false,
+            // A Faro daemon fronts a POSIX-ish filesystem (Android's emulated
+            // storage included) — mtime+size is the reliable change hint.
+            change_signal: ChangeSignal::MtimeSize,
         }
     }
 }
