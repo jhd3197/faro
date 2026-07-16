@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod agent;
 pub mod ftp;
+pub mod http;
 pub mod local;
 pub mod object;
 pub mod sftp;

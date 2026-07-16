@@ -1,9 +1,11 @@
 pub mod agent;
 pub mod ftp;
+pub mod http;
 pub mod object;
 pub mod webdav;
 pub use agent::{agent_pair, AgentSession};
 pub use ftp::{ftp_connect, FtpSession};
+pub use http::{http_connect, HttpSession};
 pub use object::{object_connect, ObjectSession};
 pub use webdav::{webdav_connect, WebdavSession};
 
@@ -1120,6 +1122,10 @@ pub async fn open_session(
             let dav = webdav_connect(profile).await?;
             Ok(Session::Webdav(Arc::new(dav)))
         }
+        "http" | "https" => {
+            let http = http_connect(profile).await?;
+            Ok(Session::Http(Arc::new(http)))
+        }
         other => Err(anyhow!("unsupported protocol: {other}")),
     }
 }
@@ -1372,6 +1378,7 @@ pub enum Session {
     Ftp(Arc<FtpSession>),
     Object(Arc<ObjectSession>),
     Webdav(Arc<WebdavSession>),
+    Http(Arc<HttpSession>),
     Agent(Arc<AgentSession>),
 }
 
@@ -1382,6 +1389,7 @@ impl Session {
             Self::Ftp(s) => &s.profile,
             Self::Object(s) => &s.profile,
             Self::Webdav(s) => &s.profile,
+            Self::Http(s) => &s.profile,
             Self::Agent(s) => &s.profile,
         }
     }
@@ -1392,6 +1400,7 @@ impl Session {
             Self::Ftp(_) => "ftp",
             Self::Object(s) => s.profile.protocol.as_str(),
             Self::Webdav(_) => "webdav",
+            Self::Http(_) => "http",
             Self::Agent(_) => "faro-agent",
         }
     }
@@ -1473,6 +1482,12 @@ impl SessionManager {
                 let id = dav.id.clone();
                 (id, Session::Webdav(Arc::new(dav)))
             }
+            "http" | "https" => {
+                let _ = app; // Read-only HTTP source; no per-connect UI prompt.
+                let http = http_connect(&profile).await?;
+                let id = http.id.clone();
+                (id, Session::Http(Arc::new(http)))
+            }
             "faro-agent" => {
                 let agent = AgentSession::connect(profile).await?;
                 let id = agent.id.clone();
@@ -1546,6 +1561,9 @@ impl SessionManager {
                 }
                 Session::Webdav(_) => {
                     // WebDAV is stateless HTTP too — reqwest's pool drops itself.
+                }
+                Session::Http(_) => {
+                    // Read-only HTTP is stateless — nothing to close.
                 }
                 Session::Agent(agent) => {
                     agent.disconnect().await;

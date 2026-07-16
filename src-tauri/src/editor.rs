@@ -387,6 +387,28 @@ async fn download_to(
             }
             file.flush().await?;
         }
+        Session::Http(http) => {
+            use futures::StreamExt;
+            let url = http.url_for(remote_path, false);
+            let resp = http
+                .request(reqwest::Method::GET, url)
+                .send()
+                .await
+                .with_context(|| format!("http get {remote_path}"))?;
+            if !resp.status().is_success() {
+                return Err(anyhow::anyhow!(
+                    "http get {remote_path}: HTTP {}",
+                    resp.status().as_u16()
+                ));
+            }
+            let mut file = tokio::fs::File::create(local_path).await?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk).await?;
+            }
+            file.flush().await?;
+        }
         Session::Agent(agent) => {
             use base64::Engine as _;
             use faro_agent_proto::msg::{Request, Response};
@@ -493,6 +515,11 @@ async fn upload_from(
                     resp.status().as_u16()
                 ));
             }
+        }
+        Session::Http(_) => {
+            return Err(anyhow::anyhow!(
+                "HTTP source is read-only — saving edits is not supported"
+            ));
         }
         Session::Agent(agent) => {
             use base64::Engine as _;

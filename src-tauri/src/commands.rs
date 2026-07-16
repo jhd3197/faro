@@ -491,6 +491,7 @@ pub fn fs_for_session(session: &Arc<Session>) -> Box<dyn RemoteFs> {
             Box::new(crate::remotefs::object::ObjectFs::new(obj.clone()))
         }
         Session::Webdav(dav) => Box::new(crate::remotefs::webdav::WebdavFs::new(dav.clone())),
+        Session::Http(http) => Box::new(crate::remotefs::http::HttpFs::new(http.clone())),
         Session::Agent(agent) => Box::new(crate::remotefs::agent::AgentFs::new(agent.clone())),
     }
 }

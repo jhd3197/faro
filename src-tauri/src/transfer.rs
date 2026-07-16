@@ -1,4 +1,6 @@
-use crate::session::{FtpSession, ObjectSession, Session, SshSession, WebdavSession};
+use crate::session::{
+    FtpSession, HttpSession, ObjectSession, Session, SshSession, WebdavSession,
+};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -253,6 +255,16 @@ impl TransferManager {
                     )
                     .await
                 }
+                Session::Http(http) => {
+                    mgr.run_http_download(
+                        &id_for_task,
+                        http.clone(),
+                        &remote_path,
+                        &final_path,
+                        &app,
+                    )
+                    .await
+                }
                 Session::Agent(agent) => {
                     mgr.run_agent_download(
                         &id_for_task,
@@ -457,6 +469,9 @@ impl TransferManager {
                         &app,
                     )
                     .await
+                }
+                Session::Http(_) => {
+                    Err(anyhow::anyhow!("HTTP source is read-only — upload not supported"))
                 }
                 Session::Agent(agent) => {
                     mgr.run_agent_upload(
@@ -1020,6 +1035,56 @@ impl TransferManager {
         self.update(id, |t| t.transferred = size).await;
         Ok(())
     }
+
+    /// Stream a read-only HTTP download: a single `GET`, written chunk by chunk.
+    async fn run_http_download(
+        &self,
+        id: &str,
+        session: Arc<HttpSession>,
+        remote_path: &str,
+        local_path: &Path,
+        app: &AppHandle,
+    ) -> Result<()> {
+        use futures::StreamExt;
+
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+
+        let url = session.url_for(remote_path, false);
+        let resp = session
+            .request(reqwest::Method::GET, url)
+            .send()
+            .await
+            .with_context(|| format!("GET {remote_path}"))?;
+        if !resp.status().is_success() {
+            return Err(anyhow::anyhow!(
+                "download {remote_path} failed: HTTP {}",
+                resp.status().as_u16()
+            ));
+        }
+
+        let mut file = tokio::fs::File::create(local_path)
+            .await
+            .with_context(|| format!("create {}", local_path.display()))?;
+        let mut stream = resp.bytes_stream();
+        let mut transferred: u64 = 0;
+        let mut last_emit = Instant::now();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.with_context(|| format!("http chunk for {remote_path}"))?;
+            file.write_all(&chunk).await?;
+            transferred += chunk.len() as u64;
+            if last_emit.elapsed() > Duration::from_millis(100) {
+                self.update(id, |t| t.transferred = transferred).await;
+                if let Some(t) = self.get(id).await {
+                    let _ = app.emit("transfer://progress", &t);
+                }
+                last_emit = Instant::now();
+            }
+        }
+        file.flush().await?;
+        self.update(id, |t| t.transferred = transferred).await;
+        Ok(())
+    }
 }
 
 /// Build a RemoteFs handle for the right backend.
@@ -1031,6 +1096,7 @@ fn fs_for_session(session: &Arc<Session>) -> Box<dyn crate::remotefs::RemoteFs> 
             Box::new(crate::remotefs::object::ObjectFs::new(obj.clone()))
         }
         Session::Webdav(dav) => Box::new(crate::remotefs::webdav::WebdavFs::new(dav.clone())),
+        Session::Http(http) => Box::new(crate::remotefs::http::HttpFs::new(http.clone())),
         Session::Agent(agent) => Box::new(crate::remotefs::agent::AgentFs::new(agent.clone())),
     }
 }
@@ -1050,6 +1116,20 @@ async fn webdav_head(session: &Arc<WebdavSession>, path: &str) -> (u64, bool) {
             (size, true)
         }
         _ => (0, false),
+    }
+}
+
+/// HEAD an HTTP-source file for its size. Best-effort (0 on any failure).
+async fn http_size(session: &Arc<HttpSession>, path: &str) -> u64 {
+    let url = session.url_for(path, false);
+    match session.request(reqwest::Method::HEAD, url).send().await {
+        Ok(resp) if resp.status().is_success() => resp
+            .headers()
+            .get(reqwest::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0),
+        _ => 0,
     }
 }
 
@@ -1094,6 +1174,7 @@ async fn remote_size(session: &Arc<Session>, path: &str) -> Result<u64> {
             Ok(meta.size as u64)
         }
         Session::Webdav(dav) => Ok(webdav_head(dav, path).await.0),
+        Session::Http(http) => Ok(http_size(http, path).await),
         Session::Agent(agent) => Ok(agent_stat(agent, path).await.0),
     }
 }
@@ -1186,6 +1267,11 @@ async fn remote_resolve(
                     (candidate, false)
                 }
             })
+        }
+        Session::Http(_) => {
+            // Read-only: no upload will actually run (run_http_upload errors), so
+            // resolution is a no-op that just echoes the target back.
+            Ok((initial_remote.to_string(), false))
         }
         Session::Agent(agent) => {
             let (_, exists) = agent_stat(agent, initial_remote).await;

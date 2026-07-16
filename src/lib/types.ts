@@ -14,6 +14,7 @@ export type Protocol =
   | "azure"
   | "gcs"
   | "webdav"
+  | "http"
   | "faro-agent";
 
 export interface ConnectionProfile {
@@ -51,6 +52,7 @@ export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {
   azure: 443,
   gcs: 443,
   webdav: 443,
+  http: 443,
   "faro-agent": 8722,
 };
 
@@ -62,6 +64,7 @@ export const PROTOCOL_LABEL: Record<Protocol, string> = {
   azure: "Azure",
   gcs: "GCS",
   webdav: "WebDAV",
+  http: "HTTP",
   "faro-agent": "Faro Agent",
 };
 

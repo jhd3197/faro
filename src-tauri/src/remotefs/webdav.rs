@@ -323,8 +323,9 @@ fn clean_etag(raw: &str) -> String {
 }
 
 /// Parse an RFC 1123 HTTP-date (always GMT for `getlastmodified`) into a Unix
-/// timestamp. Deliberately dependency-free — the format is fixed.
-fn parse_http_date(s: &str) -> Option<i64> {
+/// timestamp. Deliberately dependency-free — the format is fixed. Shared with the
+/// HTTP autoindex backend (`Last-Modified` headers, nginx-JSON `mtime`).
+pub(crate) fn parse_http_date(s: &str) -> Option<i64> {
     // "Mon, 15 Jul 2024 12:34:56 GMT"
     let parts: Vec<&str> = s.split_whitespace().collect();
     if parts.len() < 5 {

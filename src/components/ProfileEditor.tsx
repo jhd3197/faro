@@ -22,6 +22,7 @@ import {
   Terminal as TerminalIcon,
   Cloud,
   Globe,
+  Download,
   Eye,
   EyeOff,
   Wand2,
@@ -164,6 +165,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
   const isAzure = protocol === "azure";
   const isGcs = protocol === "gcs";
   const isWebdav = protocol === "webdav";
+  const isHttp = protocol === "http";
   const isObject = isObjectProtocol(protocol);
   const isAgent = isAgentProtocol(protocol);
 
@@ -188,7 +190,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             ? `${azureAccount}/${bucket}`
             : isGcs
               ? `${bucket}@gcs`
-              : isWebdav
+              : isWebdav || isHttp
                 ? `${username ? `${username}@` : ""}${hostFromUrl(endpoint)}`
                 : isAgent
                   ? `Agent @ ${host}`
@@ -201,7 +203,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             : isGcs
               ? "storage.googleapis.com"
               : "s3.amazonaws.com")
-        : isWebdav
+        : isWebdav || isHttp
           ? hostFromUrl(endpoint)
           : host,
       port,
@@ -212,7 +214,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
       autoConnect: autoConnect || undefined,
       bucket: isObject ? bucket : undefined,
       region: isS3 ? region : undefined,
-      endpoint: isObject || isWebdav ? endpoint || undefined : undefined,
+      endpoint: isObject || isWebdav || isHttp ? endpoint || undefined : undefined,
       account: isAzure ? azureAccount : undefined,
       agentKey: isAgent ? agentKey : undefined,
       group: group.trim() || undefined,
@@ -255,9 +257,11 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
         ? !!bucket && gcsCredOk
         : isWebdav
           ? !!endpoint && !!password
-          : isAgent
-            ? !!host && !!agentKey
-            : !!host && !!username;
+          : isHttp
+            ? !!endpoint
+            : isAgent
+              ? !!host && !!agentKey
+              : !!host && !!username;
   // Name what's still required so a disabled Save isn't a dead end.
   const missing = (
     isS3
@@ -271,9 +275,11 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             ]
           : isWebdav
             ? [!endpoint && "server URL", !password && "password / token"]
-            : isAgent
-              ? [!host && "host", !agentKey && "pairing"]
-              : [!host && "host", !username && "username"]
+            : isHttp
+              ? [!endpoint && "URL"]
+              : isAgent
+                ? [!host && "host", !agentKey && "pairing"]
+                : [!host && "host", !username && "username"]
   ).filter(Boolean);
 
   return (
@@ -316,7 +322,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
 
         <Field label="Protocol">
           <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-bg-subtle p-1">
-            {(["sftp", "ftp", "ftps", "s3", "azure", "gcs", "webdav", "faro-agent"] as Protocol[]).map((p) => (
+            {(["sftp", "ftp", "ftps", "s3", "azure", "gcs", "webdav", "http", "faro-agent"] as Protocol[]).map((p) => (
               <ProtocolButton
                 key={p}
                 active={protocol === p}
@@ -367,6 +373,15 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
           />
         ) : isWebdav ? (
           <WebdavSection
+            url={endpoint}
+            setUrl={setEndpoint}
+            username={username}
+            setUsername={setUsername}
+            password={password}
+            setPassword={setPassword}
+          />
+        ) : isHttp ? (
+          <HttpSection
             url={endpoint}
             setUrl={setEndpoint}
             username={username}
@@ -855,6 +870,75 @@ function AzureSection({
   );
 }
 
+function HttpSection({
+  url,
+  setUrl,
+  username,
+  setUsername,
+  password,
+  setPassword,
+}: {
+  url: string;
+  setUrl: (v: string) => void;
+  username: string;
+  setUsername: (v: string) => void;
+  password: string;
+  setPassword: (v: string) => void;
+}) {
+  const [auth, setAuth] = useState<boolean>(!!username);
+  return (
+    <>
+      <Hint>
+        Read-only browse of any static file server. Point at a directory with an
+        autoindex (nginx / Apache) to browse it, or paste a direct file URL to
+        pull a single artifact. No uploads, renames, or deletes.
+      </Hint>
+
+      <Field label="URL">
+        <input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="https://files.example.com/pub/"
+          className={inputCls}
+        />
+      </Field>
+
+      <label className="mb-3 flex cursor-pointer items-center gap-2.5 rounded-md border border-border bg-bg-subtle px-2.5 py-2">
+        <input
+          type="checkbox"
+          checked={auth}
+          onChange={(e) => {
+            setAuth(e.target.checked);
+            if (!e.target.checked) {
+              setUsername("");
+              setPassword("");
+            }
+          }}
+          className="h-3.5 w-3.5 shrink-0 accent-[rgb(var(--accent))]"
+        />
+        <span className="text-xs font-medium text-text">
+          Server needs HTTP Basic auth
+        </span>
+      </label>
+
+      {auth && (
+        <>
+          <Field label="Username">
+            <input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              className={inputCls}
+            />
+          </Field>
+          <Field label="Password">
+            <PasswordInput value={password} onChange={setPassword} />
+          </Field>
+        </>
+      )}
+    </>
+  );
+}
+
 function WebdavSection({
   url,
   setUrl,
@@ -1168,6 +1252,8 @@ function protocolHint(p: Protocol): string {
       return "Object · :443";
     case "webdav":
       return "HTTP · :443";
+    case "http":
+      return "Read-only · :443";
     case "faro-agent":
       return "Machine · :8722";
   }
@@ -1189,6 +1275,7 @@ function ProtocolButton({
   else if (label === "FTP") Icon = ShieldOff;
   else if (label === "S3" || label === "Azure" || label === "GCS") Icon = Cloud;
   else if (label === "WebDAV") Icon = Globe;
+  else if (label === "HTTP") Icon = Download;
   else if (label === "Faro Agent") Icon = MonitorSmartphone;
   return (
     <button
