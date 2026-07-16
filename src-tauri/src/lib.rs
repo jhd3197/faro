@@ -6,11 +6,12 @@ use tauri::Manager;
 // secrets directly — credentials live in profiles::ConnectionProfile, which
 // the CLI deliberately redacts in `profiles show`.
 pub mod bridge;
-mod commands;
+pub mod commands;
 pub mod agent;
 mod agent_host;
 pub mod db;
 mod deeplink;
+mod diskscan;
 mod editor;
 mod foldersync;
 pub mod importers;
@@ -32,6 +33,8 @@ pub struct AppState {
     pub bridge: Arc<bridge::BridgeState>,
     pub agent_host: Arc<agent_host::AgentHost>,
     pub foldersync: Arc<foldersync::FolderSync>,
+    /// Running disk-usage scans (Plan 4). Ephemeral — not persisted.
+    pub diskscan: Arc<diskscan::ScanManager>,
     /// Shared `faro.db` — the per-connection index (sync_state today; scan/search
     /// caches later). See `db.rs`.
     pub db: Arc<db::Db>,
@@ -91,6 +94,7 @@ pub fn run() {
                     foldersync::FolderSync::load(&handle)
                         .expect("failed to initialise folder sync settings"),
                 ),
+                diskscan: Arc::new(diskscan::ScanManager::new()),
                 db,
             };
             app.manage(state);
@@ -161,6 +165,11 @@ pub fn run() {
             foldersync::foldersync_remove,
             foldersync::foldersync_set_enabled,
             foldersync::foldersync_sync_now,
+            diskscan::diskscan_start,
+            diskscan::diskscan_status,
+            diskscan::diskscan_tree,
+            diskscan::diskscan_cancel,
+            diskscan::diskscan_forget,
             commands::list_agent_jobs,
             commands::kill_agent_job,
             commands::respond_to_host_prompt,

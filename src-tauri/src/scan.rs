@@ -49,6 +49,9 @@ impl CancelToken {
 pub struct ScanProgress {
     pub dirs_scanned: usize,
     pub files_found: usize,
+    /// Running total of every file byte seen so far. Disk usage (Plan 4) shows
+    /// this live ("1.2 GB found"); the sync poller ignores it.
+    pub bytes_found: u64,
 }
 
 /// One file discovered by the walk. `modified` is normalised to `0` when the
@@ -107,6 +110,7 @@ pub async fn walk<F: FnMut(ScanProgress)>(
     queue.push_back(root.to_string());
     let mut inflight = FuturesUnordered::new();
     let mut dirs_scanned = 0usize;
+    let mut bytes_found = 0u64;
 
     loop {
         if opts.cancel.is_cancelled() {
@@ -132,6 +136,7 @@ pub async fn walk<F: FnMut(ScanProgress)>(
                 match entry.kind {
                     FileKind::Directory => queue.push_back(entry.path.clone()),
                     FileKind::File => {
+                        bytes_found += entry.size;
                         let rel = relative_of(&normalized_root, &entry.path);
                         tree.files.insert(
                             rel,
@@ -147,7 +152,7 @@ pub async fn walk<F: FnMut(ScanProgress)>(
                 }
             }
         }
-        on_progress(ScanProgress { dirs_scanned, files_found: tree.files.len() });
+        on_progress(ScanProgress { dirs_scanned, files_found: tree.files.len(), bytes_found });
     }
 
     Ok(tree)

@@ -474,6 +474,15 @@ async fn fs_for(
     Ok(fs_for_session(&session))
 }
 
+/// `fs_for` for other subsystems (e.g. the disk-usage scanner) that resolve a
+/// `RemoteFs` from a session id — same `local`-aware dispatch, exported.
+pub async fn fs_for_public(
+    session_id: &str,
+    state: &AppState,
+) -> Result<Box<dyn RemoteFs>, String> {
+    fs_for(session_id, state).await
+}
+
 pub fn fs_for_session(session: &Arc<Session>) -> Box<dyn RemoteFs> {
     match &**session {
         Session::Ssh(ssh) => Box::new(crate::remotefs::sftp::SftpFs::new(ssh.clone())),
