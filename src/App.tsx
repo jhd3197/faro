@@ -595,7 +595,7 @@ function DeepLinkListener() {
 /// Map a parsed deep link to editor seed values. `pair` links become a
 /// faro-agent profile; everything else a server profile of the named protocol.
 function deepLinkToPrefill(dl: DeepLink): Partial<ConnectionProfile> {
-  const known: Protocol[] = ["sftp", "ftp", "ftps", "s3", "azure", "gcs", "webdav", "http", "faro-agent"];
+  const known: Protocol[] = ["sftp", "ftp", "ftps", "s3", "azure", "gcs", "webdav", "http", "dropbox", "faro-agent"];
   const protocol: Protocol =
     dl.action === "pair"
       ? "faro-agent"

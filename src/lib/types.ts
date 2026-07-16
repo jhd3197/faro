@@ -15,6 +15,7 @@ export type Protocol =
   | "gcs"
   | "webdav"
   | "http"
+  | "dropbox"
   | "faro-agent";
 
 export interface ConnectionProfile {
@@ -53,6 +54,7 @@ export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {
   gcs: 443,
   webdav: 443,
   http: 443,
+  dropbox: 443,
   "faro-agent": 8722,
 };
 
@@ -65,6 +67,7 @@ export const PROTOCOL_LABEL: Record<Protocol, string> = {
   gcs: "GCS",
   webdav: "WebDAV",
   http: "HTTP",
+  dropbox: "Dropbox",
   "faro-agent": "Faro Agent",
 };
 

@@ -23,6 +23,7 @@ import {
   Cloud,
   Globe,
   Download,
+  Box,
   Eye,
   EyeOff,
   Wand2,
@@ -166,8 +167,16 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
   const isGcs = protocol === "gcs";
   const isWebdav = protocol === "webdav";
   const isHttp = protocol === "http";
+  const isDropbox = protocol === "dropbox";
   const isObject = isObjectProtocol(protocol);
   const isAgent = isAgentProtocol(protocol);
+
+  // Dropbox: OAuth authorization state. Editing an already-authorized profile
+  // (its account label is persisted) starts authorized.
+  const [dropboxAuthed, setDropboxAuthed] = useState<boolean>(
+    seed?.protocol === "dropbox" && !!seed?.account
+  );
+  const [dropboxAccount, setDropboxAccount] = useState<string>(seed?.account ?? "");
 
   /// Build the profile from the current form state. Shared by Save and by the
   /// pairing flow (which must persist the profile before it can pair by id).
@@ -192,9 +201,11 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
               ? `${bucket}@gcs`
               : isWebdav || isHttp
                 ? `${username ? `${username}@` : ""}${hostFromUrl(endpoint)}`
-                : isAgent
-                  ? `Agent @ ${host}`
-                  : `${username}@${host}`),
+                : isDropbox
+                  ? dropboxAccount || "Dropbox"
+                  : isAgent
+                    ? `Agent @ ${host}`
+                    : `${username}@${host}`),
       protocol,
       host: isObject
         ? endpoint ||
@@ -205,17 +216,19 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
               : "s3.amazonaws.com")
         : isWebdav || isHttp
           ? hostFromUrl(endpoint)
-          : host,
+          : isDropbox
+            ? "dropbox.com"
+            : host,
       port,
-      username: isAzure ? azureAccount : isAgent || isGcs ? "" : username,
-      auth: isAgent ? { kind: "password", password: "" } : auth,
+      username: isAzure ? azureAccount : isAgent || isGcs || isDropbox ? "" : username,
+      auth: isAgent || isDropbox ? { kind: "password", password: "" } : auth,
       defaultRemotePath: defaultRemotePath || undefined,
       color: profile?.color,
       autoConnect: autoConnect || undefined,
       bucket: isObject ? bucket : undefined,
       region: isS3 ? region : undefined,
       endpoint: isObject || isWebdav || isHttp ? endpoint || undefined : undefined,
-      account: isAzure ? azureAccount : undefined,
+      account: isAzure ? azureAccount : isDropbox ? dropboxAccount || undefined : undefined,
       agentKey: isAgent ? agentKey : undefined,
       group: group.trim() || undefined,
       sortOrder: profile?.sortOrder,
@@ -259,9 +272,11 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
           ? !!endpoint && !!password
           : isHttp
             ? !!endpoint
-            : isAgent
-              ? !!host && !!agentKey
-              : !!host && !!username;
+            : isDropbox
+              ? dropboxAuthed
+              : isAgent
+                ? !!host && !!agentKey
+                : !!host && !!username;
   // Name what's still required so a disabled Save isn't a dead end.
   const missing = (
     isS3
@@ -277,9 +292,11 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             ? [!endpoint && "server URL", !password && "password / token"]
             : isHttp
               ? [!endpoint && "URL"]
-              : isAgent
-                ? [!host && "host", !agentKey && "pairing"]
-                : [!host && "host", !username && "username"]
+              : isDropbox
+                ? [!dropboxAuthed && "Dropbox authorization"]
+                : isAgent
+                  ? [!host && "host", !agentKey && "pairing"]
+                  : [!host && "host", !username && "username"]
   ).filter(Boolean);
 
   return (
@@ -322,7 +339,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
 
         <Field label="Protocol">
           <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-bg-subtle p-1">
-            {(["sftp", "ftp", "ftps", "s3", "azure", "gcs", "webdav", "http", "faro-agent"] as Protocol[]).map((p) => (
+            {(["sftp", "ftp", "ftps", "s3", "azure", "gcs", "webdav", "http", "dropbox", "faro-agent"] as Protocol[]).map((p) => (
               <ProtocolButton
                 key={p}
                 active={protocol === p}
@@ -388,6 +405,21 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             setUsername={setUsername}
             password={password}
             setPassword={setPassword}
+          />
+        ) : isDropbox ? (
+          <DropboxSection
+            profileId={id}
+            authed={dropboxAuthed}
+            account={dropboxAccount}
+            onAuthorized={(label) => {
+              setDropboxAuthed(true);
+              setDropboxAccount(label);
+              if (!name) setName(label || "Dropbox");
+            }}
+            onReset={() => {
+              setDropboxAuthed(false);
+              setDropboxAccount("");
+            }}
           />
         ) : isAgent ? (
           <AgentSection
@@ -870,6 +902,77 @@ function AzureSection({
   );
 }
 
+/// Dropbox OAuth connect. Like agent pairing: authorizing runs a browser flow
+/// and stores tokens in the OS keychain keyed by the profile id, then the editor
+/// persists the profile. No password lives in Faro.
+function DropboxSection({
+  profileId,
+  authed,
+  account,
+  onAuthorized,
+  onReset,
+}: {
+  profileId: string;
+  authed: boolean;
+  account: string;
+  onAuthorized: (label: string) => void;
+  onReset: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  const authorize = async () => {
+    setBusy(true);
+    try {
+      const res = await ipc.dropboxAuthorize(profileId);
+      onAuthorized(res.accountLabel);
+      toast.success(
+        "Connected to Dropbox",
+        res.accountLabel ? `Authorized as ${res.accountLabel}` : undefined
+      );
+    } catch (e) {
+      toast.error("Dropbox authorization failed", String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <Hint>
+        Connect a Dropbox account. Authorizing opens your browser once; Faro
+        stores the refresh token in your OS keychain and never sees your Dropbox
+        password.
+      </Hint>
+
+      {authed ? (
+        <div className="mb-3 flex items-center justify-between rounded-md border border-success/30 bg-success/10 px-2.5 py-2">
+          <span className="flex items-center gap-1.5 text-xs text-text">
+            <Check size={13} className="text-success" />
+            Connected{account ? ` as ${account}` : ""}.
+          </span>
+          <button
+            type="button"
+            onClick={onReset}
+            className="text-[11px] text-text-dim underline hover:text-text"
+          >
+            Reconnect
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={authorize}
+          disabled={busy}
+          className="btn-accent mb-3 flex w-full items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {busy ? <Loader2 size={14} className="animate-spin" /> : <Box size={14} />}
+          {busy ? "Waiting for authorization…" : "Connect with Dropbox"}
+        </button>
+      )}
+    </>
+  );
+}
+
 function HttpSection({
   url,
   setUrl,
@@ -1254,6 +1357,8 @@ function protocolHint(p: Protocol): string {
       return "HTTP · :443";
     case "http":
       return "Read-only · :443";
+    case "dropbox":
+      return "OAuth · Cloud";
     case "faro-agent":
       return "Machine · :8722";
   }
@@ -1276,6 +1381,7 @@ function ProtocolButton({
   else if (label === "S3" || label === "Azure" || label === "GCS") Icon = Cloud;
   else if (label === "WebDAV") Icon = Globe;
   else if (label === "HTTP") Icon = Download;
+  else if (label === "Dropbox") Icon = Box;
   else if (label === "Faro Agent") Icon = MonitorSmartphone;
   return (
     <button

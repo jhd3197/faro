@@ -74,6 +74,12 @@ export const ipc = {
   pairAgent: (host: string, port: number, code: string) =>
     invoke<AgentPairResult>("pair_agent", { host, port, code }),
 
+  /** Run the interactive Dropbox OAuth flow for a profile (opens the browser,
+   *  catches the loopback redirect, stores tokens in the OS keychain). Resolves
+   *  with the authorized account label. The editor saves the profile on success. */
+  dropboxAuthorize: (profileId: string) =>
+    invoke<{ accountLabel: string }>("dropbox_authorize", { profileId }),
+
   // ---- Remote control: host THIS machine as a Faro Agent (Settings) ----
 
   /** Current state of the in-app agent host (enabled, running, policy, peers,

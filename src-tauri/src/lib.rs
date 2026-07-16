@@ -155,6 +155,7 @@ pub fn run() {
             commands::discover_agents,
             commands::agent_public_key,
             commands::pair_agent,
+            commands::dropbox_authorize,
             agent_host::agent_host_status,
             agent_host::agent_host_set_enabled,
             agent_host::agent_host_open_pairing,
