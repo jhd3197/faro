@@ -278,33 +278,126 @@ export interface EditErrorEvent {
   message: string;
 }
 
-export type S3Provider = "aws" | "r2" | "b2";
+export type S3Provider =
+  | "aws"
+  | "r2"
+  | "b2"
+  | "wasabi"
+  | "spaces"
+  | "minio"
+  | "storj"
+  | "hetzner"
+  | "scaleway"
+  | "oci"
+  | "ibm"
+  | "supabase"
+  | "generic";
 
 export interface S3ProviderPreset {
   label: string;
+  /** Short vendor sub-label under the button (e.g. "Amazon", "Cloudflare"). */
+  vendor: string;
   description: string;
   endpointHint: string; // displayed as placeholder
   defaultRegion: string;
 }
 
+// Curated S3-compatible presets. Each is purely a New-Connection convenience:
+// the backend (`session/object.rs`) treats every non-AWS endpoint the same —
+// path-style addressing, credentials from access-key/secret. Providers with a
+// per-account endpoint (R2, MinIO, Spaces, Hetzner, OCI, IBM, Supabase) show the
+// template as a placeholder; the user fills in their account/region/namespace.
 export const S3_PROVIDER_PRESETS: Record<S3Provider, S3ProviderPreset> = {
   aws: {
     label: "AWS S3",
+    vendor: "Amazon",
     description: "Native Amazon S3; endpoint derived from region.",
     endpointHint: "(leave blank — derived from region)",
     defaultRegion: "us-east-1",
   },
   r2: {
     label: "Cloudflare R2",
+    vendor: "Cloudflare",
     description: "S3-compatible. Region is always 'auto'.",
     endpointHint: "https://<account>.r2.cloudflarestorage.com",
     defaultRegion: "auto",
   },
   b2: {
     label: "Backblaze B2",
+    vendor: "Backblaze",
     description: "S3-compatible. Endpoint is per-bucket region.",
     endpointHint: "https://s3.us-west-002.backblazeb2.com",
     defaultRegion: "us-west-002",
+  },
+  wasabi: {
+    label: "Wasabi",
+    vendor: "Wasabi",
+    description: "S3-compatible hot storage. Endpoint is region-specific.",
+    endpointHint: "https://s3.us-east-1.wasabisys.com",
+    defaultRegion: "us-east-1",
+  },
+  spaces: {
+    label: "DO Spaces",
+    vendor: "DigitalOcean",
+    description: "DigitalOcean Spaces. Endpoint is the datacenter region.",
+    endpointHint: "https://nyc3.digitaloceanspaces.com",
+    defaultRegion: "nyc3",
+  },
+  minio: {
+    label: "MinIO",
+    vendor: "Self-hosted",
+    description: "Self-hosted MinIO. Point the endpoint at your server.",
+    endpointHint: "https://minio.example.com:9000",
+    defaultRegion: "us-east-1",
+  },
+  storj: {
+    label: "Storj",
+    vendor: "Storj DCS",
+    description: "Storj S3-compatible gateway. Region is ignored.",
+    endpointHint: "https://gateway.storjshare.io",
+    defaultRegion: "us-east-1",
+  },
+  hetzner: {
+    label: "Hetzner",
+    vendor: "Hetzner",
+    description: "Hetzner Object Storage. Endpoint is the location.",
+    endpointHint: "https://fsn1.your-objectstorage.com",
+    defaultRegion: "fsn1",
+  },
+  scaleway: {
+    label: "Scaleway",
+    vendor: "Scaleway",
+    description: "Scaleway Object Storage. Endpoint is region-specific.",
+    endpointHint: "https://s3.fr-par.scw.cloud",
+    defaultRegion: "fr-par",
+  },
+  oci: {
+    label: "Oracle OCI",
+    vendor: "Oracle",
+    description: "OCI Object Storage (S3 compat). Endpoint carries the namespace.",
+    endpointHint: "https://<namespace>.compat.objectstorage.us-ashburn-1.oraclecloud.com",
+    defaultRegion: "us-ashburn-1",
+  },
+  ibm: {
+    label: "IBM COS",
+    vendor: "IBM Cloud",
+    description: "IBM Cloud Object Storage (S3 compat). Endpoint is region-specific.",
+    endpointHint: "https://s3.us-south.cloud-object-storage.appdomain.cloud",
+    defaultRegion: "us-south",
+  },
+  supabase: {
+    label: "Supabase",
+    vendor: "Supabase",
+    description: "Supabase Storage S3 endpoint. Region matches the project.",
+    endpointHint: "https://<project>.supabase.co/storage/v1/s3",
+    defaultRegion: "us-east-1",
+  },
+  generic: {
+    label: "S3-compatible",
+    vendor: "Self-hosted",
+    description: "Any S3 API server (Ceph RGW, Garage, SeaweedFS, …).",
+    endpointHint: "https://s3.example.com",
+    defaultRegion: "us-east-1",
   },
 };
 

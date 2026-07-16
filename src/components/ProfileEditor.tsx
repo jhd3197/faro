@@ -52,7 +52,16 @@ function guessProvider(endpoint?: string): S3Provider {
   const e = endpoint.toLowerCase();
   if (e.includes("r2.cloudflarestorage.com")) return "r2";
   if (e.includes("backblazeb2.com")) return "b2";
-  return "aws";
+  if (e.includes("wasabisys.com")) return "wasabi";
+  if (e.includes("digitaloceanspaces.com")) return "spaces";
+  if (e.includes("storjshare.io")) return "storj";
+  if (e.includes("your-objectstorage.com")) return "hetzner";
+  if (e.includes("scw.cloud")) return "scaleway";
+  if (e.includes("oraclecloud.com")) return "oci";
+  if (e.includes("cloud-object-storage.appdomain.cloud")) return "ibm";
+  if (e.includes("supabase.co")) return "supabase";
+  // A bare endpoint we don't recognize is some self-hosted / niche S3 server.
+  return "generic";
 }
 
 export function ProfileEditor({ profile, prefill, onClose }: Props) {
@@ -817,7 +826,7 @@ function S3Section({
     <>
       <Field label="Provider">
         <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-bg-subtle p-1">
-          {(["aws", "r2", "b2"] as S3Provider[]).map((p) => {
+          {(Object.keys(S3_PROVIDER_PRESETS) as S3Provider[]).map((p) => {
             const data = S3_PROVIDER_PRESETS[p];
             return (
               <button
@@ -835,7 +844,7 @@ function S3Section({
                   <Cloud size={11} className={provider === p ? "text-accent" : ""} />
                   {data.label}
                 </span>
-                <span className="text-[10px] text-text-dim">{p === "aws" ? "Amazon" : p === "r2" ? "Cloudflare" : "Backblaze"}</span>
+                <span className="text-[10px] text-text-dim">{data.vendor}</span>
               </button>
             );
           })}
