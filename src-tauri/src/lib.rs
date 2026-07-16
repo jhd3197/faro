@@ -17,6 +17,7 @@ pub mod importers;
 mod known_hosts;
 pub mod profiles;
 pub mod remotefs;
+pub mod scan;
 pub mod session;
 pub mod sync;
 mod terminal;
