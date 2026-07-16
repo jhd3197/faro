@@ -27,6 +27,8 @@ interface DiskScanStoreState {
   filesFound: number;
   totalBytes: number;
   error: string | null;
+  /** Why the fast path fell back to the walk, when it did. */
+  note: string | null;
   /** Aggregated size tree (present once the scan is done). */
   tree: DuNode | null;
 
@@ -63,6 +65,7 @@ function fromSnapshot(s: ScanSnapshot) {
     filesFound: s.filesFound,
     totalBytes: s.totalBytes,
     error: s.error ?? null,
+    note: s.note ?? null,
     tree: s.tree ?? null,
   };
 }
@@ -90,6 +93,7 @@ export const useDiskScan = create<DiskScanStoreState>((set, get) => ({
   filesFound: 0,
   totalBytes: 0,
   error: null,
+  note: null,
   tree: null,
   crumbs: [],
   colorMode: "type",
@@ -128,6 +132,7 @@ export const useDiskScan = create<DiskScanStoreState>((set, get) => ({
       filesFound: 0,
       totalBytes: 0,
       error: null,
+      note: null,
       tree: null,
       crumbs: [],
       unlisten,
@@ -175,6 +180,7 @@ export const useDiskScan = create<DiskScanStoreState>((set, get) => ({
       state: null,
       tree: null,
       error: null,
+      note: null,
       crumbs: [],
       unlisten: null,
     });

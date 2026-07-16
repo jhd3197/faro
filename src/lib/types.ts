@@ -242,6 +242,8 @@ export interface ScanSnapshot {
   filesFound: number;
   totalBytes: number;
   error?: string;
+  /** Why the fast path fell back to the walk, when it did. */
+  note?: string;
   tree?: DuNode;
   startedAt: number;
 }

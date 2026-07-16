@@ -40,6 +40,7 @@ function DiskUsage() {
     filesFound,
     totalBytes,
     error,
+    note,
     tree,
     crumbs,
     colorMode,
@@ -104,13 +105,21 @@ function DiskUsage() {
           ))}
         </div>
 
-        {/* Strategy badge */}
+        {/* Strategy badge (+ fallback note) */}
         <span
           className="shrink-0 rounded-sm bg-bg-subtle px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-text-dim"
-          title={`Scan strategy: ${STRATEGY_LABEL[strategy]}`}
+          title={note ? note : `Scan strategy: ${STRATEGY_LABEL[strategy]}`}
         >
           {STRATEGY_LABEL[strategy]}
         </span>
+        {note && (
+          <span
+            className="hidden shrink-0 truncate text-[10px] text-text-dim lg:inline"
+            title={note}
+          >
+            {note}
+          </span>
+        )}
 
         <button
           onClick={() =>
