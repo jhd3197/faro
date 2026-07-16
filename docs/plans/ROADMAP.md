@@ -105,5 +105,5 @@ surface for those agents).
 5. **Track C Windows on-demand** and **Track B Phase 4 OAuth clouds** — the two
    large, later efforts.
 
-To execute Track A end-to-end in a fresh session, use the local `prompt.md`
-runbook at the repo root.
+To execute any of these tracks end-to-end in a fresh session, use the local
+`docs/plans/prompt.md` runbook — set its one plan-filename knob and paste it.
