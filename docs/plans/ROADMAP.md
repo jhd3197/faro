@@ -131,10 +131,11 @@ Reusable, parameterized, **AI-authorable** automations over the fleet, MCP-nativ
 (the AI composes/saves Skills, then runs them across servers). Builds on the
 bridge's existing saved-commands + `faro_exec` + approvals. Safety-gated. ⬜
 
-## Track J — Scoped connection sharing (Plan 10)
-Share a box read-only / path-jailed / time-boxed **without a login system**, by
-extending the agent's pairing + policy + revocation with scope + expiry. A
-browser-served Faro (code-server-style) is the deferred, login-requiring 10b. ⬜
+## Track J — Scoped connection sharing (Plan 10) — DEFERRED
+Share a box read-only / path-jailed / time-boxed. **Parked until a login/auth
+foundation exists** — the real use case (remote employee, link-based) needs auth
+regardless, so we hold the whole track rather than ship the LAN-only half. The
+scoped-grant model remains the permission backbone once login lands. 🅿️
 
 ## Near-term quick wins (small, high-value)
 - **Editable permissions dialog** — today Properties *shows* mode read-only; add

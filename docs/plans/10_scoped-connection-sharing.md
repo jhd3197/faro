@@ -1,5 +1,13 @@
 # Plan 10 — Scoped, time-boxed connection sharing
 
+> **Status: DEFERRED — blocked on a login/auth foundation.** The target use case
+> (share a box with a remote employee via a link, over the internet) needs
+> authentication regardless of delivery. Rather than build half of it, this is
+> parked until a login/auth system exists. When it lands, the scoped-grant
+> permission model below is still the right backbone — build a login first, then
+> resume here. (The LAN + Faro-installed slice, 10a, could ship without login,
+> but it doesn't cover the real scenario, so we're holding the whole track.)
+
 ## Context
 
 The goal: give a teammate access to **one server (or one path), for a limited
