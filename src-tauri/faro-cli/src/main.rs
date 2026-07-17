@@ -244,6 +244,24 @@ enum AgentCmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Diff two directory trees through the Agent Bridge — any two connected
+    /// servers (remote↔remote), or a server vs local. Read-only.
+    ///
+    /// Each side is `server:/path` (a connected server), `local:/path`, or a
+    /// plain path (local). By default files compare by size; `--hash` confirms
+    /// same-size files by content.
+    Diff {
+        /// Side A: `server:/path`, `local:/path`, or a local path.
+        a: String,
+        /// Side B: `server:/path`, `local:/path`, or a local path.
+        b: String,
+        /// Confirm same-size files by content hash (sha256).
+        #[arg(long)]
+        hash: bool,
+        /// Emit the raw JSON result.
+        #[arg(long)]
+        json: bool,
+    },
     /// Check a transfer started via `agent download` / `agent upload`.
     Transfer { transfer_id: String },
     /// Tail a remote log file for up to 30 seconds (SSH only).
@@ -1316,6 +1334,24 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             }
             Ok(())
         }
+        AgentCmd::Diff { a, b, hash, json } => {
+            let (server_a, path_a) = split_agent_diff_side(&a);
+            let (server_b, path_b) = split_agent_diff_side(&b);
+            let mut req = serde_json::json!({ "pathA": path_a, "pathB": path_b, "hash": hash });
+            if let Some(s) = server_a {
+                req["sessionA"] = serde_json::Value::String(s);
+            }
+            if let Some(s) = server_b {
+                req["sessionB"] = serde_json::Value::String(s);
+            }
+            let body = http_post(&ep, "/diff", req)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+            } else {
+                print_agent_diff(&body);
+            }
+            Ok(())
+        }
         AgentCmd::Transfer { transfer_id } => {
             let body = http_post(&ep, "/transfer", serde_json::json!({ "transferId": transfer_id }))?;
             println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
@@ -1426,6 +1462,81 @@ fn print_agent_entries(body: &serde_json::Value) {
             let size = e.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
             println!("{name}\t{}", fmt_bytes(size));
         }
+    }
+}
+
+/// Split a `agent diff` side into (server, path). `local:/x` and a plain path
+/// (or a `C:\…` drive) mean the local filesystem (server = None); `name:/x`
+/// targets a connected server. Mirrors the bridge, which treats an absent
+/// sessionA/B as local.
+fn split_agent_diff_side(raw: &str) -> (Option<String>, String) {
+    if let Some((name, path)) = raw.split_once(':') {
+        if name.eq_ignore_ascii_case("local") {
+            return (None, path.to_string());
+        }
+        // A Windows drive letter (`C:\…`) is a local path, not a server.
+        if name.len() == 1 && name.as_bytes()[0].is_ascii_alphabetic() {
+            return (None, raw.to_string());
+        }
+        return (Some(name.to_string()), path.to_string());
+    }
+    (None, raw.to_string())
+}
+
+/// Render the Agent Bridge `/diff` response (only differing entries are sent;
+/// the summary counts the rest).
+fn print_agent_diff(body: &serde_json::Value) {
+    let entries = body.get("entries").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    for e in &entries {
+        let rel = e.get("relative").and_then(|v| v.as_str()).unwrap_or("");
+        let class = e.get("class").and_then(|v| v.as_str()).unwrap_or("");
+        let a_size = e.get("aSize").and_then(|v| v.as_u64());
+        let b_size = e.get("bSize").and_then(|v| v.as_u64());
+        let (marker, detail) = match class {
+            "onlyInA" => ("\x1b[36mA only\x1b[0m", a_size.map(fmt_bytes).unwrap_or_default()),
+            "onlyInB" => ("\x1b[35mB only\x1b[0m", b_size.map(fmt_bytes).unwrap_or_default()),
+            "different" => {
+                let why = match e.get("reason").and_then(|v| v.as_str()) {
+                    Some("size") => format!(
+                        "size {} → {}",
+                        a_size.map(fmt_bytes).unwrap_or_default(),
+                        b_size.map(fmt_bytes).unwrap_or_default()
+                    ),
+                    Some("content") => "content".to_string(),
+                    _ => String::new(),
+                };
+                ("\x1b[33mdiffer\x1b[0m", why)
+            }
+            _ => ("?", String::new()),
+        };
+        let hash_note = if e.get("hashError").is_some() {
+            dim("  [hash unavailable]")
+        } else {
+            String::new()
+        };
+        if detail.is_empty() {
+            println!("{marker}  {rel}{hash_note}");
+        } else {
+            println!("{marker}  {rel}  {}{hash_note}", dim(&detail));
+        }
+    }
+    if let Some(s) = body.get("summary") {
+        let g = |k: &str| s.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        let hashed = body.get("hashed").and_then(|v| v.as_bool()).unwrap_or(false);
+        eprintln!(
+            "\n{}",
+            dim(&format!(
+                "{} only in A · {} only in B · {} differ · {} same{}",
+                g("onlyInA"),
+                g("onlyInB"),
+                g("different"),
+                g("same"),
+                if hashed { " (hashed)" } else { "" }
+            ))
+        );
+    }
+    if body.get("listTruncated").and_then(|v| v.as_bool()).unwrap_or(false) {
+        eprintln!("{}", warn("entry list truncated — use --json for the full result"));
     }
 }
 

@@ -131,7 +131,7 @@ pub struct BridgeStatus {
 pub struct ActivityEntry {
     pub id: String,
     pub session_id: String,
-    pub kind: String, // "exec" | "read" | "download" | "upload" | "upload_dir" | "sync" | "search" | "denied" | "error"
+    pub kind: String, // "exec" | "read" | "download" | "upload" | "upload_dir" | "sync" | "diff" | "search" | "denied" | "error"
     pub detail: String,
     pub ok: bool,
     pub at: i64, // unix millis
@@ -851,6 +851,7 @@ async fn route(app: &AppHandle, state: &Arc<BridgeState>, req: &Request) -> (u16
         ("POST", "/upload") => handle_upload(app, state, &req.body).await,
         ("POST", "/upload_dir") => handle_upload_dir(app, state, &req.body).await,
         ("POST", "/sync") => handle_sync(app, state, &req.body).await,
+        ("POST", "/diff") => handle_diff(app, state, &req.body).await,
         ("POST", "/search") => handle_search(app, state, &req.body).await,
         ("POST", "/read_batch") => handle_read_batch(app, state, &req.body).await,
         ("POST", "/glob") => handle_glob(app, state, &req.body).await,
@@ -1027,6 +1028,23 @@ async fn handle_sync(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> 
         app, state, &session_id, &local_dir, &remote_dir, direction, strategy, dry_run,
     )
     .await
+}
+
+async fn handle_diff(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path_a = body_str(&parsed, "pathA");
+    let path_b = body_str(&parsed, "pathB");
+    if path_a.is_empty() || path_b.is_empty() {
+        return (400, json!({"error": "pathA and pathB are required"}));
+    }
+    // An omitted / empty session means the local filesystem.
+    let side_a = parsed.get("sessionA").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let side_b = parsed.get("sessionB").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let hash = parsed.get("hash").and_then(|v| v.as_bool()).unwrap_or(false);
+    op_diff(app, state, side_a, &path_a, side_b, &path_b, hash).await
 }
 
 async fn handle_search(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
@@ -2667,6 +2685,193 @@ async fn op_sync(
     }
 }
 
+/// Cap on per-file diff entries returned to the agent. Differences beyond this
+/// are elided (`listTruncated`); the summary counts always reflect the whole tree.
+const DIFF_MAX_ENTRIES: usize = 500;
+
+/// One resolved diff side: `None` is the local filesystem; `Some` is a connected,
+/// opted-in server. Kept as `(id, name, session)` so the label, the gate, and the
+/// hashing read all share one lookup.
+type DiffSide = Option<(String, String, Arc<Session>)>;
+
+/// Resolve one side of a diff. Absent or the literal `"local"` → the local
+/// filesystem; anything else resolves to an enabled session (so a server that
+/// hasn't granted agent access simply won't match — same rule as every other tool).
+async fn resolve_diff_side(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_arg: Option<&str>,
+) -> Result<DiffSide, String> {
+    match session_arg {
+        None => Ok(None),
+        Some(s) if s.eq_ignore_ascii_case("local") => Ok(None),
+        Some(s) => {
+            let id = resolve_session(app, state, Some(s), SessionNeed::Any).await?;
+            let sess = app
+                .state::<AppState>()
+                .sessions
+                .get(&id)
+                .await
+                .ok_or_else(|| format!("session {id} went away"))?;
+            let name = sess.profile().name.clone();
+            Ok(Some((id, name, sess)))
+        }
+    }
+}
+
+fn diff_side_label(side: &DiffSide, path: &str) -> String {
+    match side {
+        None => format!("local:{path}"),
+        Some((_, name, _)) => format!("{name}:{path}"),
+    }
+}
+
+fn diff_side_fs(side: &DiffSide) -> Box<dyn crate::remotefs::RemoteFs> {
+    match side {
+        None => Box::new(crate::remotefs::local::LocalFs),
+        Some((_, _, sess)) => crate::commands::fs_for_session(sess),
+    }
+}
+
+/// Compare two directory trees across any two Faro backends — including
+/// remote↔remote — and return the classified differences (Plan 6). A side is a
+/// connected server (its session name/id) or the local filesystem (`session`
+/// absent / "local"); at least one side must be a server so there's an opted-in
+/// session to authorize against. Gated ONCE as a READ: the whole op only walks
+/// (and, with `hash`, reads) — it never mutates. `hash` confirms same-size files
+/// by content sha256 (server-side over SSH where possible). Same-class files are
+/// summarized but omitted from `entries` to keep the response focused.
+async fn op_diff(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    side_a_arg: Option<&str>,
+    path_a: &str,
+    side_b_arg: Option<&str>,
+    path_b: &str,
+    hash: bool,
+) -> (u16, Value) {
+    if path_a.is_empty() || path_b.is_empty() {
+        return (400, json!({"error": "pathA and pathB are required"}));
+    }
+    let side_a = match resolve_diff_side(app, state, side_a_arg).await {
+        Ok(v) => v,
+        Err(msg) => return (400, json!({ "error": msg })),
+    };
+    let side_b = match resolve_diff_side(app, state, side_b_arg).await {
+        Ok(v) => v,
+        Err(msg) => return (400, json!({ "error": msg })),
+    };
+
+    // Need a server side to authorize against — a purely local↔local diff has no
+    // session, and that's what `faro-cli diff` is for.
+    let gate_side = side_a.as_ref().or(side_b.as_ref());
+    let Some((gate_id, gate_name, _)) = gate_side else {
+        return (400, json!({"error": "faro_diff needs at least one connected server side (a local↔local diff has no session to authorize); use the `faro-cli diff` command for two local folders."}));
+    };
+    let gate_id = gate_id.clone();
+    let gate_name = gate_name.clone();
+
+    let label_a = diff_side_label(&side_a, path_a);
+    let label_b = diff_side_label(&side_b, path_b);
+    let summary_text = format!(
+        "Diff {label_a} ↔ {label_b}{}",
+        if hash { " (hashing content)" } else { "" }
+    );
+
+    // Walking (and hashing) both trees is a read; gate before ANY I/O so the
+    // listing itself is covered by the user's read policy.
+    if let Err(resp) = gate(
+        app,
+        state,
+        &gate_id,
+        &gate_name,
+        OpClass::Read,
+        "diff",
+        &summary_text,
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    let fs_a = diff_side_fs(&side_a);
+    let fs_b = diff_side_fs(&side_b);
+    let sess_a = side_a.as_ref().map(|(_, _, s)| s.as_ref());
+    let sess_b = side_b.as_ref().map(|(_, _, s)| s.as_ref());
+
+    let result = match crate::diff::diff(
+        fs_a.as_ref(),
+        path_a,
+        sess_a,
+        fs_b.as_ref(),
+        path_b,
+        sess_b,
+        hash,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            state
+                .log(
+                    app,
+                    activity("error", &gate_id, format!("diff {label_a} ↔ {label_b} — {e}"), false),
+                )
+                .await;
+            return (500, json!({"error": format!("{e:#}")}));
+        }
+    };
+
+    let s = &result.summary;
+    state
+        .log(
+            app,
+            activity(
+                "diff",
+                &gate_id,
+                format!(
+                    "diff {label_a} ↔ {label_b} — {} only in A, {} only in B, {} differ, {} same",
+                    s.only_in_a, s.only_in_b, s.different, s.same
+                ),
+                true,
+            ),
+        )
+        .await;
+
+    // Only the actual differences go in `entries` (same-class files are noise for
+    // an agent); the summary still counts them all.
+    let diffs: Vec<&crate::diff::DiffEntry> = result
+        .entries
+        .iter()
+        .filter(|e| e.class != crate::diff::DiffClass::Same)
+        .collect();
+    let list_truncated = diffs.len() > DIFF_MAX_ENTRIES;
+    let entries: Vec<Value> = diffs
+        .iter()
+        .take(DIFF_MAX_ENTRIES)
+        .filter_map(|e| serde_json::to_value(e).ok())
+        .collect();
+
+    (
+        200,
+        json!({
+            "rootA": result.root_a,
+            "rootB": result.root_b,
+            "hashed": result.hashed,
+            "summary": {
+                "onlyInA": s.only_in_a,
+                "onlyInB": s.only_in_b,
+                "different": s.different,
+                "same": s.same,
+                "total": s.total,
+            },
+            "entries": entries,
+            "listTruncated": list_truncated,
+        }),
+    )
+}
+
 pub(crate) async fn op_search(
     app: &AppHandle,
     state: &Arc<BridgeState>,
@@ -3221,6 +3426,22 @@ fn mcp_tools_list() -> Value {
                 }
             },
             {
+                "name": "faro_diff",
+                "description": "Compare two directory trees and get back the classified differences — which files are only on side A, only on side B, or present on both but differing. Works across ANY two of the user's connected backends, including remote↔remote (staging vs prod, two servers, two buckets), which a local diff tool can't do. Each side is a connected server (its name/id) plus a path, or the local filesystem (omit the session, or pass \"local\"); at least one side must be a server. By default files are compared by SIZE (cheap, no download); set hash=true to also confirm same-size files by content sha256 (server-side over SSH where possible, otherwise it reads the bytes — slower, so use it when a size match isn't conclusive). Read-only: it never changes anything, so it's gated as a read. Returns a summary (onlyInA/onlyInB/different/same counts) and the differing entries (same files are counted but omitted; the list is capped, see listTruncated). Use it to answer 'what's different between these two trees?' and then act (e.g. faro_sync the files that differ).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "sessionA": { "type": "string", "description": "Side A connection (name or id). Omit, or pass \"local\", for the local filesystem." },
+                        "pathA": { "type": "string", "description": "Directory path on side A." },
+                        "sessionB": { "type": "string", "description": "Side B connection (name or id). Omit, or pass \"local\", for the local filesystem." },
+                        "pathB": { "type": "string", "description": "Directory path on side B." },
+                        "hash": { "type": "boolean", "description": "Confirm same-size files by content hash (sha256). Default false (size only)." }
+                    },
+                    "required": ["pathA", "pathB"],
+                    "additionalProperties": false
+                }
+            },
+            {
                 "name": "faro_transfer_status",
                 "description": "Check whether a transfer (started via faro_download, faro_upload or faro_upload_dir) has finished. Returns status (queued|transferring|done|skipped|error|canceled), bytes transferred, and any error. Poll this after starting a transfer to confirm success.",
                 "inputSchema": {
@@ -3484,6 +3705,29 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 ),
                 Err(msg) => tool_error(&msg),
             }
+        }
+        "faro_diff" => {
+            let (Some(path_a), Some(path_b)) = (arg_str(&args, "pathA"), arg_str(&args, "pathB"))
+            else {
+                return tool_error("`pathA` and `pathB` are required");
+            };
+            // A missing / "local" session on a side means the local filesystem;
+            // op_diff resolves each side and gates against a server side.
+            let side_a = arg_str(&args, "sessionA");
+            let side_b = arg_str(&args, "sessionB");
+            let hash = args.get("hash").and_then(|v| v.as_bool()).unwrap_or(false);
+            mcp_wrap(
+                op_diff(
+                    app,
+                    state,
+                    side_a.as_deref(),
+                    &path_a,
+                    side_b.as_deref(),
+                    &path_b,
+                    hash,
+                )
+                .await,
+            )
         }
         "faro_transfer_status" => {
             let Some(transfer_id) = arg_str(&args, "transferId") else {
