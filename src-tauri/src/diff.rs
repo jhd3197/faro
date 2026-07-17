@@ -420,6 +420,390 @@ async fn hash_ftp(ftp: &Arc<FtpSession>, path: &str) -> Result<String> {
     .await
 }
 
+// ---------- GUI diff runner (Plan 6 Phase 4) ----------
+//
+// The two-tree GUI view drives its own cancellable walks (so it can stream
+// progress and stop mid-scan) and reuses the pure [`classify`] / [`hash_pass`] /
+// [`summarize`] halves above. Shaped exactly like `diskscan::ScanManager`: an
+// `Arc<DiffManager>` in `AppState`, one run per `Mutex<HashMap<id, …>>`, progress
+// over `diff://…` events, cancel via a shared [`CancelToken`], the result fetched
+// once on completion.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex as StdMutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use tauri::{AppHandle, Emitter, State};
+use tokio::sync::Mutex;
+use uuid::Uuid;
+
+use crate::scan::{CancelToken, ScanProgress};
+use crate::AppState;
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DiffRunState {
+    Comparing,
+    Done,
+    Error,
+    Canceled,
+}
+
+/// Which stage a running diff is in, for the progress banner.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DiffPhase {
+    WalkingA,
+    WalkingB,
+    Hashing,
+}
+
+/// A snapshot of a diff for the frontend: live counts while `Comparing`, the full
+/// [`DiffResult`] once `Done`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiffSnapshot {
+    pub id: String,
+    pub session_a: String,
+    pub path_a: String,
+    pub session_b: String,
+    pub path_b: String,
+    pub hashed: bool,
+    pub state: DiffRunState,
+    pub phase: DiffPhase,
+    pub files_a: usize,
+    pub files_b: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<DiffResult>,
+    pub started_at: i64,
+}
+
+/// The lightweight body streamed over `diff://progress`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiffProgressEvent {
+    id: String,
+    phase: DiffPhase,
+    files_a: usize,
+    files_b: usize,
+}
+
+enum DiffOutcome {
+    Running,
+    Done(DiffResult),
+    Error(String),
+    Canceled,
+}
+
+struct DiffRun {
+    id: String,
+    session_a: String,
+    path_a: String,
+    session_b: String,
+    path_b: String,
+    hashed: bool,
+    phase: StdMutex<DiffPhase>,
+    files_a: AtomicUsize,
+    files_b: AtomicUsize,
+    cancel: CancelToken,
+    started_at: i64,
+    outcome: StdMutex<DiffOutcome>,
+}
+
+impl DiffRun {
+    fn snapshot(&self) -> DiffSnapshot {
+        let (state, error, result) = match &*self.outcome.lock().unwrap() {
+            DiffOutcome::Running => (DiffRunState::Comparing, None, None),
+            DiffOutcome::Done(r) => (DiffRunState::Done, None, Some(r.clone())),
+            DiffOutcome::Error(e) => (DiffRunState::Error, Some(e.clone()), None),
+            DiffOutcome::Canceled => (DiffRunState::Canceled, None, None),
+        };
+        DiffSnapshot {
+            id: self.id.clone(),
+            session_a: self.session_a.clone(),
+            path_a: self.path_a.clone(),
+            session_b: self.session_b.clone(),
+            path_b: self.path_b.clone(),
+            hashed: self.hashed,
+            state,
+            phase: *self.phase.lock().unwrap(),
+            files_a: self.files_a.load(Ordering::Relaxed),
+            files_b: self.files_b.load(Ordering::Relaxed),
+            error,
+            result,
+            started_at: self.started_at,
+        }
+    }
+
+    fn set_phase(&self, p: DiffPhase) {
+        *self.phase.lock().unwrap() = p;
+    }
+}
+
+struct DiffHandle {
+    info: Arc<DiffRun>,
+    task: tauri::async_runtime::JoinHandle<()>,
+}
+
+pub struct DiffManager {
+    runs: Mutex<HashMap<String, DiffHandle>>,
+}
+
+impl Default for DiffManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn now_ts() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+impl DiffManager {
+    pub fn new() -> Self {
+        Self { runs: Mutex::new(HashMap::new()) }
+    }
+
+    /// Kick off a diff of two sides. Each side is a `RemoteFs` (for the walk) and
+    /// an optional live `Session` (for `--hash`; `None` = local). Returns the run
+    /// id immediately; the work streams `diff://progress` and settles on one of
+    /// `diff://done` / `diff://error` / `diff://canceled`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start(
+        self: &Arc<Self>,
+        session_a: String,
+        path_a: String,
+        fs_a: Box<dyn RemoteFs>,
+        sess_a: Option<Arc<Session>>,
+        session_b: String,
+        path_b: String,
+        fs_b: Box<dyn RemoteFs>,
+        sess_b: Option<Arc<Session>>,
+        hash: bool,
+        app: AppHandle,
+    ) -> String {
+        let id = Uuid::new_v4().to_string();
+        let info = Arc::new(DiffRun {
+            id: id.clone(),
+            session_a,
+            path_a: path_a.clone(),
+            session_b,
+            path_b: path_b.clone(),
+            hashed: hash,
+            phase: StdMutex::new(DiffPhase::WalkingA),
+            files_a: AtomicUsize::new(0),
+            files_b: AtomicUsize::new(0),
+            cancel: CancelToken::new(),
+            started_at: now_ts(),
+            outcome: StdMutex::new(DiffOutcome::Running),
+        });
+
+        let task_info = Arc::clone(&info);
+        let task = tauri::async_runtime::spawn(async move {
+            run_diff(task_info, fs_a, sess_a, fs_b, sess_b, hash, app).await;
+        });
+
+        self.runs.lock().await.insert(id.clone(), DiffHandle { info, task });
+        id
+    }
+
+    pub async fn snapshot(&self, id: &str) -> Option<DiffSnapshot> {
+        self.runs.lock().await.get(id).map(|h| h.info.snapshot())
+    }
+
+    pub async fn cancel(&self, id: &str) {
+        if let Some(h) = self.runs.lock().await.get(id) {
+            h.info.cancel.cancel();
+        }
+    }
+
+    /// Drop a finished (or abandoned) run — the view was closed.
+    pub async fn forget(&self, id: &str) {
+        if let Some(h) = self.runs.lock().await.remove(id) {
+            h.info.cancel.cancel();
+            h.task.abort();
+        }
+    }
+}
+
+fn emit_diff_progress(info: &DiffRun, app: &AppHandle) {
+    let _ = app.emit(
+        "diff://progress",
+        DiffProgressEvent {
+            id: info.id.clone(),
+            phase: *info.phase.lock().unwrap(),
+            files_a: info.files_a.load(Ordering::Relaxed),
+            files_b: info.files_b.load(Ordering::Relaxed),
+        },
+    );
+}
+
+/// Walk `root`, streaming file counts into `counter` and throttled progress
+/// events. Shares the shape of `diskscan::generic_walk`.
+async fn walk_side(
+    info: &Arc<DiffRun>,
+    fs: &dyn RemoteFs,
+    root: &str,
+    counter: fn(&DiffRun) -> &AtomicUsize,
+    app: &AppHandle,
+) -> Result<crate::scan::ScanTree> {
+    let opts = ScanOptions {
+        concurrency: crate::scan::DEFAULT_CONCURRENCY,
+        cancel: info.cancel.clone(),
+    };
+    let mut last_emit = Instant::now();
+    let ev_info = Arc::clone(info);
+    let ev_app = app.clone();
+    let on_progress = move |p: ScanProgress| {
+        counter(&ev_info).store(p.files_found, Ordering::Relaxed);
+        if last_emit.elapsed() >= Duration::from_millis(100) {
+            emit_diff_progress(&ev_info, &ev_app);
+            last_emit = Instant::now();
+        }
+    };
+    scan::walk(fs, root, &opts, on_progress).await
+}
+
+async fn run_diff(
+    info: Arc<DiffRun>,
+    fs_a: Box<dyn RemoteFs>,
+    sess_a: Option<Arc<Session>>,
+    fs_b: Box<dyn RemoteFs>,
+    sess_b: Option<Arc<Session>>,
+    hash: bool,
+    app: AppHandle,
+) {
+    // Walk both sides (A then B), each cancellable.
+    info.set_phase(DiffPhase::WalkingA);
+    emit_diff_progress(&info, &app);
+    let tree_a = match walk_side(&info, fs_a.as_ref(), &info.path_a, |r| &r.files_a, &app).await {
+        Ok(t) => t,
+        Err(e) => return settle_error(&info, &app, format!("walking side A: {e:#}")),
+    };
+    if info.cancel.is_cancelled() {
+        return settle_canceled(&info, &app);
+    }
+
+    info.set_phase(DiffPhase::WalkingB);
+    emit_diff_progress(&info, &app);
+    let tree_b = match walk_side(&info, fs_b.as_ref(), &info.path_b, |r| &r.files_b, &app).await {
+        Ok(t) => t,
+        Err(e) => return settle_error(&info, &app, format!("walking side B: {e:#}")),
+    };
+    if info.cancel.is_cancelled() {
+        return settle_canceled(&info, &app);
+    }
+
+    let mut entries = classify(&tree_a, &tree_b);
+    if hash {
+        info.set_phase(DiffPhase::Hashing);
+        emit_diff_progress(&info, &app);
+        hash_pass(&mut entries, &tree_a, &tree_b, sess_a.as_deref(), sess_b.as_deref()).await;
+        if info.cancel.is_cancelled() {
+            return settle_canceled(&info, &app);
+        }
+    }
+
+    let summary = summarize(&entries);
+    let result = DiffResult {
+        root_a: info.path_a.clone(),
+        root_b: info.path_b.clone(),
+        hashed: hash,
+        summary,
+        entries,
+    };
+    *info.outcome.lock().unwrap() = DiffOutcome::Done(result);
+    let _ = app.emit("diff://done", info.snapshot());
+}
+
+fn settle_error(info: &Arc<DiffRun>, app: &AppHandle, msg: String) {
+    *info.outcome.lock().unwrap() = DiffOutcome::Error(msg);
+    let _ = app.emit("diff://error", info.snapshot());
+}
+
+fn settle_canceled(info: &Arc<DiffRun>, app: &AppHandle) {
+    *info.outcome.lock().unwrap() = DiffOutcome::Canceled;
+    let _ = app.emit("diff://canceled", info.snapshot());
+}
+
+/// Resolve a session id to a `RemoteFs` + optional live `Session` (the local
+/// sentinel yields `LocalFs` and no session, so `--hash` reads the local disk).
+async fn resolve_diff_side(
+    session_id: &str,
+    state: &AppState,
+) -> Result<(Box<dyn RemoteFs>, Option<Arc<Session>>), String> {
+    if session_id == crate::commands::LOCAL_SESSION {
+        return Ok((Box::new(crate::remotefs::local::LocalFs), None));
+    }
+    let sess = state
+        .sessions
+        .get(session_id)
+        .await
+        .ok_or_else(|| format!("session {session_id} not found"))?;
+    Ok((crate::commands::fs_for_session(&sess), Some(sess)))
+}
+
+/// Start a two-tree diff. `session_a`/`session_b` are session ids (or the local
+/// sentinel). Returns the run id; the frontend then listens for `diff://…` and
+/// fetches the result on `done`.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn diff_start(
+    session_a: String,
+    path_a: String,
+    session_b: String,
+    path_b: String,
+    hash: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let (fs_a, sess_a) = resolve_diff_side(&session_a, &state).await?;
+    let (fs_b, sess_b) = resolve_diff_side(&session_b, &state).await?;
+    let mgr = Arc::clone(&state.diff);
+    Ok(mgr
+        .start(
+            session_a, path_a, fs_a, sess_a, session_b, path_b, fs_b, sess_b, hash, app,
+        )
+        .await)
+}
+
+#[tauri::command]
+pub async fn diff_status(diff_id: String, state: State<'_, AppState>) -> Result<DiffSnapshot, String> {
+    state
+        .diff
+        .snapshot(&diff_id)
+        .await
+        .ok_or_else(|| format!("diff {diff_id} not found"))
+}
+
+/// Full snapshot including the `result` (present once the diff is done).
+#[tauri::command]
+pub async fn diff_result(diff_id: String, state: State<'_, AppState>) -> Result<DiffSnapshot, String> {
+    state
+        .diff
+        .snapshot(&diff_id)
+        .await
+        .ok_or_else(|| format!("diff {diff_id} not found"))
+}
+
+#[tauri::command]
+pub async fn diff_cancel(diff_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.diff.cancel(&diff_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn diff_forget(diff_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.diff.forget(&diff_id).await;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

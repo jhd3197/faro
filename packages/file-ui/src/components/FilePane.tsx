@@ -15,6 +15,7 @@ import {
   FileArchive,
   TerminalSquare,
   PieChart,
+  GitCompareArrows,
   Info,
   Search,
   X,
@@ -580,6 +581,19 @@ export function FilePane({
             sessionId &&
             fs
               .analyzeDiskUsage!(sessionId, single.path)
+              .catch((e) => setError(String(e))),
+        });
+      }
+      // Compare this folder against another tree (Meld-style side-by-side diff).
+      // Works on every backend, including remote↔remote.
+      if (single.kind === "directory" && fs.compareDirectory) {
+        items.push({
+          label: "Compare with…",
+          icon: <GitCompareArrows size={12} />,
+          onClick: () =>
+            sessionId &&
+            fs
+              .compareDirectory!(sessionId, single.path)
               .catch((e) => setError(String(e))),
         });
       }

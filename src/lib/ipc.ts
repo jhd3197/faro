@@ -37,6 +37,8 @@ import type {
   PairView,
   ScanSnapshot,
   DiskScanProgress,
+  DiffSnapshot,
+  DiffProgress,
 } from "./types";
 
 // Typed wrappers around the Tauri command surface. The string names must match
@@ -330,6 +332,26 @@ export const ipc = {
   /** Drop a finished scan from the backend (tab closed). */
   diskScanForget: (scanId: string) =>
     invoke<void>("diskscan_forget", { scanId }),
+
+  /** Start a two-tree directory diff; returns a diff id. Each side is a session
+   *  id (or LOCAL_SESSION) + a path. `hash` confirms same-size files by content. */
+  diffStart: (
+    sessionA: SessionId,
+    pathA: string,
+    sessionB: SessionId,
+    pathB: string,
+    hash: boolean
+  ) =>
+    invoke<string>("diff_start", { sessionA, pathA, sessionB, pathB, hash }),
+  /** Lightweight status (live counts while comparing). */
+  diffStatus: (diffId: string) =>
+    invoke<DiffSnapshot>("diff_status", { diffId }),
+  /** Full snapshot including the result (present once done). */
+  diffResult: (diffId: string) =>
+    invoke<DiffSnapshot>("diff_result", { diffId }),
+  diffCancel: (diffId: string) => invoke<void>("diff_cancel", { diffId }),
+  /** Drop a finished diff from the backend (view closed). */
+  diffForget: (diffId: string) => invoke<void>("diff_forget", { diffId }),
 };
 
 export async function onEditSaved(
@@ -439,6 +461,25 @@ export async function onDiskScanEvent(
     listen<ScanSnapshot>("diskscan://canceled", (e) =>
       cb("canceled", e.payload)
     ),
+  ]);
+  return () => {
+    unsubs.forEach((u) => u());
+  };
+}
+
+/** Directory-diff lifecycle. `progress` carries live file counts + phase; the
+ *  terminal events (`done`/`error`/`canceled`) carry a full DiffSnapshot. */
+export async function onDiffEvent(
+  cb: (
+    kind: "progress" | "done" | "error" | "canceled",
+    payload: DiffProgress | DiffSnapshot
+  ) => void
+): Promise<UnlistenFn> {
+  const unsubs = await Promise.all([
+    listen<DiffProgress>("diff://progress", (e) => cb("progress", e.payload)),
+    listen<DiffSnapshot>("diff://done", (e) => cb("done", e.payload)),
+    listen<DiffSnapshot>("diff://error", (e) => cb("error", e.payload)),
+    listen<DiffSnapshot>("diff://canceled", (e) => cb("canceled", e.payload)),
   ]);
   return () => {
     unsubs.forEach((u) => u());

@@ -284,6 +284,70 @@ export interface DiskScanProgress {
   strategy: ScanStrategy;
 }
 
+// ---- Directory Diff (mirrors src-tauri/src/diff.rs) ----
+
+export type DiffClass = "onlyInA" | "onlyInB" | "different" | "same";
+/** Why a both-present file was classified "different". */
+export type DiffReason = "size" | "content";
+export type DiffRunState = "comparing" | "done" | "error" | "canceled";
+export type DiffPhase = "walkingA" | "walkingB" | "hashing";
+
+/** One path in the diff, with whichever side(s) it appears on. */
+export interface DiffEntry {
+  relative: string;
+  class: DiffClass;
+  reason?: DiffReason;
+  aPath?: string;
+  aSize?: number;
+  aModified?: number;
+  bPath?: string;
+  bSize?: number;
+  bModified?: number;
+  /** Set when `--hash` couldn't hash a side; the size classification stands. */
+  hashError?: string;
+}
+
+export interface DiffSummary {
+  onlyInA: number;
+  onlyInB: number;
+  different: number;
+  same: number;
+  total: number;
+}
+
+export interface DiffResult {
+  rootA: string;
+  rootB: string;
+  hashed: boolean;
+  summary: DiffSummary;
+  entries: DiffEntry[];
+}
+
+/** A diff snapshot: live counts while comparing, the `result` once done. */
+export interface DiffSnapshot {
+  id: string;
+  sessionA: string;
+  pathA: string;
+  sessionB: string;
+  pathB: string;
+  hashed: boolean;
+  state: DiffRunState;
+  phase: DiffPhase;
+  filesA: number;
+  filesB: number;
+  error?: string;
+  result?: DiffResult;
+  startedAt: number;
+}
+
+/** The lightweight `diff://progress` event body. */
+export interface DiffProgress {
+  id: string;
+  phase: DiffPhase;
+  filesA: number;
+  filesB: number;
+}
+
 // ---- Edit-in-place ----
 
 export interface EditStartedEvent {

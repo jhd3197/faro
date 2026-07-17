@@ -37,6 +37,8 @@ pub struct AppState {
     pub foldersync: Arc<foldersync::FolderSync>,
     /// Running disk-usage scans (Plan 4). Ephemeral — not persisted.
     pub diskscan: Arc<diskscan::ScanManager>,
+    /// Running directory diffs (Plan 6). Ephemeral — not persisted.
+    pub diff: Arc<diff::DiffManager>,
     /// Shared `faro.db` — the per-connection index (sync_state today; scan/search
     /// caches later). See `db.rs`.
     pub db: Arc<db::Db>,
@@ -97,6 +99,7 @@ pub fn run() {
                         .expect("failed to initialise folder sync settings"),
                 ),
                 diskscan: Arc::new(diskscan::ScanManager::new()),
+                diff: Arc::new(diff::DiffManager::new()),
                 db,
             };
             app.manage(state);
@@ -176,6 +179,11 @@ pub fn run() {
             diskscan::diskscan_tree,
             diskscan::diskscan_cancel,
             diskscan::diskscan_forget,
+            diff::diff_start,
+            diff::diff_status,
+            diff::diff_result,
+            diff::diff_cancel,
+            diff::diff_forget,
             commands::list_agent_jobs,
             commands::kill_agent_job,
             commands::respond_to_host_prompt,
