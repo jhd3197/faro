@@ -1198,6 +1198,9 @@ async fn cmd_profiles_show(store: &ProfileStore, name: &str) -> Result<()> {
 struct Endpoint {
     url: String,
     token: String,
+    /// The running Faro app's version, published in the discovery file. Used to
+    /// warn when this CLI binary is older than the app (Plan 10 Phase 0a).
+    app_version: Option<String>,
 }
 
 /// Read the bridge URL + token from Faro's discovery file (same data dir the
@@ -1222,7 +1225,55 @@ fn read_endpoint() -> Result<Endpoint> {
         .and_then(|x| x.as_str())
         .ok_or_else(|| anyhow!("agent-endpoint.json is missing `token`"))?
         .to_string();
-    Ok(Endpoint { url, token })
+    let app_version = v
+        .get("version")
+        .and_then(|x| x.as_str())
+        .map(String::from);
+    Ok(Endpoint { url, token, app_version })
+}
+
+/// This CLI binary's build version.
+fn cli_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// Parse a `MAJOR.MINOR.PATCH` version into a comparable tuple, ignoring any
+/// pre-release/build metadata (`-rc1`, `+meta`). Returns None if it doesn't look
+/// like a semver, so an unparseable value simply suppresses the staleness check
+/// rather than firing a bogus warning.
+fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
+    let core = s.trim().split(['-', '+']).next().unwrap_or(s);
+    let mut it = core.split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next().unwrap_or("0").parse().ok()?;
+    let patch = it.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor, patch))
+}
+
+/// Print a one-line stderr warning when this CLI is OLDER than the running Faro
+/// app (Plan 10 Phase 0a). The app and `faro-cli` ship as separate downloads, so
+/// the CLI silently lags after an app update — this turns a cryptic
+/// `unexpected argument '--flag'` into a clear "your CLI is stale." Best-effort:
+/// if either version is absent or unparseable, or the CLI is same/newer, it says
+/// nothing.
+fn warn_if_stale(ep: &Endpoint) {
+    let Some(app) = ep.app_version.as_deref().and_then(parse_semver) else {
+        return;
+    };
+    let Some(cli) = parse_semver(cli_version()) else {
+        return;
+    };
+    if cli < app {
+        eprintln!(
+            "{}",
+            warn(&format!(
+                "faro-cli v{} is older than the running Faro app v{}; some commands/flags \
+                 may be missing — update with `faro-cli self-update` or from Faro → Settings.",
+                cli_version(),
+                ep.app_version.as_deref().unwrap_or("?"),
+            ))
+        );
+    }
 }
 
 /// POST a JSON body to a bridge route. The 180s timeout comfortably exceeds the
@@ -1323,6 +1374,7 @@ fn resolve_server(ep: &Endpoint, name: &str) -> Result<String> {
 
 fn cmd_agent(action: AgentCmd) -> Result<()> {
     let ep = read_endpoint()?;
+    warn_if_stale(&ep);
     match action {
         AgentCmd::Context => {
             let body = http_get(&ep, "/context")?;
@@ -1710,6 +1762,7 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
 
 fn cmd_skill(action: SkillCmd) -> Result<()> {
     let ep = read_endpoint()?;
+    warn_if_stale(&ep);
     match action {
         SkillCmd::List { json } => {
             let body = http_get(&ep, "/skills")?;
@@ -2245,5 +2298,34 @@ fn fmt_bytes(n: u64) -> String {
         format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
     } else {
         format!("{:.2} GB", n as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_semver;
+
+    #[test]
+    fn semver_parses_and_orders() {
+        assert_eq!(parse_semver("1.3.19"), Some((1, 3, 19)));
+        assert_eq!(parse_semver("1.4.0"), Some((1, 4, 0)));
+        // pre-release / build metadata is ignored down to the core triple.
+        assert_eq!(parse_semver("2.0.0-rc1"), Some((2, 0, 0)));
+        assert_eq!(parse_semver("2.0.0+build.7"), Some((2, 0, 0)));
+        // short forms default missing components to 0.
+        assert_eq!(parse_semver("3"), Some((3, 0, 0)));
+        assert_eq!(parse_semver("3.2"), Some((3, 2, 0)));
+        // garbage suppresses the check rather than firing a bogus warning.
+        assert_eq!(parse_semver("nightly"), None);
+    }
+
+    #[test]
+    fn stale_when_cli_older_than_app() {
+        // The staleness warning fires iff cli < app (Plan 10 Phase 0a).
+        assert!(parse_semver("1.3.10") < parse_semver("1.3.19"));
+        assert!(parse_semver("1.2.99") < parse_semver("1.3.0"));
+        // Same or newer is NOT stale.
+        assert!(!(parse_semver("1.3.19") < parse_semver("1.3.19")));
+        assert!(!(parse_semver("1.4.0") < parse_semver("1.3.19")));
     }
 }
