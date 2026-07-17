@@ -96,6 +96,86 @@ pub struct SavedCommand {
     pub description: String,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+/// A saved, AI-authorable Skill (Plan 8): a named, parameterized, multi-step
+/// workflow the agent (or the user) can run across one or many connected servers.
+/// It's the next abstraction above a [`SavedCommand`] — where a saved command is
+/// one pre-approved string runnable by name, a Skill is a sequence of shell steps
+/// with `${param}` placeholders, a default target selector, and a proposal gate.
+///
+/// The store is deliberately linear (no branching/looping — see Plan 8 Risks):
+/// each step is a shell command template run on every resolved target, reusing
+/// the bridge's exec + approval machinery. Steps run in order per target; a
+/// failing step halts that target's remaining steps when `stop_on_error` is set.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Skill {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub params: Vec<SkillParam>,
+    pub steps: Vec<SkillStep>,
+    /// Default set of servers to run on; a run call may override it.
+    pub targets: TargetSelector,
+    /// `approved` = runnable; `proposed` = AI-authored, awaiting one human
+    /// approval in Faro's Skills panel before it can run.
+    pub status: SkillStatus,
+    /// Provenance for the UI: `"user"` (hand-authored, born approved) or `"ai"`
+    /// (proposed over the bridge).
+    pub created_by: String,
+    /// Halt a target's remaining steps after the first failing step. Default true.
+    #[serde(default = "default_true")]
+    pub stop_on_error: bool,
+}
+
+/// One named input a Skill's steps interpolate via `${name}`. Missing required
+/// params fail the run before anything executes; optional params fall back to
+/// `default` (or the empty string).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SkillParam {
+    pub name: String,
+    pub description: String,
+    pub required: bool,
+    pub default: Option<String>,
+}
+
+/// One linear step of a Skill: a shell command template. `${param}` placeholders
+/// are substituted at run time before the command reaches the exec path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SkillStep {
+    /// Optional label shown in the console / audit log; falls back to the command.
+    pub name: String,
+    pub command: String,
+}
+
+/// Which connected servers a Skill runs on. `all` = every enabled, exec-capable
+/// session (SSH or Faro Agent); otherwise the explicit `sessions` list (names or
+/// ids). A run call can override this selector entirely.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TargetSelector {
+    pub all: bool,
+    pub sessions: Vec<String>,
+}
+
+/// A Skill's lifecycle state. AI-authored Skills land as `Proposed` and can't run
+/// until a human approves them in the Skills panel — so the agent can't
+/// self-grant a destructive fleet workflow (Plan 8 Safety).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillStatus {
+    /// Runnable. Hand-authored Skills and approved proposals.
+    #[default]
+    Approved,
+    /// AI-authored, awaiting one human approval before it can run.
+    Proposed,
+}
+
 /// On-disk shape of `bridge.json`. Session ids are per-connect UUIDs, so the
 /// allow-list is keyed by *profile* id and re-applied when a session connects.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -109,6 +189,13 @@ struct PersistedConfig {
     /// User-defined pre-approved commands the agent can run by name.
     #[serde(default)]
     saved_commands: Vec<SavedCommand>,
+    /// Saved Skills (Plan 8).
+    #[serde(default)]
+    skills: Vec<Skill>,
+    /// One-time flag: existing saved commands have been seeded as single-step
+    /// Skills. Prevents re-seeding on every launch.
+    #[serde(default)]
+    skills_migrated: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -184,6 +271,10 @@ pub struct BridgeState {
     policy: Mutex<ApprovalPolicy>,
     /// User-defined pre-approved commands (global name -> command list).
     saved_commands: Mutex<Vec<SavedCommand>>,
+    /// Saved Skills (Plan 8): AI-authorable, multi-step, fleet-targetable.
+    skills: Mutex<Vec<Skill>>,
+    /// Whether saved commands have been seeded into Skills (one-time).
+    skills_migrated: Mutex<bool>,
     approvals: Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>,
     activity: Mutex<Vec<ActivityEntry>>,
     config_path: Option<PathBuf>,
@@ -332,7 +423,7 @@ impl BridgeState {
             .context("resolving app_data_dir")?;
         std::fs::create_dir_all(&dir).ok();
         let path = dir.join("bridge.json");
-        let cfg: PersistedConfig = if path.exists() {
+        let mut cfg: PersistedConfig = if path.exists() {
             std::fs::read(&path)
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok())
@@ -340,11 +431,26 @@ impl BridgeState {
         } else {
             PersistedConfig::default()
         };
+        // One-time migration: seed each existing saved command as a single-step,
+        // approved Skill so the shipped saved-commands survive into the Skills
+        // store. Non-destructive — the saved commands themselves are left intact
+        // for `faro_run_command`. Guarded so it runs at most once.
+        if !cfg.skills_migrated {
+            for c in &cfg.saved_commands {
+                cfg.skills.push(migrate_command_to_skill(c));
+            }
+            cfg.skills_migrated = true;
+            if let Ok(bytes) = serde_json::to_vec_pretty(&cfg) {
+                let _ = std::fs::write(&path, bytes);
+            }
+        }
         Ok(Self {
             enabled_master: Mutex::new(cfg.enabled),
             enabled_profiles: Mutex::new(cfg.enabled_profiles.into_iter().collect()),
             policy: Mutex::new(cfg.policy),
             saved_commands: Mutex::new(cfg.saved_commands),
+            skills: Mutex::new(cfg.skills),
+            skills_migrated: Mutex::new(cfg.skills_migrated),
             config_path: Some(path),
             ..Default::default()
         })
@@ -359,6 +465,8 @@ impl BridgeState {
             enabled_profiles: self.enabled_profiles.lock().await.iter().cloned().collect(),
             policy: *self.policy.lock().await,
             saved_commands: self.saved_commands.lock().await.clone(),
+            skills: self.skills.lock().await.clone(),
+            skills_migrated: *self.skills_migrated.lock().await,
         };
         if let Ok(bytes) = serde_json::to_vec_pretty(&cfg) {
             let _ = std::fs::write(path, bytes);
@@ -637,6 +745,100 @@ impl BridgeState {
             .find(|c| c.name.trim().to_lowercase() == want)
             .cloned()
     }
+
+    // ---- Skills (Plan 8): parameterized, fleet-targetable, AI-authorable) ----
+
+    pub async fn list_skills(&self) -> Vec<Skill> {
+        self.skills.lock().await.clone()
+    }
+
+    /// Insert or update a Skill (keyed by id; a blank id mints a uuid). Local-UI
+    /// only (a Tauri command) — the bridge path is [`Self::propose_skill`], which
+    /// forces a proposal. A hand-authored Skill is born `Approved`; editing one
+    /// preserves whatever status it already had unless the caller changed it.
+    pub async fn upsert_skill(&self, mut skill: Skill) -> Vec<Skill> {
+        if skill.id.trim().is_empty() {
+            skill.id = Uuid::new_v4().to_string();
+        }
+        if skill.created_by.trim().is_empty() {
+            skill.created_by = "user".into();
+        }
+        {
+            let mut list = self.skills.lock().await;
+            if let Some(existing) = list.iter_mut().find(|s| s.id == skill.id) {
+                *existing = skill;
+            } else {
+                list.push(skill);
+            }
+        }
+        self.persist().await;
+        self.skills.lock().await.clone()
+    }
+
+    pub async fn delete_skill(&self, id: &str) -> Vec<Skill> {
+        self.skills.lock().await.retain(|s| s.id != id);
+        self.persist().await;
+        self.skills.lock().await.clone()
+    }
+
+    /// Approve a proposed Skill (local-UI only) — the one human gate that makes an
+    /// AI-authored Skill runnable.
+    pub async fn approve_skill(&self, id: &str) -> Vec<Skill> {
+        {
+            let mut list = self.skills.lock().await;
+            if let Some(s) = list.iter_mut().find(|s| s.id == id) {
+                s.status = SkillStatus::Approved;
+            }
+        }
+        self.persist().await;
+        self.skills.lock().await.clone()
+    }
+
+    /// Save an AI-authored Skill over the bridge. Always forced to `Proposed` /
+    /// `created_by = "ai"` with a fresh id, so the agent can neither approve its
+    /// own workflow nor overwrite an existing (approved) Skill. Returns the saved
+    /// proposal.
+    pub async fn propose_skill(&self, mut skill: Skill) -> Skill {
+        skill.id = Uuid::new_v4().to_string();
+        skill.status = SkillStatus::Proposed;
+        skill.created_by = "ai".into();
+        self.skills.lock().await.push(skill.clone());
+        self.persist().await;
+        skill
+    }
+
+    /// Find a Skill by id or name (case-insensitive name, first match).
+    async fn find_skill(&self, name_or_id: &str) -> Option<Skill> {
+        let want = name_or_id.trim().to_lowercase();
+        self.skills
+            .lock()
+            .await
+            .iter()
+            .find(|s| s.id == name_or_id || s.name.trim().to_lowercase() == want)
+            .cloned()
+    }
+}
+
+/// Seed a saved command as a single-step, approved Skill (one-time migration).
+fn migrate_command_to_skill(c: &SavedCommand) -> Skill {
+    Skill {
+        id: Uuid::new_v4().to_string(),
+        name: c.name.clone(),
+        description: if c.description.trim().is_empty() {
+            "Migrated from a saved command.".to_string()
+        } else {
+            c.description.clone()
+        },
+        params: Vec::new(),
+        steps: vec![SkillStep {
+            name: String::new(),
+            command: c.command.clone(),
+        }],
+        targets: TargetSelector::default(),
+        status: SkillStatus::Approved,
+        created_by: "user".into(),
+        stop_on_error: true,
+    }
 }
 
 /// Opt-in check → policy/approval gate. On success the caller proceeds; on
@@ -859,6 +1061,8 @@ async fn route(app: &AppHandle, state: &Arc<BridgeState>, req: &Request) -> (u16
         ("POST", "/history") => handle_history(app, state, &req.body).await,
         ("GET", "/commands") => (200, json!({ "commands": state.list_commands().await })),
         ("POST", "/run") => handle_run(app, state, &req.body).await,
+        ("GET", "/skills") => (200, json!({ "skills": state.list_skills().await })),
+        ("POST", "/skill_run") => handle_skill_run(app, state, &req.body).await,
         _ => (404, json!({"error": "not found"})),
     }
 }
@@ -918,6 +1122,52 @@ async fn handle_run(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (
     let dry_run = parsed.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
     let timeout_ms = parsed.get("timeoutMs").and_then(|v| v.as_u64());
     op_run_command(app, state, &session_id, &name, dry_run, timeout_ms).await
+}
+
+/// Extract a `{ "k": "v", ... }` object into a String map, coercing scalar values
+/// (number/bool) to their string form. Shared by the `/skill_run` route and the
+/// `faro_run_skill` MCP tool.
+fn params_from_value(v: Option<&Value>) -> HashMap<String, String> {
+    v.and_then(|x| x.as_object())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, val)| {
+                    let s = match val {
+                        Value::String(s) => s.clone(),
+                        Value::Number(n) => n.to_string(),
+                        Value::Bool(b) => b.to_string(),
+                        _ => return None,
+                    };
+                    Some((k.clone(), s))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Extract a JSON string array (e.g. a `targets` list). `None` means "omitted"
+/// (fall back to the skill's default selector).
+fn str_array(v: Option<&Value>) -> Option<Vec<String>> {
+    v.and_then(|x| x.as_array()).map(|a| {
+        a.iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect()
+    })
+}
+
+async fn handle_skill_run(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let name = body_str(&parsed, "name");
+    if name.is_empty() {
+        return (400, json!({"error": "name is required"}));
+    }
+    let params = params_from_value(parsed.get("params"));
+    let targets = str_array(parsed.get("targets"));
+    let dry_run = parsed.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
+    op_run_skill(app, state, &name, params, targets, dry_run).await
 }
 
 async fn handle_list(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
@@ -3174,6 +3424,423 @@ pub(crate) async fn op_context(app: &AppHandle, state: &Arc<BridgeState>) -> (u1
     )
 }
 
+// ---- Skills runner (Plan 8) ----
+
+/// How many targets a fleet run touches at once. Steps run in order *within* a
+/// target; this bounds the fan-out *across* targets.
+const SKILL_MAX_CONCURRENCY: usize = 4;
+/// Per-stream cap on a step's stdout/stderr in the aggregated run result, so a
+/// noisy fleet run doesn't balloon an MCP/CLI response (the live console still
+/// shows the full, un-clipped output — this only trims the summary).
+const SKILL_STEP_OUTPUT_CAP: usize = 16 * 1024;
+
+/// Merge a Skill's declared defaults with the caller-provided values (provided
+/// wins), then verify every required param resolved. The returned map is what
+/// `${param}` placeholders substitute from.
+fn build_param_map(
+    skill: &Skill,
+    provided: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, String> {
+    let mut map: HashMap<String, String> = HashMap::new();
+    for p in &skill.params {
+        if let Some(d) = &p.default {
+            map.insert(p.name.clone(), d.clone());
+        }
+    }
+    for (k, v) in provided {
+        map.insert(k.clone(), v.clone());
+    }
+    for p in &skill.params {
+        if p.required && !map.contains_key(&p.name) {
+            return Err(format!("missing required parameter '{}'", p.name));
+        }
+    }
+    Ok(map)
+}
+
+/// Substitute `${name}` placeholders in a step's command template. Values are
+/// inserted verbatim (not shell-escaped) — matching the raw-shell model of
+/// `faro_exec` and saved commands, where the author writes the shell. The dry-run
+/// preview and the one confirm gate both show the fully resolved command, so any
+/// interpolation is visible before it runs.
+fn substitute(template: &str, params: &HashMap<String, String>) -> String {
+    let mut out = template.to_string();
+    for (k, v) in params {
+        out = out.replace(&format!("${{{k}}}"), v);
+    }
+    out
+}
+
+/// One-line human summary of a Skill's default target selector (for tool
+/// descriptions).
+fn target_summary(sel: &TargetSelector) -> String {
+    if sel.all {
+        "Runs on ALL connected exec-capable servers by default.".to_string()
+    } else if sel.sessions.is_empty() {
+        "No default targets — pass `targets` to choose servers.".to_string()
+    } else {
+        format!("Default targets: {}.", sel.sessions.join(", "))
+    }
+}
+
+/// Trim a stream to `max` bytes on a UTF-8 boundary, with a marker.
+fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n… [output clipped]", &s[..end])
+}
+
+/// Resolve a Skill's targets to concrete, enabled, exec-capable sessions.
+/// `override_targets` (from the run call) wins over the skill's default selector;
+/// the literal `"all"` (in either) expands to every enabled exec session. Returns
+/// `(runnable, skipped)` — `skipped` names each requested target that couldn't
+/// run and why, so a fan-out never silently drops a server.
+async fn resolve_skill_targets(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    skill: &Skill,
+    override_targets: Option<&[String]>,
+) -> (Vec<(String, String, bool)>, Vec<(String, String)>) {
+    let all = enabled_sessions(app, state).await; // (id, name, BackendKind)
+    let mut runnable: Vec<(String, String, bool)> = Vec::new();
+    let mut skipped: Vec<(String, String)> = Vec::new();
+
+    let (use_all, explicit): (bool, Vec<String>) = match override_targets {
+        Some(list) if !list.is_empty() => {
+            if list.iter().any(|t| t.eq_ignore_ascii_case("all")) {
+                (true, Vec::new())
+            } else {
+                (false, list.to_vec())
+            }
+        }
+        _ => (skill.targets.all, skill.targets.sessions.clone()),
+    };
+
+    let classify = |kind: &BackendKind| -> Option<bool> {
+        match kind {
+            BackendKind::Ssh => Some(false),
+            BackendKind::Agent => Some(true),
+            BackendKind::Other => None,
+        }
+    };
+
+    if use_all {
+        for (id, name, kind) in &all {
+            match classify(kind) {
+                Some(is_agent) => runnable.push((id.clone(), name.clone(), is_agent)),
+                None => skipped.push((name.clone(), "not exec-capable (read-only backend)".into())),
+            }
+        }
+        return (runnable, skipped);
+    }
+
+    for t in explicit {
+        match all
+            .iter()
+            .find(|(id, name, _)| *id == t || name.eq_ignore_ascii_case(&t))
+        {
+            Some((id, name, kind)) => match classify(kind) {
+                Some(is_agent) => runnable.push((id.clone(), name.clone(), is_agent)),
+                None => skipped.push((name.clone(), "not exec-capable (read-only backend)".into())),
+            },
+            None => skipped.push((t.clone(), "no connection with agent access matches this name/id".into())),
+        }
+    }
+    // A name could resolve to the same session twice — dedupe by id.
+    runnable.sort_by(|a, b| a.0.cmp(&b.0));
+    runnable.dedup_by(|a, b| a.0 == b.0);
+    (runnable, skipped)
+}
+
+/// Summarize one finished step into `(ok, json)`. `ok` folds exit code + timeout;
+/// output streams are clipped for the aggregate (the live console keeps the full
+/// text).
+fn summarize_step(n: usize, label: &str, command: &str, status: u16, body: &Value) -> (bool, Value) {
+    if status == 200 {
+        let exit = body.get("exitCode").and_then(|v| v.as_i64());
+        let timed_out = body.get("timedOut").and_then(|v| v.as_bool()).unwrap_or(false);
+        let ok = !timed_out && exit.unwrap_or(0) == 0;
+        (
+            ok,
+            json!({
+                "step": n,
+                "name": label,
+                "command": command,
+                "ok": ok,
+                "exitCode": exit,
+                "stdout": clip(body.get("stdout").and_then(|v| v.as_str()).unwrap_or(""), SKILL_STEP_OUTPUT_CAP),
+                "stderr": clip(body.get("stderr").and_then(|v| v.as_str()).unwrap_or(""), SKILL_STEP_OUTPUT_CAP),
+                "truncated": body.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false),
+                "timedOut": timed_out,
+            }),
+        )
+    } else {
+        (
+            false,
+            json!({
+                "step": n,
+                "name": label,
+                "command": command,
+                "ok": false,
+                "error": body.get("error").and_then(|v| v.as_str()).unwrap_or("error"),
+            }),
+        )
+    }
+}
+
+/// Run a Skill's (already substituted) steps in order on one target, collecting a
+/// per-step result. Each step reuses the exec path (`exec_core` / `exec_core_agent`)
+/// so it streams to the Agent Console and lands in the audit log — the skill run
+/// was already approved once, so no per-step gate. Stops the remaining steps on
+/// the first failure when `stop_on_error`.
+#[allow(clippy::too_many_arguments)]
+async fn run_skill_on_target(
+    app: AppHandle,
+    state: Arc<BridgeState>,
+    session_id: String,
+    session_name: String,
+    is_agent: bool,
+    skill_name: String,
+    steps: Vec<(String, String)>, // (label, resolved command)
+    stop_on_error: bool,
+    timeout: Duration,
+) -> Value {
+    let manager = app.state::<AppState>().sessions.clone();
+    let mut step_results: Vec<Value> = Vec::new();
+    let mut target_ok = true;
+    for (i, (label, command)) in steps.iter().enumerate() {
+        let n = i + 1;
+        let console_label = format!("[{skill_name} · step {n}] {label}");
+        let (status, body) = if is_agent {
+            match manager.get_agent(&session_id).await {
+                Some(agent) => {
+                    exec_core_agent(&app, &state, &agent, &session_id, &session_name, command, timeout).await
+                }
+                None => (500, json!({"error": "session went away"})),
+            }
+        } else {
+            match manager.get_ssh(&session_id).await {
+                Some(ssh) => {
+                    exec_core(&app, &state, &ssh, &session_id, &session_name, command, &console_label, timeout).await
+                }
+                None => (500, json!({"error": "session went away"})),
+            }
+        };
+        let (ok, sr) = summarize_step(n, label, command, status, &body);
+        step_results.push(sr);
+        if !ok {
+            target_ok = false;
+            if stop_on_error {
+                break;
+            }
+        }
+    }
+    json!({
+        "sessionId": session_id,
+        "sessionName": session_name,
+        "ok": target_ok,
+        "steps": step_results,
+    })
+}
+
+/// Run a Skill across its resolved targets (Plan 8). Validates params, resolves
+/// targets (override wins over the skill's default), and either previews
+/// (`dry_run`) or executes. A real run refuses a proposal (needs human approval),
+/// gates ONCE over the whole fleet (only allow-all auto-approves), then fans out
+/// with bounded concurrency and aggregates a per-target success/fail summary.
+pub(crate) async fn op_run_skill(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    skill_ref: &str,
+    params: HashMap<String, String>,
+    target_override: Option<Vec<String>>,
+    dry_run: bool,
+) -> (u16, Value) {
+    let Some(skill) = state.find_skill(skill_ref).await else {
+        return (404, json!({"error": format!("no skill named '{skill_ref}'")}));
+    };
+
+    let param_map = match build_param_map(&skill, &params) {
+        Ok(m) => m,
+        Err(msg) => return (400, json!({"error": msg})),
+    };
+
+    if skill.steps.is_empty() {
+        return (400, json!({"error": "this skill has no steps"}));
+    }
+
+    let (runnable, skipped) =
+        resolve_skill_targets(app, state, &skill, target_override.as_deref()).await;
+    let skipped_json: Vec<Value> = skipped
+        .iter()
+        .map(|(t, r)| json!({"target": t, "reason": r}))
+        .collect();
+
+    // Resolve every step's command once (reused across targets).
+    let steps: Vec<(String, String)> = skill
+        .steps
+        .iter()
+        .map(|s| {
+            let cmd = substitute(&s.command, &param_map);
+            let label = if s.name.trim().is_empty() { cmd.clone() } else { s.name.clone() };
+            (label, cmd)
+        })
+        .collect();
+
+    // Dry run: pure string substitution — no server is contacted, so no gate and
+    // no proposal block. Returns the resolved commands per target for preview.
+    if dry_run {
+        let auto = state.policy.lock().await.allow_all;
+        let targets_json: Vec<Value> = runnable
+            .iter()
+            .map(|(id, name, _)| {
+                json!({
+                    "sessionId": id,
+                    "sessionName": name,
+                    "commands": steps.iter().map(|(_, c)| json!(c)).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        return (
+            200,
+            json!({
+                "dryRun": true,
+                "skill": skill.name,
+                "proposal": skill.status == SkillStatus::Proposed,
+                "stepCount": steps.len(),
+                "targets": targets_json,
+                "skipped": skipped_json,
+                "needsApproval": !auto,
+            }),
+        );
+    }
+
+    // A proposal is not runnable until a human approves it in the Skills panel.
+    if skill.status == SkillStatus::Proposed {
+        return (
+            403,
+            json!({"error": format!(
+                "skill '{}' is a proposal awaiting human approval — approve it in Faro's Skills panel before running it",
+                skill.name
+            )}),
+        );
+    }
+
+    if runnable.is_empty() {
+        return (
+            400,
+            json!({
+                "error": "no runnable targets for this skill — need at least one SSH or Faro Agent connection with agent access granted",
+                "skipped": skipped_json,
+            }),
+        );
+    }
+
+    // One confirm gate covers the whole fleet run. A skill fans arbitrary
+    // multi-step commands across many servers, so ONLY allow-all auto-approves —
+    // the read-only safe-exec heuristic never applies to a whole skill.
+    let target_names: Vec<&str> = runnable.iter().map(|(_, n, _)| n.as_str()).collect();
+    let summary = format!(
+        "Run skill \"{}\" on {} server{} ({}) — {} step{} each",
+        skill.name,
+        runnable.len(),
+        if runnable.len() == 1 { "" } else { "s" },
+        target_names.join(", "),
+        steps.len(),
+        if steps.len() == 1 { "" } else { "s" },
+    );
+    let auto = state.policy.lock().await.allow_all;
+    if !auto {
+        let (gate_id, gate_name, _) = &runnable[0];
+        let approved = state
+            .request_approval(app, gate_id, gate_name, "skill", &summary)
+            .await;
+        if !approved {
+            state
+                .log(app, activity("denied", gate_id, summary.clone(), false))
+                .await;
+            return (
+                403,
+                json!({"error": "the user denied or did not respond to the skill run approval in Faro. Ask before trying again."}),
+            );
+        }
+    }
+
+    // Fan out across targets with bounded concurrency.
+    let timeout = EXEC_TIMEOUT;
+    let concurrency = SKILL_MAX_CONCURRENCY.min(runnable.len().max(1));
+    let sem = Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let mut set = tokio::task::JoinSet::new();
+    for (id, name, is_agent) in runnable.clone() {
+        let app = app.clone();
+        let state = state.clone();
+        let steps = steps.clone();
+        let sem = sem.clone();
+        let skill_name = skill.name.clone();
+        let stop_on_error = skill.stop_on_error;
+        set.spawn(async move {
+            let _permit = sem.acquire().await;
+            run_skill_on_target(
+                app, state, id, name, is_agent, skill_name, steps, stop_on_error, timeout,
+            )
+            .await
+        });
+    }
+    let mut results: Vec<Value> = Vec::new();
+    while let Some(r) = set.join_next().await {
+        if let Ok(v) = r {
+            results.push(v);
+        }
+    }
+    results.sort_by(|a, b| {
+        a.get("sessionName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .cmp(b.get("sessionName").and_then(|v| v.as_str()).unwrap_or(""))
+    });
+    let succeeded = results
+        .iter()
+        .filter(|r| r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false))
+        .count();
+    let failed = results.len() - succeeded;
+
+    state
+        .log(
+            app,
+            activity(
+                "skill",
+                &runnable[0].0,
+                format!(
+                    "skill \"{}\" on {} server(s) — {} ok, {} failed",
+                    skill.name,
+                    results.len(),
+                    succeeded,
+                    failed
+                ),
+                failed == 0,
+            ),
+        )
+        .await;
+
+    (
+        200,
+        json!({
+            "skill": skill.name,
+            "status": "completed",
+            "targetCount": results.len(),
+            "succeeded": succeeded,
+            "failed": failed,
+            "results": results,
+            "skipped": skipped_json,
+        }),
+    )
+}
+
 // ---- MCP (Model Context Protocol) over Streamable HTTP ----
 //
 // One stateless JSON-RPC endpoint. Claude Code connects with:
@@ -3204,7 +3871,7 @@ async fn handle_mcp(
     let result: Result<Value, (i64, String)> = match method {
         "initialize" => Ok(mcp_initialize(&params)),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(mcp_tools_list()),
+        "tools/list" => Ok(mcp_tools_list(state).await),
         "tools/call" => Ok(mcp_tools_call(app, state, &params).await),
         other => Err((-32601, format!("method not found: {other}"))),
     };
@@ -3261,12 +3928,12 @@ fn mcp_initialize(params: &Value) -> Value {
     })
 }
 
-fn mcp_tools_list() -> Value {
+async fn mcp_tools_list(state: &Arc<BridgeState>) -> Value {
     let session_prop = json!({
         "type": "string",
         "description": "Session id or name. Optional when only one session is available."
     });
-    json!({
+    let mut base = json!({
         "tools": [
             {
                 "name": "faro_context",
@@ -3509,8 +4176,158 @@ fn mcp_tools_list() -> Value {
                     "required": ["name"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "faro_list_skills",
+                "description": "List the user's saved SKILLS — named, parameterized, multi-step workflows that fan shell commands across one or more of the user's connected servers (a Skill is the fleet-automation layer above a saved command). Returns each skill's name, description, parameters, step count, default targets, and status (approved = runnable; proposed = an AI-authored skill still awaiting the user's approval). Each APPROVED skill is also exposed as its own skill_<name> tool. Use this to discover what fleet workflows exist before composing raw commands.",
+                "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+            },
+            {
+                "name": "faro_run_skill",
+                "description": "Run one of the user's saved SKILLS by name across one or many connected servers. Provide `params` for the skill's declared parameters and, optionally, `targets` to override which servers it runs on (names/ids, or [\"all\"] for every exec-capable connection); omit `targets` to use the skill's configured default. ALWAYS run with dryRun=true first and show the user the resolved commands per target — a dry run substitutes params and lists what would run without contacting any server. A real run asks the user to approve the WHOLE fleet run once (unless they've enabled allow-all), then executes each step in order on every target, returning a per-target success/fail summary. A proposed (AI-authored) skill can be dry-run but must be human-approved in Faro before it will actually run.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "The skill's name (see faro_list_skills)." },
+                        "params": { "type": "object", "description": "Values for the skill's declared parameters, as a { name: value } object.", "additionalProperties": { "type": "string" } },
+                        "targets": { "type": "array", "items": { "type": "string" }, "description": "Override which servers to run on: connection names/ids, or [\"all\"] for every exec-capable connection. Omit to use the skill's default targets." },
+                        "dryRun": { "type": "boolean", "description": "Preview the resolved commands per target without running anything. Do this first." }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "faro_save_skill",
+                "description": "Compose and save a new SKILL — a named, parameterized, multi-step shell workflow — for the user to run across their fleet. This is how you author fleet automations: describe the steps as shell command templates using ${paramName} placeholders, declare the parameters, and set default targets. The skill is saved as a PROPOSAL: it does NOT run until the user reviews and approves it in Faro's Skills panel (you cannot approve your own skill). After saving, tell the user a proposal is waiting for their approval. Keep skills linear (a simple ordered list of steps) and prefer safe, idempotent commands.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Short, unique skill name (used as its skill_<name> tool once approved)." },
+                        "description": { "type": "string", "description": "What the skill does and when to use it." },
+                        "params": {
+                            "type": "array",
+                            "description": "Declared parameters the steps interpolate via ${name}.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string" },
+                                    "description": { "type": "string" },
+                                    "required": { "type": "boolean" },
+                                    "default": { "type": "string" }
+                                },
+                                "required": ["name"]
+                            }
+                        },
+                        "steps": {
+                            "type": "array",
+                            "description": "Ordered shell steps. Each command may use ${param} placeholders.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string", "description": "Optional label for the step." },
+                                    "command": { "type": "string", "description": "Shell command template to run on each target." }
+                                },
+                                "required": ["command"]
+                            }
+                        },
+                        "targets": {
+                            "type": "object",
+                            "description": "Default servers to run on.",
+                            "properties": {
+                                "all": { "type": "boolean", "description": "Run on every exec-capable connection." },
+                                "sessions": { "type": "array", "items": { "type": "string" }, "description": "Specific connection names/ids." }
+                            }
+                        },
+                        "stopOnError": { "type": "boolean", "description": "Halt a target's remaining steps after the first failing step. Default true." }
+                    },
+                    "required": ["name", "steps"],
+                    "additionalProperties": false
+                }
             }
         ]
+    });
+
+    // Expose each APPROVED skill as its own `skill_<name>` tool so the agent can
+    // invoke it directly (the "MCPs create skills" surface). Proposals stay
+    // hidden until a human approves them.
+    if let Some(arr) = base.get_mut("tools").and_then(|t| t.as_array_mut()) {
+        for skill in state.list_skills().await {
+            if skill.status == SkillStatus::Approved {
+                arr.push(skill_tool_def(&skill));
+            }
+        }
+    }
+    base
+}
+
+/// MCP tool name for a skill: `skill_<slug>` (the plan's `skill:<name>` — colons
+/// aren't allowed in MCP tool names, so non-alphanumerics collapse to `_`).
+fn skill_tool_name(name: &str) -> String {
+    let slug: String = name
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect();
+    format!("skill_{}", slug.trim_matches('_'))
+}
+
+/// Build the per-skill MCP tool definition: one property per declared parameter,
+/// plus `targets` / `dryRun` overrides.
+fn skill_tool_def(skill: &Skill) -> Value {
+    let mut props = serde_json::Map::new();
+    let mut required: Vec<Value> = Vec::new();
+    for p in &skill.params {
+        props.insert(
+            p.name.clone(),
+            json!({
+                "type": "string",
+                "description": if p.description.trim().is_empty() {
+                    format!("Parameter {}", p.name)
+                } else {
+                    p.description.clone()
+                }
+            }),
+        );
+        if p.required {
+            required.push(json!(p.name));
+        }
+    }
+    props.insert(
+        "targets".into(),
+        json!({
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Override which servers to run on (names/ids, or [\"all\"]). Omit to use the skill's default targets."
+        }),
+    );
+    props.insert(
+        "dryRun".into(),
+        json!({
+            "type": "boolean",
+            "description": "Preview the resolved commands per target without running anything. Do this first."
+        }),
+    );
+    let desc = format!(
+        "Run the user's saved Skill \"{}\"{}. A Skill is a pre-authored, multi-step workflow that fans shell commands across the user's connected servers. {} It has {} step(s). Always dryRun=true first to preview, then run (the user approves the whole fleet run once).",
+        skill.name,
+        if skill.description.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", skill.description)
+        },
+        target_summary(&skill.targets),
+        skill.steps.len(),
+    );
+    json!({
+        "name": skill_tool_name(&skill.name),
+        "description": desc,
+        "inputSchema": {
+            "type": "object",
+            "properties": Value::Object(props),
+            "required": required,
+            "additionalProperties": false
+        }
     })
 }
 
@@ -3550,6 +4367,9 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
     if name == "faro_context" {
         let (_, body) = op_context(app, state).await;
         return tool_text(serde_json::to_string_pretty(&body).unwrap_or_default());
+    }
+    if name == "faro_list_skills" {
+        return tool_text(serde_json::to_string_pretty(&skills_overview(state).await).unwrap_or_default());
     }
 
     match name {
@@ -3765,8 +4585,82 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             // session_arg is resolved + gated inside op_history only when present.
             mcp_wrap(op_history(app, state, session_arg, limit).await)
         }
+        "faro_run_skill" => {
+            let Some(skill_name) = arg_str(&args, "name") else {
+                return tool_error("`name` is required");
+            };
+            let params = params_from_value(args.get("params"));
+            let targets = str_array(args.get("targets"));
+            let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
+            mcp_wrap(op_run_skill(app, state, &skill_name, params, targets, dry_run).await)
+        }
+        "faro_save_skill" => match serde_json::from_value::<Skill>(args.clone()) {
+            Ok(def) => {
+                if def.name.trim().is_empty() {
+                    return tool_error("a skill `name` is required");
+                }
+                if def.steps.is_empty() || def.steps.iter().any(|s| s.command.trim().is_empty()) {
+                    return tool_error("a skill needs at least one step with a non-empty command");
+                }
+                let saved = state.propose_skill(def).await;
+                // Nudge the GUI to surface the new proposal.
+                let _ = app.emit("bridge://skill-proposed", &saved);
+                tool_text(format!(
+                    "Saved skill \"{}\" as a PROPOSAL (id {}). It won't run until the user reviews and approves it in Faro's Skills panel (you can't approve your own skill). Ask the user to review and approve it; you can dry-run it in the meantime with faro_run_skill (dryRun=true) to show what it would do.",
+                    saved.name, saved.id
+                ))
+            }
+            Err(e) => tool_error(&format!("invalid skill definition: {e}")),
+        },
+        // Per-skill tools: `skill_<slug>` invokes an approved skill directly.
+        n if n.starts_with("skill_") => {
+            let skills = state.list_skills().await;
+            let Some(skill) = skills
+                .iter()
+                .find(|s| s.status == SkillStatus::Approved && skill_tool_name(&s.name) == n)
+            else {
+                return tool_error(&format!("unknown skill tool: {n}"));
+            };
+            // Pull declared param values out of the flat args object.
+            let mut params: HashMap<String, String> = HashMap::new();
+            for p in &skill.params {
+                if let Some(v) = arg_str(&args, &p.name) {
+                    params.insert(p.name.clone(), v);
+                }
+            }
+            let targets = str_array(args.get("targets"));
+            let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
+            mcp_wrap(op_run_skill(app, state, &skill.name, params, targets, dry_run).await)
+        }
         other => tool_error(&format!("unknown tool: {other}")),
     }
+}
+
+/// Lean, agent-facing overview of the saved skills (name, description, params,
+/// step count, default targets, status). Shared by `faro_list_skills` (MCP) and
+/// available to the REST/CLI surface via `/skills`.
+async fn skills_overview(state: &Arc<BridgeState>) -> Value {
+    let skills = state.list_skills().await;
+    let out: Vec<Value> = skills
+        .iter()
+        .map(|s| {
+            json!({
+                "name": s.name,
+                "description": s.description,
+                "status": if s.status == SkillStatus::Approved { "approved" } else { "proposed" },
+                "params": s.params.iter().map(|p| json!({
+                    "name": p.name,
+                    "description": p.description,
+                    "required": p.required,
+                    "default": p.default,
+                })).collect::<Vec<_>>(),
+                "stepCount": s.steps.len(),
+                "targets": { "all": s.targets.all, "sessions": s.targets.sessions },
+                "tool": if s.status == SkillStatus::Approved { Some(skill_tool_name(&s.name)) } else { None },
+            })
+        })
+        .collect();
+    json!({ "skills": out })
 }
 
 /// Backend class of an enabled session, for tool-capability routing.

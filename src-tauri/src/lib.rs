@@ -240,6 +240,11 @@ pub fn run() {
             commands::bridge_list_commands,
             commands::bridge_save_command,
             commands::bridge_delete_command,
+            commands::bridge_list_skills,
+            commands::bridge_save_skill,
+            commands::bridge_delete_skill,
+            commands::bridge_approve_skill,
+            commands::bridge_run_skill,
             commands::export_agent_log,
         ])
         .run(tauri::generate_context!())
