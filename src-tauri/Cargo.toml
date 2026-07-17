@@ -108,7 +108,16 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 # the unsafe surface tiny for code that can only be verified manually in Explorer.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# cloud-filter drives the hard part (connect + placeholders + hydration
+# callbacks over cldapi). The `windows` crate (same 0.58 cloud-filter pulls) is
+# used ONLY for `CfRegisterSyncRoot`/`CfUnregisterSyncRoot`, because the WinRT
+# `StorageProviderSyncRootManager` cloud-filter registers with requires package
+# identity, which unpackaged Faro doesn't have — the Win32 register API doesn't.
 cloud-filter = { version = "0.0.6", optional = true }
+windows = { version = "0.58", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_CloudFilters",
+] }
 
 [features]
 default = ["custom-protocol"]
@@ -118,7 +127,7 @@ custom-protocol = ["tauri/custom-protocol"]
 # OFF by default: it compiles native `cldapi` FFI and registers OS sync roots on
 # the user's disk, which must be verified manually in Explorer (hydrate on open,
 # free-up-space, badge states) before shipping. Enable with `--features virtualfs`.
-virtualfs = ["dep:cloud-filter"]
+virtualfs = ["dep:cloud-filter", "dep:windows"]
 
 [profile.dev]
 incremental = true

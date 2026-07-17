@@ -1498,6 +1498,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "windows 0.58.0",
  "winreg 0.52.0",
 ]
 

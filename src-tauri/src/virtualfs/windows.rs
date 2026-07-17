@@ -31,11 +31,14 @@ use cloud_filter::filter::{info, ticket, Request, SyncFilter};
 use cloud_filter::metadata::Metadata;
 use cloud_filter::placeholder::{PinOptions, PinState, Placeholder};
 use cloud_filter::placeholder_file::PlaceholderFile;
-use cloud_filter::root::{
-    Connection, HydrationType, PopulationType, SecurityId, Session, SyncRootId, SyncRootIdBuilder,
-    SyncRootInfo,
-};
+use cloud_filter::root::{Connection, Session};
 use cloud_filter::utility::{FileTime, WriteAt};
+
+use windows::core::{GUID, PCWSTR};
+use windows::Win32::Storage::CloudFilters::{
+    CfGetSyncRootInfoByPath, CfRegisterSyncRoot, CfUnregisterSyncRoot, CF_REGISTER_FLAG_UPDATE,
+    CF_SYNC_POLICIES, CF_SYNC_REGISTRATION, CF_SYNC_ROOT_BASIC_INFO, CF_SYNC_ROOT_INFO_BASIC,
+};
 
 use super::Hydrator;
 use crate::remotefs::FileKind;
@@ -43,18 +46,71 @@ use crate::remotefs::FileKind;
 /// Cloud Filter reads/writes must be 4 KiB-aligned except the final chunk.
 const CHUNK: usize = 64 * 1024;
 
+/// Stable provider identity shared by every Faro on-demand root — Win32
+/// registration keys a sync root by its *path*, so one provider id covers all
+/// pairs and each folder is its own registration.
+const FARO_PROVIDER_ID: GUID = GUID::from_u128(0xFA504F61_726F_4661_726F_0DE0_0DE00001u128);
+
 /// On-demand virtual folders are available when the Cloud Filter API is present
 /// (Windows 10 1709+). `is_supported()` is the OS-level probe.
 pub fn supported() -> bool {
     cloud_filter::root::is_supported().unwrap_or(false)
 }
 
-/// Deterministic per-pair sync-root identity, so `unregister` can be rebuilt from
-/// just the pair id (orphan cleanup after a config wipe or crash).
-fn sync_root_id(pair_id: &str) -> Result<SyncRootId> {
-    let provider = format!("Faro.{pair_id}");
-    let sid = SecurityId::current_user().map_err(|e| anyhow!("current user SID: {e:?}"))?;
-    Ok(SyncRootIdBuilder::new(provider).user_security_id(sid).build())
+/// A NUL-terminated UTF-16 buffer for a `PCWSTR` argument. Keep the returned
+/// `Vec` alive for the duration of the call.
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Register `local_root` as a Cloud Filter sync root via the **Win32**
+/// `CfRegisterSyncRoot` (not the WinRT `StorageProviderSyncRootManager`, which
+/// needs package identity). Idempotent — `CF_REGISTER_FLAG_UPDATE` updates an
+/// existing registration instead of failing. Policies default to Partial
+/// hydration + Partial population = fully on-demand (fetch on open, populate
+/// subdirs lazily via `fetch_placeholders`).
+fn register_root(local_root: &Path) -> Result<()> {
+    let path = wide(&local_root.to_string_lossy());
+    let name = wide("Faro");
+    let version = wide(env!("CARGO_PKG_VERSION"));
+    let registration = CF_SYNC_REGISTRATION {
+        StructSize: std::mem::size_of::<CF_SYNC_REGISTRATION>() as u32,
+        ProviderName: PCWSTR(name.as_ptr()),
+        ProviderVersion: PCWSTR(version.as_ptr()),
+        ProviderId: FARO_PROVIDER_ID,
+        ..Default::default()
+    };
+    let policies = CF_SYNC_POLICIES {
+        StructSize: std::mem::size_of::<CF_SYNC_POLICIES>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        CfRegisterSyncRoot(
+            PCWSTR(path.as_ptr()),
+            &registration,
+            &policies,
+            CF_REGISTER_FLAG_UPDATE,
+        )
+        .map_err(|e| anyhow!("CfRegisterSyncRoot {}: {e}", local_root.display()))?;
+    }
+    Ok(())
+}
+
+/// Whether `local_root` is currently a registered sync root (Win32 probe).
+fn is_registered(local_root: &Path) -> bool {
+    let path = wide(&local_root.to_string_lossy());
+    let mut info = CF_SYNC_ROOT_BASIC_INFO::default();
+    let mut returned = 0u32;
+    unsafe {
+        CfGetSyncRootInfoByPath(
+            PCWSTR(path.as_ptr()),
+            CF_SYNC_ROOT_INFO_BASIC,
+            &mut info as *mut _ as *mut std::ffi::c_void,
+            std::mem::size_of::<CF_SYNC_ROOT_BASIC_INFO>() as u32,
+            Some(&mut returned),
+        )
+        .is_ok()
+    }
 }
 
 /// A live on-demand root: the Cloud Filter connection plus its registration id.
@@ -63,36 +119,18 @@ fn sync_root_id(pair_id: &str) -> Result<SyncRootId> {
 pub struct Provider {
     connection: Connection<FaroFilter>,
     local_root: PathBuf,
-    #[allow(dead_code)] // kept so the id's lifetime is tied to the connection's
-    sync_root_id: SyncRootId,
 }
 
 impl Provider {
     pub async fn start(
-        pair_id: String,
+        _pair_id: String,
         local_root: PathBuf,
         remote_root: String,
         hydrator: Arc<dyn Hydrator>,
         _app: AppHandle,
     ) -> Result<Provider> {
-        let id = sync_root_id(&pair_id)?;
-
-        // Register once (idempotent across restarts). Display name = the folder's
-        // own name so Explorer's nav pane reads naturally.
-        if !id.is_registered().map_err(|e| anyhow!("is_registered: {e:?}"))? {
-            let display = local_root
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Faro".into());
-            let info = SyncRootInfo::default()
-                .with_display_name(&display)
-                .with_hydration_type(HydrationType::Full)
-                .with_population_type(PopulationType::Full)
-                .with_version(env!("CARGO_PKG_VERSION"))
-                .with_path(&local_root)
-                .map_err(|e| anyhow!("sync root path {}: {e:?}", local_root.display()))?;
-            id.register(info).map_err(|e| anyhow!("register sync root: {e:?}"))?;
-        }
+        // Register the sync root (idempotent). Keyed by path via the Win32 API.
+        register_root(&local_root)?;
 
         // Seed the top level from the remote listing so the folder isn't empty
         // before the first Explorer-driven population. Best-effort per entry.
@@ -108,7 +146,7 @@ impl Provider {
             .connect(&local_root, filter)
             .map_err(|e| anyhow!("connect sync root {}: {e:?}", local_root.display()))?;
 
-        Ok(Provider { connection, local_root, sync_root_id: id })
+        Ok(Provider { connection, local_root })
     }
 
     /// Explorer-style "Free up space": mark every hydrated placeholder Unpinned,
@@ -125,14 +163,21 @@ impl Provider {
     }
 }
 
-/// Disconnect (if a `Provider` was live it's already dropped by the caller) and
-/// unregister the pair's sync root — the orphan-safety primitive. Rebuilds the
-/// deterministic id from `pair_id`, so it works even when we only have the
-/// persisted bookkeeping and no live provider.
-pub fn unregister_root(pair_id: &str, _local_root: Option<&Path>) -> Result<()> {
-    let id = sync_root_id(pair_id)?;
-    if id.is_registered().map_err(|e| anyhow!("is_registered: {e:?}"))? {
-        id.unregister().map_err(|e| anyhow!("unregister sync root: {e:?}"))?;
+/// Unregister a sync root by path — the orphan-safety primitive. The live
+/// `Provider` (if any) is dropped by the caller first (disconnect), then this
+/// removes the OS registration. Works from just the persisted `local_root`, so a
+/// root left over from a crash or config wipe still gets cleaned up.
+pub fn unregister_root(_pair_id: &str, local_root: Option<&Path>) -> Result<()> {
+    let Some(root) = local_root else {
+        return Ok(()); // nothing to key off — can't have registered it
+    };
+    if !is_registered(root) {
+        return Ok(());
+    }
+    let path = wide(&root.to_string_lossy());
+    unsafe {
+        CfUnregisterSyncRoot(PCWSTR(path.as_ptr()))
+            .map_err(|e| anyhow!("CfUnregisterSyncRoot {}: {e}", root.display()))?;
     }
     Ok(())
 }
@@ -357,5 +402,42 @@ impl SyncFilter for FaroFilter {
     fn rename(&self, _request: Request, ticket: ticket::Rename, _info: info::Rename) -> CResult<()> {
         ticket.pass().map_err(|_| CloudErrorKind::InvalidRequest)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The orphan-safety primitive, against the real Cloud Filter API: a sync
+    /// root registers (Win32, no package identity needed), reports registered,
+    /// and unregisters cleanly — leaving no dangling registration on disk. This
+    /// is exactly the round-trip `VirtualFs::reconcile` relies on to clean up
+    /// orphaned roots, so verifying it end-to-end on real `cldapi` from an
+    /// unpackaged test process is the highest-value check we can run without
+    /// Explorer. Full hydration still needs manual Explorer testing.
+    #[test]
+    fn sync_root_register_unregister_round_trips() {
+        assert!(supported(), "Cloud Filter API should be present on this box");
+
+        let dir = std::env::temp_dir().join(format!("faro-vfs-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp sync root");
+
+        // Clean slate even if a prior run aborted mid-test.
+        let _ = unregister_root("", Some(&dir));
+        assert!(!is_registered(&dir), "should start unregistered");
+
+        register_root(&dir).expect("CfRegisterSyncRoot should succeed unpackaged");
+        let was_registered = is_registered(&dir);
+
+        // Unregister BEFORE asserting, so a failed assertion can't leave an
+        // orphaned sync root on the developer's disk.
+        unregister_root("", Some(&dir)).expect("unregister");
+        let still_registered = is_registered(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(was_registered, "register should have taken effect (CfGetSyncRootInfoByPath)");
+        assert!(!still_registered, "unregister should have cleared it — no orphan");
     }
 }
