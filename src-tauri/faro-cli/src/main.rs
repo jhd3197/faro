@@ -332,6 +332,30 @@ enum AgentCmd {
         #[arg(long)]
         content_remote: bool,
     },
+    /// Write text straight into a remote file — no local staging file, no upload.
+    ///
+    /// Drops a debug script, a config snippet or a one-file patch directly on the
+    /// server (SSH via SFTP, a Faro Agent via a ranged write), bypassing the
+    /// mangling-prone upload path. Provide the content with exactly one of
+    /// --from-file / --stdin / --content. Refuses to overwrite unless --overwrite.
+    Write {
+        /// Saved server name (as shown in Faro) or its session id.
+        server: String,
+        /// Absolute remote file path to write.
+        remote_path: String,
+        /// Read the content from this local file.
+        #[arg(long, conflicts_with_all = ["stdin", "content"])]
+        from_file: Option<String>,
+        /// Read the content from stdin.
+        #[arg(long, conflicts_with = "content")]
+        stdin: bool,
+        /// Inline content to write.
+        #[arg(long)]
+        content: Option<String>,
+        /// Replace the file if it already exists (default: refuse).
+        #[arg(long)]
+        overwrite: bool,
+    },
     /// Download a remote file to a local dir (default: your Downloads).
     Download {
         server: String,
@@ -1688,6 +1712,43 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             }
             let body = http_post(&ep, "/download", req)?;
             print_transfer_started(&body);
+            Ok(())
+        }
+        AgentCmd::Write { server, remote_path, from_file, stdin, content, overwrite } => {
+            let id = resolve_server(&ep, &server)?;
+            guard_mangled_remote_path(&ep, &id, &remote_path)?;
+            // Exactly one content source.
+            let bytes: Vec<u8> = match (from_file, stdin, content) {
+                (Some(path), false, None) => {
+                    std::fs::read(&path).with_context(|| format!("read {path}"))?
+                }
+                (None, true, None) => {
+                    use std::io::Read as _;
+                    let mut buf = Vec::new();
+                    io::stdin().read_to_end(&mut buf).context("read content from stdin")?;
+                    buf
+                }
+                (None, false, Some(text)) => text.into_bytes(),
+                (None, false, None) => {
+                    bail!("no content — give one of --from-file <path>, --stdin, or --content <text>")
+                }
+                _ => bail!("give exactly one of --from-file / --stdin / --content"),
+            };
+            use base64::Engine as _;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let body = http_post(
+                &ep,
+                "/write",
+                serde_json::json!({
+                    "sessionId": id,
+                    "path": &remote_path,
+                    "content": b64,
+                    "overwrite": overwrite,
+                }),
+            )?;
+            let n = body.get("bytes").and_then(|v| v.as_u64()).unwrap_or(bytes.len() as u64);
+            let p = body.get("path").and_then(|v| v.as_str()).unwrap_or(&remote_path);
+            println!("wrote {} to {p}", fmt_bytes(n));
             Ok(())
         }
         AgentCmd::Upload { server, local_path, remote_dir } => {

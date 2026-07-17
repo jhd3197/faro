@@ -114,6 +114,13 @@ AI agent reaches it through the same bridge tools it uses for SSH servers
   base64/quoting gymnastics on the caller's side. Same 512 KiB cap and the same
   approval gate as `exec` — but, like a Write, **never** auto-approved by the
   safe-read-only heuristic (only allow-all), since a script is multi-statement.
+- **`faro_write`** — write text straight into a remote file (`/write`,
+  `faro-cli agent write <server> <path> [--from-file|--stdin|--content]
+  [--overwrite]`) with no local staging file and without the mangling-prone
+  upload path — SSH streams via SFTP `create`, a Faro Agent via a ranged
+  `WriteChunk`. Gated as a Write (never auto-approved except allow-all); refuses
+  to clobber an existing file unless `overwrite`. Bounded by the ~1 MiB
+  request-body cap — for large files use `faro_upload`.
 - **`faro_read_file`** — capped file read via the daemon's `ReadFile`.
 - **`faro_list_dir` / `faro_search` / `faro_download` / `faro_upload`** — file
   ops through `AgentFs` and the transfer engine (uploads stream as ranged

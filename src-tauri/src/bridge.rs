@@ -1048,6 +1048,7 @@ async fn route(app: &AppHandle, state: &Arc<BridgeState>, req: &Request) -> (u16
         ("GET", "/sessions") => handle_sessions(app, state).await,
         ("POST", "/exec") => handle_exec(app, state, &req.body).await,
         ("POST", "/exec_script") => handle_exec_script(app, state, &req.body).await,
+        ("POST", "/write") => handle_write(app, state, &req.body).await,
         ("POST", "/list") => handle_list(app, state, &req.body).await,
         ("POST", "/read") => handle_read(app, state, &req.body).await,
         ("POST", "/download") => handle_download(app, state, &req.body).await,
@@ -1140,6 +1141,30 @@ async fn handle_exec_script(app: &AppHandle, state: &Arc<BridgeState>, body: &[u
     let dry_run = parsed.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
     let timeout_ms = parsed.get("timeoutMs").and_then(|v| v.as_u64());
     exec_script_on(app, state, &session_id, &script, &label, dry_run, timeout_ms).await
+}
+
+/// `/write` — drop text/bytes straight into a remote file (Plan 10 Phase 2). The
+/// body carries the content as base64 (`content`) so any bytes survive the hop;
+/// `overwrite` (default false) controls whether an existing file is replaced.
+/// This is the direct alternative to staging a local file and `upload`-ing it —
+/// no mangling-prone path, one round-trip.
+async fn handle_write(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    use base64::Engine as _;
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    let path = body_str(&parsed, "path");
+    let content_b64 = body_str(&parsed, "content");
+    if session_id.is_empty() || path.is_empty() {
+        return (400, json!({"error": "sessionId and path are required"}));
+    }
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(content_b64.as_bytes()) else {
+        return (400, json!({"error": "content must be valid base64"}));
+    };
+    let overwrite = parsed.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+    op_write(app, state, &session_id, &path, &bytes, overwrite).await
 }
 
 async fn handle_run(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
@@ -2500,6 +2525,136 @@ async fn op_download(
                         format!("download {remote_path} — {e}"),
                         false,
                     ),
+                )
+                .await;
+            (500, json!({"error": e.to_string()}))
+        }
+    }
+}
+
+/// Write `bytes` to `remote_path` on an SSH server (SFTP create) or a paired
+/// agent (`WriteChunk`). Gated as a Write — never auto-approved except by
+/// allow-all. Refuses to clobber an existing file unless `overwrite`. This is the
+/// engine behind `/write`, `faro_write` and `faro-cli agent write` (Plan 10
+/// Phase 2). Content is bounded by the bridge's 1 MiB request-body cap — for
+/// large files use `upload`.
+async fn op_write(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    remote_path: &str,
+    bytes: &[u8],
+    overwrite: bool,
+) -> (u16, Value) {
+    use base64::Engine as _;
+    use faro_agent_proto::msg::{Request, Response};
+    use tokio::io::AsyncWriteExt;
+
+    let manager = app.state::<AppState>().sessions.clone();
+    let (session_name, is_agent) = if let Some(ssh) = manager.get_ssh(session_id).await {
+        (ssh.profile.name.clone(), false)
+    } else if let Some(agent) = manager.get_agent(session_id).await {
+        (agent.profile.name.clone(), true)
+    } else {
+        return (
+            400,
+            json!({"error": "writing text works on SSH/SFTP and Faro Agent connections only; use upload for other protocols."}),
+        );
+    };
+
+    if let Err(resp) = gate(
+        app,
+        state,
+        session_id,
+        &session_name,
+        OpClass::Write,
+        "write",
+        &format!(
+            "Write {} → {session_name}:{remote_path} (overwrite: {})",
+            human_bytes(bytes.len() as u64),
+            if overwrite { "yes" } else { "no" }
+        ),
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    let result: Result<()> = if is_agent {
+        let Some(agent) = manager.get_agent(session_id).await else {
+            return (400, json!({"error": "session went away"}));
+        };
+        // Existence check (unless overwriting): a successful Stat means it's there.
+        async {
+            if !overwrite {
+                if let Ok(Response::Stat { .. }) =
+                    agent.request(Request::Stat { path: remote_path.to_string() }).await
+                {
+                    anyhow::bail!("{remote_path} already exists; pass overwrite to replace it");
+                }
+            }
+            let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+            match agent
+                .request(Request::WriteChunk {
+                    path: remote_path.to_string(),
+                    offset: 0,
+                    data,
+                    truncate: true,
+                    done: true,
+                })
+                .await?
+            {
+                Response::Written { .. } => Ok(()),
+                Response::Error { message, denied } => {
+                    anyhow::bail!(if denied { format!("denied: {message}") } else { message })
+                }
+                other => anyhow::bail!("unexpected write reply: {other:?}"),
+            }
+        }
+        .await
+    } else {
+        let Some(ssh) = manager.get_ssh(session_id).await else {
+            return (400, json!({"error": "session went away"}));
+        };
+        async {
+            let cell = ssh.ensure_sftp().await?;
+            let sftp = cell.lock().await;
+            if !overwrite && sftp.metadata(remote_path).await.is_ok() {
+                anyhow::bail!("{remote_path} already exists; pass overwrite to replace it");
+            }
+            let mut file = sftp
+                .create(remote_path)
+                .await
+                .with_context(|| format!("create {remote_path}"))?;
+            file.write_all(bytes).await?;
+            file.flush().await?;
+            file.shutdown().await.ok();
+            Ok(())
+        }
+        .await
+    };
+
+    match result {
+        Ok(()) => {
+            state
+                .log(
+                    app,
+                    activity(
+                        "write",
+                        session_id,
+                        format!("write {} → {remote_path}", human_bytes(bytes.len() as u64)),
+                        true,
+                    ),
+                )
+                .await;
+            (200, json!({ "path": remote_path, "bytes": bytes.len(), "status": "written" }))
+        }
+        Err(e) => {
+            state
+                .log(
+                    app,
+                    activity("error", session_id, format!("write {remote_path} — {e}"), false),
                 )
                 .await;
             (500, json!({"error": e.to_string()}))
@@ -4250,6 +4405,21 @@ async fn mcp_tools_list(state: &Arc<BridgeState>) -> Value {
                 }
             },
             {
+                "name": "faro_write",
+                "description": "Write text straight into a file on the user's connected SSH server or paired Faro Agent machine — no local staging file, no upload. Use this to drop a small debug script, a config snippet, or a one-file patch directly on the server (SSH streams it via SFTP; a Faro Agent via a ranged write). By default it will NOT overwrite an existing file — set overwrite=true to replace. Approved as a write in Faro (never auto-approved except by allow-all). Content is bounded by a ~1 MiB request cap; for larger files use faro_upload. Returns the path and bytes written.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Absolute remote file path to write." },
+                        "content": { "type": "string", "description": "The exact text to write into the file (verbatim; written as UTF-8)." },
+                        "overwrite": { "type": "boolean", "description": "Replace the file if it already exists. Default false (a collision errors)." },
+                        "session": session_prop
+                    },
+                    "required": ["path", "content"],
+                    "additionalProperties": false
+                }
+            },
+            {
                 "name": "faro_upload_dir",
                 "description": "Upload a whole local directory tree into a directory on the user's connected server via Faro's transfer engine. The local directory is recreated INSIDE remoteDir (uploading /a/dist to /srv gives /srv/dist/…); remote subdirectories are created automatically and one transfer is queued per file. The user approves the WHOLE tree once — the prompt shows the file count, total size and overwrite mode. By default existing remote files are kept and colliding uploads are renamed (_1, _2, …); set overwrite=true to replace them. Returns transferIds plus counts; poll faro_transfer_status to confirm completion.",
                 "inputSchema": {
@@ -4700,6 +4870,18 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             };
             match resolve_session(app, state, session_arg, SessionNeed::Any).await {
                 Ok(id) => mcp_wrap(op_upload(app, state, &id, &local_path, &remote_dir).await),
+                Err(msg) => tool_error(&msg),
+            }
+        }
+        "faro_write" => {
+            let (Some(path), Some(content)) = (arg_str(&args, "path"), arg_str(&args, "content"))
+            else {
+                return tool_error("`path` and `content` are required");
+            };
+            let overwrite = args.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+            // Write targets SSH + Faro Agent (SFTP create / WriteChunk).
+            match resolve_session(app, state, session_arg, SessionNeed::Exec).await {
+                Ok(id) => mcp_wrap(op_write(app, state, &id, &path, content.as_bytes(), overwrite).await),
                 Err(msg) => tool_error(&msg),
             }
         }
