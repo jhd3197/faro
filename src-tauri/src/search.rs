@@ -27,6 +27,7 @@
 //! the walk already skips them.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -34,7 +35,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::remotefs::{FileKind, RemoteFs};
 use crate::scan::{self, CancelToken, ScanOptions};
-use crate::session::{FtpSession, ObjectSession, Session, SshSession};
+use crate::session::{AgentSession, FtpSession, ObjectSession, Session, SshSession};
+
+/// Output cap on a fast-path exec (`rg`/`grep`/`find`). Beyond this the result
+/// would be partial, so the runner bails to the (complete) generic walk.
+const MAX_EXEC_BYTES: usize = 64 * 1024 * 1024;
+/// Wall-clock budget for one fast-path exec.
+const EXEC_TIMEOUT: Duration = Duration::from_secs(120);
+const EXEC_TIMEOUT_MS: u64 = 120_000;
 
 /// Default cap on hits returned (a line for content, an entry for name). Keeps a
 /// runaway query from ballooning memory / the response; surfaced as `truncated`.
@@ -332,7 +340,6 @@ impl NameMatcher {
 struct Filters {
     include: Vec<regex::Regex>,
     exclude: Vec<regex::Regex>,
-    case_sensitive: bool,
 }
 
 impl Filters {
@@ -353,15 +360,13 @@ impl Filters {
         Ok(Self {
             include: build(&q.include_globs)?,
             exclude: build(&q.exclude_globs)?,
-            case_sensitive: q.case_sensitive,
         })
     }
 
     /// Whether a file name survives the include/exclude filters. Directories are
     /// never filtered here (include/exclude target file names); descent is
-    /// separate from result filtering.
+    /// separate from result filtering. Case is baked into the compiled globs.
     fn passes(&self, name: &str) -> bool {
-        let _ = self.case_sensitive; // case handled at compile time
         if !self.include.is_empty() && !self.include.iter().any(|r| r.is_match(name)) {
             return false;
         }
@@ -399,9 +404,10 @@ fn basename(rel: &str) -> &str {
 // ---------- Public entry points ----------
 
 /// Walk / grep `root` on `fs`, streaming hits into `sink`. `session` (absent for
-/// the local FS) unlocks the protocol fast paths in Phase 2; today every kind
-/// runs the generic strategy. Returns the stats (strategy, note, scanned);
-/// `sink` carries the truncation flag + hit count.
+/// the local FS) unlocks the protocol fast paths: an `rg`/`grep`/`find` exec on
+/// SSH/agent, or a flat object listing for name search on S3/Azure. Every fast
+/// path falls back to the always-available generic walk on any failure, recording
+/// why in the returned note. `sink` carries the truncation flag + hit count.
 pub async fn run_search(
     fs: &dyn RemoteFs,
     session: Option<&Session>,
@@ -412,21 +418,110 @@ pub async fn run_search(
 ) -> Result<SearchStats> {
     let compiled = Compiled::new(query)?;
     match query.kind {
-        SearchKind::Name => {
-            let scanned = name_walk(fs, root, &compiled, cancel, sink).await;
-            Ok(SearchStats { strategy: SearchStrategy::Generic, truncated: sink.truncated, scanned, note: None })
-        }
-        SearchKind::Content => {
-            if needs_content_optin(session) && !query.content_remote {
-                bail!(
-                    "content search on {} would download every candidate file — re-run with remote content enabled to allow it",
-                    proto_label(session)
-                );
-            }
-            let scanned = content_walk(fs, session, root, &compiled, query, cancel, sink).await?;
-            Ok(SearchStats { strategy: SearchStrategy::Generic, truncated: sink.truncated, scanned, note: None })
+        SearchKind::Name => run_name(fs, session, root, query, &compiled, cancel, sink).await,
+        SearchKind::Content => run_content(fs, session, root, query, &compiled, cancel, sink).await,
+    }
+}
+
+fn stats(strategy: SearchStrategy, sink: &HitSink<'_>, scanned: usize, note: Option<String>) -> SearchStats {
+    SearchStats { strategy, truncated: sink.truncated, scanned, note }
+}
+
+/// Drain a fully-parsed fast-path result into the sink, stopping at the cap.
+fn drain(hits: Vec<SearchHit>, sink: &mut HitSink<'_>) {
+    for h in hits {
+        if !sink.push(h) {
+            break;
         }
     }
+}
+
+/// A short note explaining why a fast path fell back to the generic walk.
+/// Mirrors `diskscan::fallback_walk`.
+fn fallback_note(err: &anyhow::Error) -> String {
+    let msg = err.to_string();
+    let short = msg.lines().next().unwrap_or(&msg);
+    if short.contains("denied") {
+        "exec disabled — used walk".to_string()
+    } else {
+        format!("fast path unavailable — used walk ({short})")
+    }
+}
+
+/// Name search: object-flat listing (S3/Azure) or a `find` exec (SSH/agent) when
+/// available, else the generic BFS. The generic walk matches directory names too.
+async fn run_name(
+    fs: &dyn RemoteFs,
+    session: Option<&Session>,
+    root: &str,
+    query: &SearchQuery,
+    compiled: &Compiled,
+    cancel: &CancelToken,
+    sink: &mut HitSink<'_>,
+) -> Result<SearchStats> {
+    let fast = match session {
+        Some(Session::Object(obj)) => Some((SearchStrategy::ObjectFlat, name_object(obj, root, query, compiled, cancel).await)),
+        Some(Session::Ssh(ssh)) => Some((SearchStrategy::Shell, name_exec_ssh(ssh, root, query, compiled).await)),
+        Some(Session::Agent(agent)) => Some((SearchStrategy::Shell, name_exec_agent(agent, root, query, compiled).await)),
+        _ => None,
+    };
+    let mut note = None;
+    if let Some((strategy, res)) = fast {
+        match res {
+            Ok(hits) => {
+                let scanned = hits.len();
+                drain(hits, sink);
+                return Ok(stats(strategy, sink, scanned, None));
+            }
+            Err(e) => {
+                tracing::info!("fleet-search name fast path fell back: {e:#}");
+                note = Some(fallback_note(&e));
+            }
+        }
+    }
+    let scanned = name_walk(fs, root, compiled, cancel, sink).await;
+    Ok(stats(SearchStrategy::Generic, sink, scanned, note))
+}
+
+/// Content search: an `rg`/`grep` exec on SSH/agent when available, else the
+/// generic read-and-grep walk. The walk needs the download opt-in on backends
+/// with no server-side grep (object stores, FTP, WebDAV, cloud).
+async fn run_content(
+    fs: &dyn RemoteFs,
+    session: Option<&Session>,
+    root: &str,
+    query: &SearchQuery,
+    compiled: &Compiled,
+    cancel: &CancelToken,
+    sink: &mut HitSink<'_>,
+) -> Result<SearchStats> {
+    let fast = match session {
+        Some(Session::Ssh(ssh)) => Some(content_exec_ssh(ssh, root, query, compiled).await),
+        Some(Session::Agent(agent)) => Some(content_exec_agent(agent, root, query, compiled).await),
+        _ => None,
+    };
+    let mut note = None;
+    if let Some(res) = fast {
+        match res {
+            Ok(hits) => {
+                let scanned = hits.len();
+                drain(hits, sink);
+                return Ok(stats(SearchStrategy::Shell, sink, scanned, None));
+            }
+            Err(e) => {
+                tracing::info!("fleet-search content fast path fell back: {e:#}");
+                note = Some(fallback_note(&e));
+            }
+        }
+    }
+    if needs_content_optin(session) && !query.content_remote {
+        bail!(
+            "content search on {} would download every candidate file — re-run with remote content enabled to allow it",
+            proto_label(session)
+        );
+    }
+    let scanned = content_walk(fs, session, root, compiled, query, cancel, sink).await?;
+    Ok(stats(SearchStrategy::Generic, sink, scanned, note))
 }
 
 /// The collecting convenience the CLI + `faro_search` bridge tool call — runs a
@@ -633,6 +728,307 @@ fn needs_content_optin(session: Option<&Session>) -> bool {
 
 fn proto_label(session: Option<&Session>) -> String {
     session.map(|s| s.protocol().to_string()).unwrap_or_else(|| "local".to_string())
+}
+
+// ---------- Object-store flat name search ----------
+
+/// Name search over one flat object listing under the prefix (S3/Azure/GCS). No
+/// recursion — the store returns every key at once, exactly like `diskscan`'s
+/// object fast path — so we just name-match each key. Content search over objects
+/// takes the (opt-in) generic read walk instead; there's no server-side grep.
+async fn name_object(
+    obj: &ObjectSession,
+    root: &str,
+    query: &SearchQuery,
+    compiled: &Compiled,
+    cancel: &CancelToken,
+) -> Result<Vec<SearchHit>> {
+    let matcher = compiled.name.as_ref().expect("name search compiles a name matcher");
+    let prefix_raw = root.trim().trim_matches('/');
+    let prefix = if prefix_raw.is_empty() || prefix_raw == "." {
+        String::new()
+    } else {
+        prefix_raw.to_string()
+    };
+    let prefix_path = (!prefix.is_empty()).then(|| object_store::path::Path::from(prefix.as_str()));
+
+    let mut stream = obj.store.list(prefix_path.as_ref());
+    let mut hits = Vec::new();
+    while let Some(meta) = stream.next().await {
+        if cancel.is_cancelled() || hits.len() >= query.max_results {
+            break;
+        }
+        let meta = meta.context("list objects")?;
+        let key = meta.location.as_ref().to_string();
+        let rel = if prefix.is_empty() {
+            key.clone()
+        } else {
+            key.strip_prefix(&prefix).unwrap_or(&key).trim_start_matches('/').to_string()
+        };
+        if rel.is_empty() {
+            continue;
+        }
+        let name = basename(&rel);
+        if !matcher.matches(name) || !compiled.filters.passes(name) {
+            continue;
+        }
+        hits.push(SearchHit::name(format!("/{key}"), rel, false, meta.size as u64));
+    }
+    Ok(hits)
+}
+
+// ---------- Exec fast path (rg / grep / find) ----------
+
+/// POSIX single-quote a string so it survives spaces / shell metacharacters when
+/// interpolated into a remote command.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The glob `find -iname` should match. A pattern with `*`/`?` is used verbatim;
+/// a plain substring becomes `*substr*` (matching the generic substring rule).
+fn find_name_glob(query: &SearchQuery) -> String {
+    if query.pattern.contains(['*', '?']) {
+        query.pattern.clone()
+    } else {
+        format!("*{}*", query.pattern)
+    }
+}
+
+/// `find <root> \( -type f -o -type d \) -iname '<glob>' -printf '%y\t%s\t%p\n'`
+/// — one line per matching file/dir: type char, byte size, absolute path.
+fn find_name_command(root: &str, query: &SearchQuery) -> String {
+    let name_flag = if query.case_sensitive { "-name" } else { "-iname" };
+    format!(
+        "find {} \\( -type f -o -type d \\) {} {} -printf '%y\\t%s\\t%p\\n' 2>/dev/null",
+        sh_quote(root),
+        name_flag,
+        sh_quote(&find_name_glob(query)),
+    )
+}
+
+/// Parse `find … -printf '%y\t%s\t%p\n'` into name hits. Only files (`f`) and
+/// directories (`d`) are kept — symlinks/other are skipped, as the walk skips
+/// them. Include/exclude globs are re-applied client-side to file names.
+fn parse_find_names(root: &str, out: &str, compiled: &Compiled, max: usize) -> Vec<SearchHit> {
+    let normalized_root = root.trim_end_matches('/');
+    let mut hits = Vec::new();
+    for line in out.lines() {
+        if hits.len() >= max {
+            break;
+        }
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(3, '\t');
+        let (Some(ty), Some(size_s), Some(path)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let is_dir = ty == "d";
+        if !is_dir && ty != "f" {
+            continue;
+        }
+        let rel = scan::relative_of(normalized_root, path);
+        if rel.is_empty() {
+            continue;
+        }
+        let name = basename(&rel);
+        if !is_dir && !compiled.filters.passes(name) {
+            continue;
+        }
+        let size = size_s.trim().parse::<u64>().unwrap_or(0);
+        hits.push(SearchHit::name(path.to_string(), rel, is_dir, size));
+    }
+    hits
+}
+
+/// `rg --json` command line. `--no-ignore --hidden` searches everything (like the
+/// generic walk, which honours no ignore rules); `--max-filesize` mirrors the
+/// walk's per-file cap; `-F` is literal, `-i` case-insensitive; `-g`/`-g !` carry
+/// the include/exclude globs to the server.
+fn rg_command(root: &str, query: &SearchQuery) -> String {
+    let mut cmd = format!("rg --json --no-ignore --hidden --max-filesize {}", query.max_file_bytes);
+    if !query.case_sensitive {
+        cmd.push_str(" -i");
+    }
+    if !query.regex {
+        cmd.push_str(" -F");
+    }
+    for g in query.include_globs.iter().filter(|g| !g.trim().is_empty()) {
+        cmd.push_str(&format!(" -g {}", sh_quote(g)));
+    }
+    for g in query.exclude_globs.iter().filter(|g| !g.trim().is_empty()) {
+        cmd.push_str(&format!(" -g {}", sh_quote(&format!("!{g}"))));
+    }
+    cmd.push_str(&format!(" -e {} -- {}", sh_quote(&query.pattern), sh_quote(root)));
+    cmd
+}
+
+/// Parse `rg --json` output (one JSON object per line) into content hits, keeping
+/// only `type == "match"` records. rg reports the byte column of the first
+/// submatch, so jump-to-line lands on the match.
+fn parse_rg_json(root: &str, out: &str, max: usize) -> Vec<SearchHit> {
+    let normalized_root = root.trim_end_matches('/');
+    let mut hits = Vec::new();
+    for line in out.lines() {
+        if hits.len() >= max {
+            break;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("match") {
+            continue;
+        }
+        let data = &v["data"];
+        let Some(path) = data["path"]["text"].as_str().filter(|p| !p.is_empty()) else {
+            continue;
+        };
+        let lineno = data["line_number"].as_u64().unwrap_or(0);
+        let text = data["lines"]["text"].as_str().unwrap_or("");
+        let col = data["submatches"][0]["start"].as_u64().unwrap_or(0);
+        let rel = scan::relative_of(normalized_root, path);
+        hits.push(SearchHit::content(path.to_string(), rel, 0, lineno, col, preview(text)));
+    }
+    hits
+}
+
+/// `grep -rn` command line (the fallback when `rg` is absent). `-I` skips binary
+/// files (matching the walk's binary skip); `-i`/`-E`/`-F` mirror the query.
+fn grep_command(root: &str, query: &SearchQuery) -> String {
+    let mut flags = String::from("-rnI");
+    if !query.case_sensitive {
+        flags.push('i');
+    }
+    flags.push(if query.regex { 'E' } else { 'F' });
+    let mut cmd = format!("grep {flags}");
+    for g in query.include_globs.iter().filter(|g| !g.trim().is_empty()) {
+        cmd.push_str(&format!(" --include={}", sh_quote(g)));
+    }
+    for g in query.exclude_globs.iter().filter(|g| !g.trim().is_empty()) {
+        cmd.push_str(&format!(" --exclude={}", sh_quote(g)));
+    }
+    cmd.push_str(&format!(" -e {} -- {} 2>/dev/null", sh_quote(&query.pattern), sh_quote(root)));
+    cmd
+}
+
+/// Parse `grep -rn` output (`path:lineno:text`) into content hits. The line-number
+/// parse doubles as a guard: a line where the second field isn't a number (a path
+/// containing `:`) is skipped rather than mis-parsed. The column is recomputed
+/// client-side since grep doesn't report one.
+fn parse_grep(root: &str, out: &str, compiled: &Compiled, max: usize) -> Vec<SearchHit> {
+    let normalized_root = root.trim_end_matches('/');
+    let matcher = compiled.content.as_ref();
+    let mut hits = Vec::new();
+    for line in out.lines() {
+        if hits.len() >= max {
+            break;
+        }
+        let line = line.trim_end_matches('\r');
+        let mut it = line.splitn(3, ':');
+        let (Some(path), Some(num), Some(text)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        let Ok(lineno) = num.parse::<u64>() else {
+            continue;
+        };
+        let rel = scan::relative_of(normalized_root, path);
+        let col = matcher.and_then(|m| m.find(text)).unwrap_or(0) as u64;
+        hits.push(SearchHit::content(path.to_string(), rel, 0, lineno, col, preview(text)));
+    }
+    hits
+}
+
+/// SSH content: prefer `rg --json`, fall back to `grep -rn`. rg exit 0 (matches)
+/// and 1 (no matches) are both a clean run; anything else (2/127) means rg is
+/// missing or errored, so try grep. If grep is missing too, bail to the generic
+/// SFTP read walk.
+async fn content_exec_ssh(
+    ssh: &SshSession,
+    root: &str,
+    query: &SearchQuery,
+    compiled: &Compiled,
+) -> Result<Vec<SearchHit>> {
+    if let Ok(out) = ssh.exec_bounded(&rg_command(root, query), MAX_EXEC_BYTES, EXEC_TIMEOUT, None).await {
+        if !out.truncated && matches!(out.exit_code, Some(0) | Some(1)) {
+            return Ok(parse_rg_json(root, &out.stdout, query.max_results));
+        }
+    }
+    let out = ssh
+        .exec_bounded(&grep_command(root, query), MAX_EXEC_BYTES, EXEC_TIMEOUT, None)
+        .await
+        .context("run grep over SSH")?;
+    if out.truncated {
+        bail!("grep output exceeded the cap");
+    }
+    match out.exit_code {
+        Some(0) | Some(1) => Ok(parse_grep(root, &out.stdout, compiled, query.max_results)),
+        code => bail!("grep unavailable (exit {code:?})"),
+    }
+}
+
+/// Faro Agent content: same rg→grep ladder, gated by the daemon's exec policy.
+async fn content_exec_agent(
+    agent: &AgentSession,
+    root: &str,
+    query: &SearchQuery,
+    compiled: &Compiled,
+) -> Result<Vec<SearchHit>> {
+    if let Ok(out) = agent.exec(&rg_command(root, query), MAX_EXEC_BYTES, EXEC_TIMEOUT_MS).await {
+        if !out.truncated && !out.timed_out && matches!(out.exit_code, Some(0) | Some(1)) {
+            return Ok(parse_rg_json(root, &out.stdout, query.max_results));
+        }
+    }
+    let out = agent.exec(&grep_command(root, query), MAX_EXEC_BYTES, EXEC_TIMEOUT_MS).await?;
+    if out.truncated || out.timed_out {
+        bail!("grep output too large or timed out");
+    }
+    match out.exit_code {
+        Some(0) | Some(1) => Ok(parse_grep(root, &out.stdout, compiled, query.max_results)),
+        code => bail!("grep unavailable (exit {code:?})"),
+    }
+}
+
+/// SSH name search via `find -iname`. Accepts a non-empty result even on a
+/// non-zero exit (find returns non-zero when *some* subdir was unreadable yet
+/// still lists the rest); only a truly empty non-zero run bails to the walk.
+async fn name_exec_ssh(
+    ssh: &SshSession,
+    root: &str,
+    query: &SearchQuery,
+    compiled: &Compiled,
+) -> Result<Vec<SearchHit>> {
+    let out = ssh
+        .exec_bounded(&find_name_command(root, query), MAX_EXEC_BYTES, EXEC_TIMEOUT, None)
+        .await
+        .context("run find over SSH")?;
+    if out.truncated {
+        bail!("find output exceeded the cap");
+    }
+    let hits = parse_find_names(root, &out.stdout, compiled, query.max_results);
+    if hits.is_empty() && out.exit_code != Some(0) {
+        bail!("find failed (exit {:?})", out.exit_code);
+    }
+    Ok(hits)
+}
+
+/// Faro Agent name search via `find -iname`, gated by the daemon's exec policy.
+async fn name_exec_agent(
+    agent: &AgentSession,
+    root: &str,
+    query: &SearchQuery,
+    compiled: &Compiled,
+) -> Result<Vec<SearchHit>> {
+    let out = agent.exec(&find_name_command(root, query), MAX_EXEC_BYTES, EXEC_TIMEOUT_MS).await?;
+    if out.truncated || out.timed_out {
+        bail!("find output too large or timed out");
+    }
+    let hits = parse_find_names(root, &out.stdout, compiled, query.max_results);
+    if hits.is_empty() && out.exit_code != Some(0) {
+        bail!("find failed (exit {:?})", out.exit_code);
+    }
+    Ok(hits)
 }
 
 // ---------- Capped byte reads for the content walk ----------
@@ -878,5 +1274,88 @@ mod tests {
         assert!(result.stats.scanned >= 1);
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    // ---- exec fast-path parsers (Phase 2) ----
+
+    #[test]
+    fn parse_find_output_keeps_files_and_dirs_skips_symlinks() {
+        let compiled = Compiled::new(&q("x", SearchKind::Name)).unwrap();
+        let out = "f\t120\t/var/log/nginx.log\r\nd\t4096\t/var/log/nginx\nl\t0\t/var/log/sym\n";
+        let hits = parse_find_names("/var/log", out, &compiled, 100);
+        assert_eq!(hits.len(), 2); // symlink skipped
+        assert_eq!(hits[0].relative, "nginx.log");
+        assert!(!hits[0].is_dir);
+        assert_eq!(hits[0].size, 120);
+        assert_eq!(hits[1].relative, "nginx");
+        assert!(hits[1].is_dir);
+    }
+
+    #[test]
+    fn parse_find_output_applies_exclude_to_files() {
+        let mut query = q("x", SearchKind::Name);
+        query.exclude_globs = vec!["*.tmp".into()];
+        let compiled = Compiled::new(&query).unwrap();
+        let out = "f\t1\t/r/keep.log\nf\t2\t/r/skip.tmp\n";
+        let hits = parse_find_names("/r", out, &compiled, 100);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].relative, "keep.log");
+    }
+
+    #[test]
+    fn parse_rg_json_extracts_match_records() {
+        let out = concat!(
+            r#"{"type":"begin","data":{"path":{"text":"/srv/app/main.rs"}}}"#,
+            "\n",
+            r#"{"type":"match","data":{"path":{"text":"/srv/app/main.rs"},"lines":{"text":"    panic!(\"boom\");\n"},"line_number":42,"submatches":[{"match":{"text":"panic"},"start":4,"end":9}]}}"#,
+            "\n",
+            r#"{"type":"end","data":{"path":{"text":"/srv/app/main.rs"}}}"#,
+            "\n",
+        );
+        let hits = parse_rg_json("/srv/app", out, 100);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].relative, "main.rs");
+        assert_eq!(hits[0].line, Some(42));
+        assert_eq!(hits[0].column, Some(4));
+        assert_eq!(hits[0].preview.as_deref(), Some("panic!(\"boom\");"));
+    }
+
+    #[test]
+    fn parse_grep_output_recomputes_column_and_guards_colons() {
+        let compiled = Compiled::new(&q("panic", SearchKind::Content)).unwrap();
+        // Second line's "field 2" isn't a number → skipped (a path with a colon).
+        let out = "/srv/app/main.rs:42:    panic!(\"boom\");\n/srv/app/notes.txt:oops:foo\n";
+        let hits = parse_grep("/srv/app", out, &compiled, 100);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].relative, "main.rs");
+        assert_eq!(hits[0].line, Some(42));
+        assert_eq!(hits[0].column, Some(4)); // "panic" at col 4
+    }
+
+    #[test]
+    fn command_builders_quote_and_carry_flags() {
+        let mut query = q("pan ic", SearchKind::Content);
+        query.include_globs = vec!["*.rs".into()];
+        query.exclude_globs = vec!["*.min.js".into()];
+        let rg = rg_command("/a b", &query);
+        assert!(rg.contains("--json"));
+        assert!(rg.contains(" -F")); // literal
+        assert!(rg.contains(" -i")); // case-insensitive default
+        assert!(rg.contains("-g '*.rs'"));
+        assert!(rg.contains("-g '!*.min.js'"));
+        assert!(rg.contains("-e 'pan ic'"));
+        assert!(rg.contains("-- '/a b'"));
+
+        let grep = grep_command("/a b", &query);
+        assert!(grep.contains("grep -rnIiF"));
+        assert!(grep.contains("--include='*.rs'"));
+        assert!(grep.contains("--exclude='*.min.js'"));
+
+        // Name search: a plain substring becomes *substr*; a glob is used as-is.
+        assert_eq!(find_name_glob(&q("log", SearchKind::Name)), "*log*");
+        assert_eq!(find_name_glob(&q("*.log", SearchKind::Name)), "*.log");
+        let find = find_name_command("/var/log", &q("app", SearchKind::Name));
+        assert!(find.contains("-iname '*app*'"));
+        assert!(find.contains(r"-type f -o -type d"));
     }
 }
