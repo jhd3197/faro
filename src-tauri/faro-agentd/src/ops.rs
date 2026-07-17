@@ -405,4 +405,35 @@ mod tests {
         // Floor still protects against a `1` typo.
         assert_eq!(clamp_exec_timeout(0), Duration::from_millis(EXEC_TIMEOUT_MS_MIN));
     }
+
+    // Plan 10 Phase 1: a multi-line script with nested quotes must run VERBATIM
+    // through the daemon's exec path (`sh -c` / `powershell -Command` gets the
+    // whole program as one argument, so nothing re-tokenizes it at a shell
+    // boundary). This is what `/exec_script` relies on for agent targets.
+    #[tokio::test]
+    async fn multiline_script_runs_verbatim() {
+        let policy = Policy { allow_exec: true, allow_write: true };
+
+        #[cfg(windows)]
+        let script = "$msg = \"hello 'world'\"\nWrite-Output $msg\nWrite-Output \"line2\"";
+        #[cfg(not(windows))]
+        let script = "cat <<'EOF'\nhello 'world'\nline2\nEOF";
+
+        let resp = handle(
+            Request::Exec { command: script.to_string(), timeout_ms: 30_000, max_bytes: 65_536 },
+            policy,
+        )
+        .await;
+
+        match resp {
+            Response::Exec { stdout, exit_code, timed_out, .. } => {
+                assert!(!timed_out, "script timed out");
+                assert_eq!(exit_code, Some(0), "non-zero exit");
+                // Both lines survive, and the nested single-quotes are intact.
+                assert!(stdout.contains("hello 'world'"), "quotes mangled: {stdout:?}");
+                assert!(stdout.contains("line2"), "second line missing: {stdout:?}");
+            }
+            other => panic!("expected Exec response, got {other:?}"),
+        }
+    }
 }

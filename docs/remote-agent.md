@@ -107,6 +107,13 @@ AI agent reaches it through the same bridge tools it uses for SSH servers
   `sh` elsewhere). Takes an optional `timeoutMs` (default 60 000 ms, clamped to
   1 s – 15 min; `faro-cli agent exec --timeout-ms …`); output is capped at
   512 KiB.
+- **`faro_exec_script`** — runs a whole **multi-line script verbatim**
+  (`/exec_script`, `faro-cli agent script <server> <file>` or `agent exec
+  --file/--stdin`). The script bytes are read locally and shipped as an opaque
+  base64 payload, so heredocs, nested quotes and newlines survive with no
+  base64/quoting gymnastics on the caller's side. Same 512 KiB cap and the same
+  approval gate as `exec` — but, like a Write, **never** auto-approved by the
+  safe-read-only heuristic (only allow-all), since a script is multi-statement.
 - **`faro_read_file`** — capped file read via the daemon's `ReadFile`.
 - **`faro_list_dir` / `faro_search` / `faro_download` / `faro_upload`** — file
   ops through `AgentFs` and the transfer engine (uploads stream as ranged

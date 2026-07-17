@@ -236,6 +236,11 @@ enum AgentCmd {
     /// List the servers the Agent Bridge can currently reach.
     Sessions,
     /// Run a shell command on a server (SSH or Faro Agent). Exits with its exit code.
+    ///
+    /// For a multi-line program (heredocs, nested quotes) pass `--file <path>` or
+    /// `--stdin` instead of a command: the script bytes are read locally and run
+    /// verbatim on the server, so nothing gets re-parsed at a shell boundary. See
+    /// also `agent script`.
     Exec {
         /// Saved server name (as shown in Faro) or its session id.
         server: String,
@@ -245,9 +250,34 @@ enum AgentCmd {
         /// Timeout in milliseconds (default 60000; clamped to 1000–900000).
         #[arg(long)]
         timeout_ms: Option<u64>,
-        /// The command to run. Quote it, or pass it as trailing arguments.
-        #[arg(trailing_var_arg = true, required = true)]
+        /// Read the program to run from this local file, verbatim (no shell
+        /// re-parsing). Mutually exclusive with a trailing command / --stdin.
+        #[arg(long, conflicts_with = "stdin")]
+        file: Option<String>,
+        /// Read the program to run from stdin, verbatim.
+        #[arg(long)]
+        stdin: bool,
+        /// The command to run. Quote it, or pass it as trailing arguments. Omit
+        /// when using --file / --stdin.
+        #[arg(trailing_var_arg = true)]
         command: Vec<String>,
+    },
+    /// Run a whole local script file on a server (SSH or Faro Agent), verbatim.
+    ///
+    /// Reads the file's bytes locally and ships them as an opaque payload, so
+    /// heredocs, nested quotes and newlines survive intact — no base64 or quoting
+    /// gymnastics. Shorthand for `agent exec <server> --file <script>`.
+    Script {
+        /// Saved server name (as shown in Faro) or its session id.
+        server: String,
+        /// Local path to the script to run.
+        file: String,
+        /// Show what would run and whether it would need approval, without executing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Timeout in milliseconds (default 60000; clamped to 1000–900000).
+        #[arg(long)]
+        timeout_ms: Option<u64>,
     },
     /// List a remote directory.
     Ls {
@@ -1419,6 +1449,79 @@ fn check_mangled_remote_path(remote_path: &str, is_windows_target: bool) -> Resu
     )
 }
 
+/// Read a script's bytes from a local file or stdin, returning the bytes plus a
+/// friendly label (the filename, or "stdin") for Faro's console/audit. Used by
+/// `agent exec --file/--stdin` and `agent script` (Plan 10 Phase 1).
+fn read_script_source(file: Option<&str>, stdin: bool) -> Result<(Vec<u8>, String)> {
+    if let Some(path) = file {
+        let bytes = std::fs::read(path).with_context(|| format!("read script {path}"))?;
+        Ok((bytes, format!("script {}", basename(path))))
+    } else if stdin {
+        use std::io::Read as _;
+        let mut buf = Vec::new();
+        io::stdin()
+            .read_to_end(&mut buf)
+            .context("read script from stdin")?;
+        Ok((buf, "script (stdin)".to_string()))
+    } else {
+        bail!("no script source (expected --file or --stdin)")
+    }
+}
+
+/// Ship a script to the bridge's `/exec_script` route (base64 on the wire so any
+/// bytes survive) and print its output. The user never sees the base64 — that's
+/// the whole point (Plan 10 Phase 1).
+fn run_agent_script(
+    ep: &Endpoint,
+    session_id: &str,
+    script: &[u8],
+    label: &str,
+    dry_run: bool,
+    timeout_ms: Option<u64>,
+) -> Result<()> {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(script);
+    let mut req = serde_json::json!({
+        "sessionId": session_id,
+        "script": b64,
+        "label": label,
+        "dryRun": dry_run,
+    });
+    if let Some(t) = timeout_ms {
+        req["timeoutMs"] = serde_json::json!(t);
+    }
+    let body = http_post(ep, "/exec_script", req)?;
+    if dry_run {
+        println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+        return Ok(());
+    }
+    print_exec_output_and_exit(&body)
+}
+
+/// Print an exec/script result (stdout, stderr, timeout note) and exit this
+/// process with the remote command's exit code. Shared by `agent exec`,
+/// `agent script` and `agent exec --file/--stdin`.
+fn print_exec_output_and_exit(body: &serde_json::Value) -> Result<()> {
+    if let Some(out) = body.get("stdout").and_then(|v| v.as_str()) {
+        let mut so = io::stdout();
+        so.write_all(out.as_bytes()).ok();
+        so.flush().ok();
+    }
+    if let Some(e) = body.get("stderr").and_then(|v| v.as_str()) {
+        if !e.is_empty() {
+            let mut se = io::stderr();
+            se.write_all(e.as_bytes()).ok();
+            se.flush().ok();
+        }
+    }
+    if body.get("timedOut").and_then(|v| v.as_bool()).unwrap_or(false) {
+        eprintln!("{}", warn("command timed out before finishing"));
+    }
+    // exitCode is a number or null on the wire; null => 0, like cmd_exec.
+    let code = body.get("exitCode").and_then(|v| v.as_i64()).unwrap_or(0);
+    std::process::exit(code as i32)
+}
+
 fn cmd_agent(action: AgentCmd) -> Result<()> {
     let ep = read_endpoint()?;
     warn_if_stale(&ep);
@@ -1449,32 +1552,32 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             }
             Ok(())
         }
-        AgentCmd::Exec { server, dry_run, timeout_ms, command } => {
+        AgentCmd::Exec { server, dry_run, timeout_ms, file, stdin, command } => {
             let id = resolve_server(&ep, &server)?;
+            // --file / --stdin ship a script verbatim; otherwise run the joined
+            // command line. Exactly one source must be given.
+            if file.is_some() || stdin {
+                if !command.is_empty() {
+                    bail!("pass a command OR --file/--stdin, not both");
+                }
+                let (bytes, label) = read_script_source(file.as_deref(), stdin)?;
+                return run_agent_script(&ep, &id, &bytes, &label, dry_run, timeout_ms);
+            }
+            if command.is_empty() {
+                bail!("nothing to run — give a command, or use --file <path> / --stdin");
+            }
             let mut req =
                 serde_json::json!({ "sessionId": id, "command": command.join(" "), "dryRun": dry_run });
             if let Some(t) = timeout_ms {
                 req["timeoutMs"] = serde_json::json!(t);
             }
             let body = http_post(&ep, "/exec", req)?;
-            if let Some(out) = body.get("stdout").and_then(|v| v.as_str()) {
-                let mut so = io::stdout();
-                so.write_all(out.as_bytes()).ok();
-                so.flush().ok();
-            }
-            if let Some(e) = body.get("stderr").and_then(|v| v.as_str()) {
-                if !e.is_empty() {
-                    let mut se = io::stderr();
-                    se.write_all(e.as_bytes()).ok();
-                    se.flush().ok();
-                }
-            }
-            if body.get("timedOut").and_then(|v| v.as_bool()).unwrap_or(false) {
-                eprintln!("{}", warn("command timed out before finishing"));
-            }
-            // exitCode is a number or null on the wire; null => 0, like cmd_exec.
-            let code = body.get("exitCode").and_then(|v| v.as_i64()).unwrap_or(0);
-            std::process::exit(code as i32)
+            print_exec_output_and_exit(&body)
+        }
+        AgentCmd::Script { server, file, dry_run, timeout_ms } => {
+            let id = resolve_server(&ep, &server)?;
+            let (bytes, label) = read_script_source(Some(&file), false)?;
+            run_agent_script(&ep, &id, &bytes, &label, dry_run, timeout_ms)
         }
         AgentCmd::Ls { server, path } => {
             let id = resolve_server(&ep, &server)?;

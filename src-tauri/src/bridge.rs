@@ -1047,6 +1047,7 @@ async fn route(app: &AppHandle, state: &Arc<BridgeState>, req: &Request) -> (u16
         ("GET", "/context") => op_context(app, state).await,
         ("GET", "/sessions") => handle_sessions(app, state).await,
         ("POST", "/exec") => handle_exec(app, state, &req.body).await,
+        ("POST", "/exec_script") => handle_exec_script(app, state, &req.body).await,
         ("POST", "/list") => handle_list(app, state, &req.body).await,
         ("POST", "/read") => handle_read(app, state, &req.body).await,
         ("POST", "/download") => handle_download(app, state, &req.body).await,
@@ -1109,6 +1110,36 @@ async fn handle_exec(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> 
     let dry_run = parsed.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
     let timeout_ms = parsed.get("timeoutMs").and_then(|v| v.as_u64());
     exec_on(app, state, &session_id, &command, dry_run, timeout_ms).await
+}
+
+/// `/exec_script` — run a whole local script (Plan 10 Phase 1). The body carries
+/// the script as base64 (`script`) so any bytes survive the JSON/HTTP hop
+/// untouched; `label` is a friendly name for the console/audit (e.g. the source
+/// filename). Decodes, then runs it verbatim via `exec_script_on`.
+async fn handle_exec_script(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    use base64::Engine as _;
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    let script_b64 = body_str(&parsed, "script");
+    if session_id.is_empty() || script_b64.is_empty() {
+        return (400, json!({"error": "sessionId and script (base64) are required"}));
+    }
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(script_b64.as_bytes()) else {
+        return (400, json!({"error": "script must be valid base64"}));
+    };
+    let Ok(script) = String::from_utf8(bytes) else {
+        return (400, json!({"error": "script bytes are not valid UTF-8"}));
+    };
+    let mut label = body_str(&parsed, "label");
+    if label.is_empty() {
+        label = "a script".to_string();
+    }
+    let dry_run = parsed.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
+    let timeout_ms = parsed.get("timeoutMs").and_then(|v| v.as_u64());
+    exec_script_on(app, state, &session_id, &script, &label, dry_run, timeout_ms).await
 }
 
 async fn handle_run(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
@@ -1489,7 +1520,8 @@ pub(crate) async fn exec_on(
         let Some(agent) = manager.get_agent(session_id).await else {
             return (400, json!({"error": "session went away"}));
         };
-        exec_core_agent(app, state, &agent, session_id, &session_name, command, timeout).await
+        exec_core_agent(app, state, &agent, session_id, &session_name, command, command, timeout)
+            .await
     } else {
         let Some(ssh) = manager.get_ssh(session_id).await else {
             return (400, json!({"error": "session went away"}));
@@ -1498,11 +1530,125 @@ pub(crate) async fn exec_on(
     }
 }
 
+/// Run a whole local script (read as raw bytes by the caller, so heredocs, nested
+/// quotes, and newlines survive) on an SSH server or a paired agent — the answer
+/// to the base64/heredoc gymnastics a multi-line command otherwise forces
+/// (Plan 10 Phase 1). The script text runs the same way the tracked `exec` path
+/// already runs a command: piped verbatim into the target's shell (`base64 -d |
+/// sh` on SSH, `sh -c`/`powershell -Command` on an agent daemon), never spliced
+/// into a command line. Gated as an Exec, but — like a Write — never auto-approved
+/// by the safe-read-only heuristic (only allow-all), since a script is
+/// multi-statement and can't be classified safe. `label` is the friendly name
+/// shown in the console + audit (the script never dumps there).
+async fn exec_script_on(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    script: &str,
+    label: &str,
+    dry_run: bool,
+    timeout_ms: Option<u64>,
+) -> (u16, Value) {
+    let manager = app.state::<AppState>().sessions.clone();
+    let (session_name, is_agent) = if let Some(ssh) = manager.get_ssh(session_id).await {
+        (ssh.profile.name.clone(), false)
+    } else if let Some(agent) = manager.get_agent(session_id).await {
+        (agent.profile.name.clone(), true)
+    } else {
+        return (
+            400,
+            json!({"error": "the requested connection can't run scripts. Scripts run on SSH/SFTP and Faro Agent connections only."}),
+        );
+    };
+
+    if !state.is_enabled(session_id).await {
+        return (403, json!({
+            "error": format!(
+                "connection '{}' has not granted agent access. Ask the user to open Faro → Agent Bridge and toggle 'Allow agent access' for it.",
+                session_name
+            )
+        }));
+    }
+
+    if dry_run {
+        let policy = *state.policy.lock().await;
+        return (
+            200,
+            json!({
+                "wouldRun": label,
+                "bytes": script.len(),
+                "lines": script.lines().count(),
+                "needsApproval": !policy.allow_all,
+                "reason": if policy.allow_all {
+                    "auto-approve all requests is on"
+                } else {
+                    "a script always prompts for approval in Faro (never auto-approved by the safe-exec heuristic)"
+                },
+            }),
+        );
+    }
+
+    // Gate as an Exec, but pass `None` for the command so the safe-read-only
+    // heuristic can't auto-approve a multi-statement script — only allow-all does.
+    // The approval summary shows a header plus the script body (capped) so the
+    // user reviews exactly what will run.
+    if let Err(resp) = gate(
+        app,
+        state,
+        session_id,
+        &session_name,
+        OpClass::Exec,
+        "script",
+        &script_approval_summary(label, script),
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    let timeout = exec_timeout_from(timeout_ms);
+    if is_agent {
+        let Some(agent) = manager.get_agent(session_id).await else {
+            return (400, json!({"error": "session went away"}));
+        };
+        exec_core_agent(app, state, &agent, session_id, &session_name, script, label, timeout).await
+    } else {
+        let Some(ssh) = manager.get_ssh(session_id).await else {
+            return (400, json!({"error": "session went away"}));
+        };
+        exec_core(app, state, &ssh, session_id, &session_name, script, label, timeout).await
+    }
+}
+
+/// Approval-prompt text for a script run: a one-line header naming the script and
+/// its size, then the body (capped at ~4 KiB so a huge script doesn't overflow
+/// the prompt — the user still sees the head and the total size).
+fn script_approval_summary(label: &str, script: &str) -> String {
+    const CAP: usize = 4096;
+    let header = format!("Run {label} ({} bytes, {} lines):", script.len(), script.lines().count());
+    if script.len() <= CAP {
+        format!("{header}\n{script}")
+    } else {
+        // Cut at the largest char boundary ≤ CAP so we never split a UTF-8 scalar.
+        let mut cut = CAP;
+        while cut > 0 && !script.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!(
+            "{header}\n{}\n… [preview truncated; {} bytes total]",
+            &script[..cut],
+            script.len()
+        )
+    }
+}
+
 /// Exec on a Faro Agent machine. The daemon runs the command natively (and
 /// enforces its own policy), so there's no PTY/pgid/streaming as with SSH — we
 /// emit the same live-console events (`exec-start` → `output` → terminal `job`)
 /// around a single request so the UI renders it identically, then log the audit
 /// line.
+#[allow(clippy::too_many_arguments)]
 async fn exec_core_agent(
     app: &AppHandle,
     state: &Arc<BridgeState>,
@@ -1510,6 +1656,7 @@ async fn exec_core_agent(
     session_id: &str,
     session_name: &str,
     command: &str,
+    label: &str,
     timeout: Duration,
 ) -> (u16, Value) {
     let op_id = Uuid::new_v4().to_string();
@@ -1520,7 +1667,7 @@ async fn exec_core_agent(
             "opId": op_id,
             "sessionId": session_id,
             "sessionName": session_name,
-            "command": command,
+            "command": label,
         }),
     );
 
@@ -1556,14 +1703,14 @@ async fn exec_core_agent(
                 json!({
                     "opId": op_id,
                     "sessionId": session_id,
-                    "label": command,
+                    "label": label,
                     "pgid": Value::Null,
                     "startedAt": started_at,
                     "status": status,
                     "exitCode": out.exit_code,
                 }),
             );
-            let mut detail = command.to_string();
+            let mut detail = label.to_string();
             if out.truncated {
                 detail.push_str("  [output truncated]");
             }
@@ -1600,7 +1747,7 @@ async fn exec_core_agent(
                 json!({
                     "opId": op_id,
                     "sessionId": session_id,
-                    "label": command,
+                    "label": label,
                     "pgid": Value::Null,
                     "startedAt": started_at,
                     "status": "failed",
@@ -1614,7 +1761,7 @@ async fn exec_core_agent(
                         id: op_id,
                         session_id: session_id.to_string(),
                         kind: "error".into(),
-                        detail: format!("{command} — {e}"),
+                        detail: format!("{label} — {e}"),
                         ok: false,
                         at: now_millis(),
                     },
@@ -3621,7 +3768,7 @@ async fn run_skill_on_target(
         let (status, body) = if is_agent {
             match manager.get_agent(&session_id).await {
                 Some(agent) => {
-                    exec_core_agent(&app, &state, &agent, &session_id, &session_name, command, timeout).await
+                    exec_core_agent(&app, &state, &agent, &session_id, &session_name, command, &console_label, timeout).await
                 }
                 None => (500, json!({"error": "session went away"})),
             }
@@ -3969,6 +4116,22 @@ async fn mcp_tools_list(state: &Arc<BridgeState>) -> Value {
                         "session": session_prop
                     },
                     "required": ["command"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "faro_exec_script",
+                "description": "Run a whole multi-line script on a connected computer in Faro (SSH server or paired Faro Agent machine) WITHOUT the base64/heredoc/quoting gymnastics a single-line `faro_exec` forces. Pass the script's exact source in `script`; it runs verbatim in the target's native shell (sh on POSIX/SSH, sh or PowerShell on a Faro Agent — check faro_server_info) so heredocs, nested quotes and newlines all survive. Use this instead of `faro_exec` whenever the program spans multiple lines or contains quoting that is awkward to escape. Always prompts for approval (a script is never auto-approved by the safe-read-only heuristic). Returns stdout, stderr and exit code; output is capped at 512 KiB.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "script": { "type": "string", "description": "The full script source to run, verbatim (multi-line allowed). It is NOT re-parsed at a shell boundary, so write it exactly as you would a local .sh/.ps1 file." },
+                        "label": { "type": "string", "description": "Optional friendly name shown in Faro's console + audit log (e.g. a filename or purpose). The script body itself is never dumped there." },
+                        "dryRun": { "type": "boolean", "description": "If true, return a preview (byte/line count, whether it would need approval) without running." },
+                        "timeoutMs": { "type": "integer", "description": "Optional timeout in milliseconds. Default 60000; clamped to [1000, 900000]." },
+                        "session": session_prop
+                    },
+                    "required": ["script"],
                     "additionalProperties": false
                 }
             },
@@ -4411,6 +4574,31 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             };
             let (status, body) =
                 exec_on(app, state, &session_id, &command, dry_run, timeout_ms).await;
+            if status == 200 {
+                if dry_run {
+                    tool_text(serde_json::to_string_pretty(&body).unwrap_or_default())
+                } else {
+                    tool_text(format_exec_result(&body))
+                }
+            } else {
+                tool_error(body.get("error").and_then(|v| v.as_str()).unwrap_or("error"))
+            }
+        }
+        "faro_exec_script" => {
+            let Some(script) = arg_str(&args, "script") else {
+                return tool_error("`script` is required");
+            };
+            let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
+            let timeout_ms = args.get("timeoutMs").and_then(|v| v.as_u64());
+            let label = arg_str(&args, "label")
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "a script".to_string());
+            let session_id = match resolve_session(app, state, session_arg, SessionNeed::Exec).await {
+                Ok(id) => id,
+                Err(msg) => return tool_error(&msg),
+            };
+            let (status, body) =
+                exec_script_on(app, state, &session_id, &script, &label, dry_run, timeout_ms).await;
             if status == 200 {
                 if dry_run {
                     tool_text(serde_json::to_string_pretty(&body).unwrap_or_default())
@@ -4872,6 +5060,33 @@ async fn write_jsonrpc_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Plan 10 Phase 1: the CLI base64-encodes a script's raw bytes; the bridge
+    // decodes them back. Prove that hop is byte-exact for a heredoc + nested
+    // quotes + trailing-newline script (the content that breaks a command line).
+    #[test]
+    fn exec_script_base64_roundtrip_is_byte_exact() {
+        use base64::Engine as _;
+        let script = "#!/bin/sh\ncat <<'EOF'\nnested 'single' and \"double\" quotes\nEOF\n";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(script);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), script);
+    }
+
+    #[test]
+    fn script_summary_has_header_and_survives_multibyte_truncation() {
+        // Short script → header + full body.
+        let s = script_approval_summary("script foo.sh", "echo hi\necho bye");
+        assert!(s.starts_with("Run script foo.sh (16 bytes, 2 lines):"), "got: {s}");
+        assert!(s.contains("echo bye"));
+        // Long script with a multibyte char straddling the 4 KiB cap must not
+        // panic on a char-boundary split.
+        let big = format!("{}é tail", "a".repeat(4095));
+        let s = script_approval_summary("big", &big);
+        assert!(s.contains("preview truncated"));
+    }
 
     #[test]
     fn exec_timeout_defaults_and_clamps() {
