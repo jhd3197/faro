@@ -170,7 +170,8 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
   const isDropbox = protocol === "dropbox";
   const isOnedrive = protocol === "onedrive";
   const isGdrive = protocol === "gdrive";
-  const isCloudOAuth = isDropbox || isOnedrive || isGdrive;
+  const isBox = protocol === "box";
+  const isCloudOAuth = isDropbox || isOnedrive || isGdrive || isBox;
   const isObject = isObjectProtocol(protocol);
   const isAgent = isAgentProtocol(protocol);
 
@@ -179,7 +180,8 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
   const [cloudAuthed, setCloudAuthed] = useState<boolean>(
     (seed?.protocol === "dropbox" ||
       seed?.protocol === "onedrive" ||
-      seed?.protocol === "gdrive") &&
+      seed?.protocol === "gdrive" ||
+      seed?.protocol === "box") &&
       !!seed?.account
   );
   const [cloudAccount, setCloudAccount] = useState<string>(seed?.account ?? "");
@@ -345,7 +347,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
 
         <Field label="Protocol">
           <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-bg-subtle p-1">
-            {(["sftp", "ftp", "ftps", "s3", "azure", "gcs", "webdav", "http", "dropbox", "onedrive", "gdrive", "faro-agent"] as Protocol[]).map((p) => (
+            {(["sftp", "ftp", "ftps", "s3", "azure", "gcs", "webdav", "http", "dropbox", "onedrive", "gdrive", "box", "faro-agent"] as Protocol[]).map((p) => (
               <ProtocolButton
                 key={p}
                 active={protocol === p}
@@ -420,7 +422,9 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
                 ? ipc.dropboxAuthorize
                 : isOnedrive
                   ? ipc.onedriveAuthorize
-                  : ipc.gdriveAuthorize
+                  : isGdrive
+                    ? ipc.gdriveAuthorize
+                    : ipc.boxAuthorize
             }
             profileId={id}
             authed={cloudAuthed}
@@ -1381,6 +1385,8 @@ function protocolHint(p: Protocol): string {
       return "OAuth · Cloud";
     case "gdrive":
       return "OAuth · Cloud";
+    case "box":
+      return "OAuth · Cloud";
     case "faro-agent":
       return "Machine · :8722";
   }
@@ -1406,6 +1412,7 @@ function ProtocolButton({
   else if (label === "Dropbox") Icon = Box;
   else if (label === "OneDrive") Icon = Cloud;
   else if (label === "Google Drive") Icon = Cloud;
+  else if (label === "Box") Icon = Box;
   else if (label === "Faro Agent") Icon = MonitorSmartphone;
   return (
     <button

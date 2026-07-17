@@ -80,8 +80,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5"
 sha2 = "0.10"
 base64 = "0.22"
-# `stream` powers ranged/streamed WebDAV GET+PUT bodies (remotefs/webdav.rs).
-reqwest = { version = "0.12", features = ["json", "stream"] }
+# `stream` powers ranged/streamed WebDAV GET+PUT bodies; `multipart` powers Box's
+# multipart/form-data uploads and Google Drive multipart create.
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 # Wraps a tokio File as a Stream for streaming WebDAV PUT uploads.
 tokio-util = { version = "0.7", features = ["io"] }
 # Decode percent-encoded WebDAV PROPFIND href paths back into file names.

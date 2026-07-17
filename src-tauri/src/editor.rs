@@ -452,6 +452,21 @@ async fn download_to(
             }
             file.flush().await?;
         }
+        Session::Box(bx) => {
+            use futures::StreamExt;
+            let (file_id, _) = bx
+                .resolve_item(remote_path)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("{remote_path}: not found"))?;
+            let resp = bx.get_stream(&format!("/files/{file_id}/content")).await?;
+            let mut file = tokio::fs::File::create(local_path).await?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk).await?;
+            }
+            file.flush().await?;
+        }
         Session::Agent(agent) => {
             use base64::Engine as _;
             use faro_agent_proto::msg::{Request, Response};
@@ -635,6 +650,31 @@ async fn upload_from(
                 let code = resp.status().as_u16();
                 let text = resp.text().await.unwrap_or_default();
                 return Err(anyhow::anyhow!("gdrive upload {remote_path} ({code}): {text}"));
+            }
+        }
+        Session::Box(bx) => {
+            // Edit-in-place uploads a new version of the existing file.
+            let (file_id, _) = bx
+                .resolve_item(remote_path)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("{remote_path}: not found"))?;
+            let token = bx.access_token().await?;
+            let bytes = tokio::fs::read(&local).await?;
+            let part = reqwest::multipart::Part::bytes(bytes)
+                .file_name(crate::session::boxdrive::basename(remote_path).to_string());
+            let form = reqwest::multipart::Form::new().part("file", part);
+            let resp = bx
+                .client
+                .post(format!("{}/files/{file_id}/content", bx.upload_base))
+                .bearer_auth(&token)
+                .multipart(form)
+                .send()
+                .await
+                .with_context(|| format!("box update {remote_path}"))?;
+            if !resp.status().is_success() {
+                let code = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!("box upload {remote_path} ({code}): {text}"));
             }
         }
         Session::Agent(agent) => {

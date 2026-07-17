@@ -63,6 +63,7 @@ pub async fn delete_profile(
             "gdrive" => {
                 crate::oauth::delete_tokens(crate::session::gdrive::GDRIVE_SERVICE, &id)
             }
+            "box" => crate::oauth::delete_tokens(crate::session::boxdrive::BOX_SERVICE, &id),
             _ => {}
         }
     }
@@ -292,6 +293,40 @@ pub async fn gdrive_authorize(profile_id: String) -> Result<DropboxAuthResult, S
         sort_order: None,
     };
     let account_label = match crate::session::gdrive_connect(&probe).await {
+        Ok(session) => session.account_label().await.unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+    Ok(DropboxAuthResult { account_label })
+}
+
+/// Run the interactive Box OAuth flow, store tokens, return the label.
+#[tauri::command]
+pub async fn box_authorize(profile_id: String) -> Result<DropboxAuthResult, String> {
+    let config = crate::session::boxdrive::box_config();
+    let (tokens, _raw) = crate::oauth::authorize_loopback(&config).await.map_err(err)?;
+    crate::oauth::store_tokens(crate::session::boxdrive::BOX_SERVICE, &profile_id, &tokens)
+        .map_err(err)?;
+
+    let probe = ConnectionProfile {
+        id: profile_id.clone(),
+        name: String::new(),
+        protocol: "box".into(),
+        host: "box.com".into(),
+        port: 443,
+        username: String::new(),
+        auth: AuthMethod::Password { password: String::new() },
+        default_remote_path: None,
+        color: None,
+        auto_connect: None,
+        bucket: None,
+        region: None,
+        endpoint: None,
+        account: None,
+        agent_key: None,
+        group: None,
+        sort_order: None,
+    };
+    let account_label = match crate::session::box_connect(&probe).await {
         Ok(session) => session.account_label().await.unwrap_or_default(),
         Err(_) => String::new(),
     };
@@ -634,6 +669,7 @@ pub fn fs_for_session(session: &Arc<Session>) -> Box<dyn RemoteFs> {
         Session::Dropbox(dbx) => Box::new(crate::remotefs::dropbox::DropboxFs::new(dbx.clone())),
         Session::OneDrive(od) => Box::new(crate::remotefs::onedrive::OneDriveFs::new(od.clone())),
         Session::GDrive(gd) => Box::new(crate::remotefs::gdrive::GDriveFs::new(gd.clone())),
+        Session::Box(bx) => Box::new(crate::remotefs::boxdrive::BoxFs::new(bx.clone())),
         Session::Agent(agent) => Box::new(crate::remotefs::agent::AgentFs::new(agent.clone())),
     }
 }

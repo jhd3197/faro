@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 pub mod agent;
+pub mod boxdrive;
 pub mod dropbox;
 pub mod ftp;
 pub mod gdrive;

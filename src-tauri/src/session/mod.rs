@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod boxdrive;
 pub mod dropbox;
 pub mod ftp;
 pub mod gdrive;
@@ -7,6 +8,7 @@ pub mod object;
 pub mod onedrive;
 pub mod webdav;
 pub use agent::{agent_pair, AgentSession};
+pub use boxdrive::{box_connect, BoxSession};
 pub use dropbox::{dropbox_connect, DropboxSession};
 pub use ftp::{ftp_connect, FtpSession};
 pub use gdrive::{gdrive_connect, GDriveSession};
@@ -1144,6 +1146,10 @@ pub async fn open_session(
             let gd = gdrive_connect(profile).await?;
             Ok(Session::GDrive(Arc::new(gd)))
         }
+        "box" => {
+            let bx = box_connect(profile).await?;
+            Ok(Session::Box(Arc::new(bx)))
+        }
         other => Err(anyhow!("unsupported protocol: {other}")),
     }
 }
@@ -1400,6 +1406,7 @@ pub enum Session {
     Dropbox(Arc<DropboxSession>),
     OneDrive(Arc<OneDriveSession>),
     GDrive(Arc<GDriveSession>),
+    Box(Arc<BoxSession>),
     Agent(Arc<AgentSession>),
 }
 
@@ -1414,6 +1421,7 @@ impl Session {
             Self::Dropbox(s) => &s.profile,
             Self::OneDrive(s) => &s.profile,
             Self::GDrive(s) => &s.profile,
+            Self::Box(s) => &s.profile,
             Self::Agent(s) => &s.profile,
         }
     }
@@ -1428,6 +1436,7 @@ impl Session {
             Self::Dropbox(_) => "dropbox",
             Self::OneDrive(_) => "onedrive",
             Self::GDrive(_) => "gdrive",
+            Self::Box(_) => "box",
             Self::Agent(_) => "faro-agent",
         }
     }
@@ -1533,6 +1542,12 @@ impl SessionManager {
                 let id = gd.id.clone();
                 (id, Session::GDrive(Arc::new(gd)))
             }
+            "box" => {
+                let _ = app; // OAuth tokens loaded from the keychain; no prompt.
+                let bx = box_connect(&profile).await?;
+                let id = bx.id.clone();
+                (id, Session::Box(Arc::new(bx)))
+            }
             "faro-agent" => {
                 let agent = AgentSession::connect(profile).await?;
                 let id = agent.id.clone();
@@ -1618,6 +1633,9 @@ impl SessionManager {
                 }
                 Session::GDrive(_) => {
                     // Google Drive is stateless HTTP — nothing to close.
+                }
+                Session::Box(_) => {
+                    // Box is stateless HTTP — nothing to close.
                 }
                 Session::Agent(agent) => {
                     agent.disconnect().await;

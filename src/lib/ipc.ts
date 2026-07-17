@@ -88,6 +88,10 @@ export const ipc = {
   gdriveAuthorize: (profileId: string) =>
     invoke<{ accountLabel: string }>("gdrive_authorize", { profileId }),
 
+  /** Run the interactive Box OAuth flow for a profile. */
+  boxAuthorize: (profileId: string) =>
+    invoke<{ accountLabel: string }>("box_authorize", { profileId }),
+
   // ---- Remote control: host THIS machine as a Faro Agent (Settings) ----
 
   /** Current state of the in-app agent host (enabled, running, policy, peers,

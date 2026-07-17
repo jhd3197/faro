@@ -1,6 +1,6 @@
 use crate::session::{
-    DropboxSession, FtpSession, GDriveSession, HttpSession, ObjectSession, OneDriveSession,
-    Session, SshSession, WebdavSession,
+    BoxSession, DropboxSession, FtpSession, GDriveSession, HttpSession, ObjectSession,
+    OneDriveSession, Session, SshSession, WebdavSession,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -296,6 +296,16 @@ impl TransferManager {
                     )
                     .await
                 }
+                Session::Box(bx) => {
+                    mgr.run_box_download(
+                        &id_for_task,
+                        bx.clone(),
+                        &remote_path,
+                        &final_path,
+                        &app,
+                    )
+                    .await
+                }
                 Session::Agent(agent) => {
                     mgr.run_agent_download(
                         &id_for_task,
@@ -528,6 +538,16 @@ impl TransferManager {
                     mgr.run_gdrive_upload(
                         &id_for_task,
                         gd.clone(),
+                        &local,
+                        &final_remote,
+                        &app,
+                    )
+                    .await
+                }
+                Session::Box(bx) => {
+                    mgr.run_box_upload(
+                        &id_for_task,
+                        bx.clone(),
                         &local,
                         &final_remote,
                         &app,
@@ -1575,6 +1595,113 @@ impl TransferManager {
         self.update(id, |t| t.transferred = size).await;
         Ok(())
     }
+
+    /// Stream a Box download: resolve the path to a file id, GET `/files/{id}/content`.
+    async fn run_box_download(
+        &self,
+        id: &str,
+        session: Arc<BoxSession>,
+        remote_path: &str,
+        local_path: &Path,
+        app: &AppHandle,
+    ) -> Result<()> {
+        use futures::StreamExt;
+
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+
+        let (file_id, _) = session
+            .resolve_item(remote_path)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("{remote_path}: not found"))?;
+        let resp = session
+            .get_stream(&format!("/files/{file_id}/content"))
+            .await?;
+
+        let mut file = tokio::fs::File::create(local_path)
+            .await
+            .with_context(|| format!("create {}", local_path.display()))?;
+        let mut stream = resp.bytes_stream();
+        let mut transferred: u64 = 0;
+        let mut last_emit = Instant::now();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.with_context(|| format!("box chunk for {remote_path}"))?;
+            file.write_all(&chunk).await?;
+            transferred += chunk.len() as u64;
+            if last_emit.elapsed() > Duration::from_millis(100) {
+                self.update(id, |t| t.transferred = transferred).await;
+                if let Some(t) = self.get(id).await {
+                    let _ = app.emit("transfer://progress", &t);
+                }
+                last_emit = Instant::now();
+            }
+        }
+        file.flush().await?;
+        self.update(id, |t| t.transferred = transferred).await;
+        Ok(())
+    }
+
+    /// Upload to Box via multipart/form-data: a new file (`/files/content` with
+    /// attributes) or a new version of an existing one (`/files/{id}/content`).
+    async fn run_box_upload(
+        &self,
+        id: &str,
+        session: Arc<BoxSession>,
+        local_path: &Path,
+        remote_path: &str,
+        _app: &AppHandle,
+    ) -> Result<()> {
+        use crate::session::boxdrive::{basename, normalize, parent_of};
+
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+
+        let size = tokio::fs::metadata(local_path)
+            .await
+            .with_context(|| format!("stat {}", local_path.display()))?
+            .len();
+        let norm = normalize(remote_path);
+        let name = basename(&norm).to_string();
+        let parent_id = session.folder_id(&parent_of(&norm)).await?;
+        let existing = session.find_child(&parent_id, &name).await?;
+        let bytes = tokio::fs::read(local_path)
+            .await
+            .with_context(|| format!("read {}", local_path.display()))?;
+        let token = session.access_token().await?;
+
+        let file_part = reqwest::multipart::Part::bytes(bytes).file_name(name.clone());
+        let (url, form) = match existing {
+            Some((file_id, false)) => (
+                format!("{}/files/{file_id}/content", session.upload_base),
+                reqwest::multipart::Form::new().part("file", file_part),
+            ),
+            _ => {
+                let attrs = serde_json::json!({ "name": name, "parent": { "id": parent_id } });
+                (
+                    format!("{}/files/content", session.upload_base),
+                    reqwest::multipart::Form::new()
+                        .text("attributes", attrs.to_string())
+                        .part("file", file_part),
+                )
+            }
+        };
+        let resp = session
+            .client
+            .post(&url)
+            .bearer_auth(&token)
+            .multipart(form)
+            .send()
+            .await
+            .with_context(|| format!("upload {remote_path}"))?;
+        if !resp.status().is_success() {
+            let code = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("upload {remote_path} failed ({code}): {text}"));
+        }
+        session.clear_cache();
+        self.update(id, |t| t.transferred = size).await;
+        Ok(())
+    }
 }
 
 /// Build a RemoteFs handle for the right backend.
@@ -1590,6 +1717,7 @@ fn fs_for_session(session: &Arc<Session>) -> Box<dyn crate::remotefs::RemoteFs> 
         Session::Dropbox(dbx) => Box::new(crate::remotefs::dropbox::DropboxFs::new(dbx.clone())),
         Session::OneDrive(od) => Box::new(crate::remotefs::onedrive::OneDriveFs::new(od.clone())),
         Session::GDrive(gd) => Box::new(crate::remotefs::gdrive::GDriveFs::new(gd.clone())),
+        Session::Box(bx) => Box::new(crate::remotefs::boxdrive::BoxFs::new(bx.clone())),
         Session::Agent(agent) => Box::new(crate::remotefs::agent::AgentFs::new(agent.clone())),
     }
 }
@@ -1673,6 +1801,7 @@ async fn remote_size(session: &Arc<Session>, path: &str) -> Result<u64> {
         }
         Session::OneDrive(od) => Ok(od.size(&crate::remotefs::onedrive::item_ref(path)).await),
         Session::GDrive(gd) => Ok(gd.size(path).await),
+        Session::Box(bx) => Ok(bx.size(path).await),
         Session::Agent(agent) => Ok(agent_stat(agent, path).await.0),
     }
 }
@@ -1826,6 +1955,25 @@ async fn remote_resolve(
                         let (stem, ext) = split_ext(initial_remote);
                         candidate = format!("{stem}_{i}{ext}");
                         if !gd.exists(&candidate).await {
+                            break;
+                        }
+                    }
+                    (candidate, false)
+                }
+            })
+        }
+        Session::Box(bx) => {
+            let exists = bx.exists(initial_remote).await;
+            Ok(match policy {
+                OverwritePolicy::Overwrite => (initial_remote.to_string(), false),
+                OverwritePolicy::Skip => (initial_remote.to_string(), exists),
+                OverwritePolicy::Rename if !exists => (initial_remote.to_string(), false),
+                OverwritePolicy::Rename => {
+                    let mut candidate = initial_remote.to_string();
+                    for i in 1..=999 {
+                        let (stem, ext) = split_ext(initial_remote);
+                        candidate = format!("{stem}_{i}{ext}");
+                        if !bx.exists(&candidate).await {
                             break;
                         }
                     }
