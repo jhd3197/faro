@@ -30,7 +30,13 @@ import { DiskTreemap } from "./DiskTreemap";
 
 /** Parent directory of a POSIX/Windows path (its own root when at top). */
 function parentDir(p: string): string {
+  // POSIX root is its own parent.
+  if (p === "/") return "/";
+  // A Windows drive root ("C:\" or "C:/") is its own parent — never slice it
+  // down to a bare "C:" that no backend can list.
+  const driveRoot = p.match(/^[a-zA-Z]:[\\/]/)?.[0];
   const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  if (driveRoot && i === 2) return driveRoot;
   if (i <= 0) return p.startsWith("/") ? "/" : p;
   return p.slice(0, i);
 }

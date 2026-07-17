@@ -577,8 +577,9 @@ export function FilePane({
           label: "Analyze disk usage",
           icon: <PieChart size={12} />,
           onClick: () =>
+            sessionId &&
             fs
-              .analyzeDiskUsage!(sessionId!, single.path)
+              .analyzeDiskUsage!(sessionId, single.path)
               .catch((e) => setError(String(e))),
         });
       }

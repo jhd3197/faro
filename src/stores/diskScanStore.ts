@@ -86,7 +86,10 @@ function pruneNode(node: DuNode, targetPath: string): DuNode {
       removed += c.size;
       continue;
     }
-    if (targetPath.startsWith(c.path + "/")) {
+    if (
+      targetPath.startsWith(c.path + "/") ||
+      targetPath.startsWith(c.path + "\\")
+    ) {
       const before = c.size;
       const pruned = pruneNode(c, targetPath);
       removed += before - pruned.size;
@@ -236,7 +239,7 @@ export const useDiskScan = create<DiskScanStoreState>((set, get) => ({
     const rel = node.path.startsWith(rootPath)
       ? node.path.slice(rootPath.length)
       : node.path;
-    const crumbs = rel.split("/").filter(Boolean);
+    const crumbs = rel.split(/[/\\]/).filter(Boolean);
     set({ crumbs });
   },
 
