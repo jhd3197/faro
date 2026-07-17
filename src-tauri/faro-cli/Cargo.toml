@@ -35,10 +35,11 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 indicatif = "0.17"
 
-# HTTP client for the `agent` subcommands, which POST to Faro's running Agent
-# Bridge over localhost http (no TLS needed). default-features=false drops the
-# rustls/native-tls stack; `json` re-enables send_json/into_json (serde_json).
-ureq = { version = "2", default-features = false, features = ["json"] }
+# HTTP client for the `agent` subcommands (localhost http, no TLS) AND for
+# `self-update`, which fetches release assets from GitHub over HTTPS — hence the
+# `tls` feature (rustls). `json` re-enables send_json/into_json (serde_json);
+# `gzip` lets the GitHub API response decompress.
+ureq = { version = "2", default-features = false, features = ["json", "tls", "gzip"] }
 
 # Misc
 anyhow = "1"
