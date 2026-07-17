@@ -60,6 +60,9 @@ pub async fn delete_profile(
             "onedrive" => {
                 crate::oauth::delete_tokens(crate::session::onedrive::ONEDRIVE_SERVICE, &id)
             }
+            "gdrive" => {
+                crate::oauth::delete_tokens(crate::session::gdrive::GDRIVE_SERVICE, &id)
+            }
             _ => {}
         }
     }
@@ -255,6 +258,40 @@ pub async fn onedrive_authorize(profile_id: String) -> Result<DropboxAuthResult,
         sort_order: None,
     };
     let account_label = match crate::session::onedrive_connect(&probe).await {
+        Ok(session) => session.account_label().await.unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+    Ok(DropboxAuthResult { account_label })
+}
+
+/// Run the interactive Google Drive OAuth flow, store tokens, return the label.
+#[tauri::command]
+pub async fn gdrive_authorize(profile_id: String) -> Result<DropboxAuthResult, String> {
+    let config = crate::session::gdrive::gdrive_config();
+    let (tokens, _raw) = crate::oauth::authorize_loopback(&config).await.map_err(err)?;
+    crate::oauth::store_tokens(crate::session::gdrive::GDRIVE_SERVICE, &profile_id, &tokens)
+        .map_err(err)?;
+
+    let probe = ConnectionProfile {
+        id: profile_id.clone(),
+        name: String::new(),
+        protocol: "gdrive".into(),
+        host: "drive.google.com".into(),
+        port: 443,
+        username: String::new(),
+        auth: AuthMethod::Password { password: String::new() },
+        default_remote_path: None,
+        color: None,
+        auto_connect: None,
+        bucket: None,
+        region: None,
+        endpoint: None,
+        account: None,
+        agent_key: None,
+        group: None,
+        sort_order: None,
+    };
+    let account_label = match crate::session::gdrive_connect(&probe).await {
         Ok(session) => session.account_label().await.unwrap_or_default(),
         Err(_) => String::new(),
     };
@@ -596,6 +633,7 @@ pub fn fs_for_session(session: &Arc<Session>) -> Box<dyn RemoteFs> {
         Session::Http(http) => Box::new(crate::remotefs::http::HttpFs::new(http.clone())),
         Session::Dropbox(dbx) => Box::new(crate::remotefs::dropbox::DropboxFs::new(dbx.clone())),
         Session::OneDrive(od) => Box::new(crate::remotefs::onedrive::OneDriveFs::new(od.clone())),
+        Session::GDrive(gd) => Box::new(crate::remotefs::gdrive::GDriveFs::new(gd.clone())),
         Session::Agent(agent) => Box::new(crate::remotefs::agent::AgentFs::new(agent.clone())),
     }
 }

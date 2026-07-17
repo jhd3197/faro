@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub mod agent;
 pub mod dropbox;
 pub mod ftp;
+pub mod gdrive;
 pub mod http;
 pub mod local;
 pub mod object;

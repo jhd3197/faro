@@ -385,7 +385,7 @@ function ProtocolBadge({ protocol }: { protocol: Protocol }) {
   else if (protocol === "ftps") Icon = ShieldCheck;
   else if (protocol === "s3" || protocol === "azure" || protocol === "gcs") Icon = Cloud;
   else if (protocol === "webdav" || protocol === "http") Icon = Globe;
-  else if (protocol === "dropbox" || protocol === "onedrive") Icon = Cloud;
+  else if (protocol === "dropbox" || protocol === "onedrive" || protocol === "gdrive") Icon = Cloud;
   return (
     <span className="flex h-5 items-center gap-1 rounded bg-bg-subtle px-1.5 text-[10px] font-semibold uppercase tracking-wider text-text-muted">
       <Icon size={9} />

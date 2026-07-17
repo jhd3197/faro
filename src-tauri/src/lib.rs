@@ -157,6 +157,7 @@ pub fn run() {
             commands::pair_agent,
             commands::dropbox_authorize,
             commands::onedrive_authorize,
+            commands::gdrive_authorize,
             agent_host::agent_host_status,
             agent_host::agent_host_set_enabled,
             agent_host::agent_host_open_pairing,

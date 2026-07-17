@@ -1,6 +1,6 @@
 use crate::session::{
-    DropboxSession, FtpSession, HttpSession, ObjectSession, OneDriveSession, Session, SshSession,
-    WebdavSession,
+    DropboxSession, FtpSession, GDriveSession, HttpSession, ObjectSession, OneDriveSession,
+    Session, SshSession, WebdavSession,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -286,6 +286,16 @@ impl TransferManager {
                     )
                     .await
                 }
+                Session::GDrive(gd) => {
+                    mgr.run_gdrive_download(
+                        &id_for_task,
+                        gd.clone(),
+                        &remote_path,
+                        &final_path,
+                        &app,
+                    )
+                    .await
+                }
                 Session::Agent(agent) => {
                     mgr.run_agent_download(
                         &id_for_task,
@@ -508,6 +518,16 @@ impl TransferManager {
                     mgr.run_onedrive_upload(
                         &id_for_task,
                         od.clone(),
+                        &local,
+                        &final_remote,
+                        &app,
+                    )
+                    .await
+                }
+                Session::GDrive(gd) => {
+                    mgr.run_gdrive_upload(
+                        &id_for_task,
+                        gd.clone(),
                         &local,
                         &final_remote,
                         &app,
@@ -1428,6 +1448,133 @@ impl TransferManager {
         }
         Ok(())
     }
+
+    /// Stream a Google Drive download: resolve the path to a file id, then GET
+    /// `/files/{id}?alt=media`.
+    async fn run_gdrive_download(
+        &self,
+        id: &str,
+        session: Arc<GDriveSession>,
+        remote_path: &str,
+        local_path: &Path,
+        app: &AppHandle,
+    ) -> Result<()> {
+        use futures::StreamExt;
+
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+
+        let (file_id, _) = session
+            .resolve_item(remote_path)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("{remote_path}: not found"))?;
+        let resp = session
+            .get_stream(&format!("/files/{file_id}?alt=media"))
+            .await?;
+
+        let mut file = tokio::fs::File::create(local_path)
+            .await
+            .with_context(|| format!("create {}", local_path.display()))?;
+        let mut stream = resp.bytes_stream();
+        let mut transferred: u64 = 0;
+        let mut last_emit = Instant::now();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.with_context(|| format!("drive chunk for {remote_path}"))?;
+            file.write_all(&chunk).await?;
+            transferred += chunk.len() as u64;
+            if last_emit.elapsed() > Duration::from_millis(100) {
+                self.update(id, |t| t.transferred = transferred).await;
+                if let Some(t) = self.get(id).await {
+                    let _ = app.emit("transfer://progress", &t);
+                }
+                last_emit = Instant::now();
+            }
+        }
+        file.flush().await?;
+        self.update(id, |t| t.transferred = transferred).await;
+        Ok(())
+    }
+
+    /// Upload to Google Drive: update the existing file's media if a same-named
+    /// child exists, else create a new file via a multipart/related request.
+    async fn run_gdrive_upload(
+        &self,
+        id: &str,
+        session: Arc<GDriveSession>,
+        local_path: &Path,
+        remote_path: &str,
+        _app: &AppHandle,
+    ) -> Result<()> {
+        use crate::session::gdrive::{basename, normalize, parent_of};
+
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+
+        let size = tokio::fs::metadata(local_path)
+            .await
+            .with_context(|| format!("stat {}", local_path.display()))?
+            .len();
+        let norm = normalize(remote_path);
+        let name = basename(&norm).to_string();
+        let parent_id = session.folder_id(&parent_of(&norm)).await?;
+        let existing = session.find_child(&parent_id, &name).await?;
+        let bytes = tokio::fs::read(local_path)
+            .await
+            .with_context(|| format!("read {}", local_path.display()))?;
+        let token = session.access_token().await?;
+
+        let resp = if let Some((file_id, _)) = existing {
+            // Update the existing file's content in place.
+            session
+                .client
+                .patch(format!(
+                    "{}/files/{file_id}?uploadType=media",
+                    session.upload_base
+                ))
+                .bearer_auth(&token)
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(bytes)
+                .send()
+                .await
+                .with_context(|| format!("update {remote_path}"))?
+        } else {
+            // Create a new file: multipart/related metadata + media.
+            let boundary = format!("faro{}", Uuid::new_v4().simple());
+            let meta = serde_json::json!({ "name": name, "parents": [parent_id] });
+            let mut body: Vec<u8> = Vec::with_capacity(bytes.len() + 256);
+            body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+            body.extend_from_slice(b"Content-Type: application/json; charset=UTF-8\r\n\r\n");
+            body.extend_from_slice(meta.to_string().as_bytes());
+            body.extend_from_slice(format!("\r\n--{boundary}\r\n").as_bytes());
+            body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+            body.extend_from_slice(&bytes);
+            body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+            session
+                .client
+                .post(format!(
+                    "{}/files?uploadType=multipart&fields=id",
+                    session.upload_base
+                ))
+                .bearer_auth(&token)
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    format!("multipart/related; boundary={boundary}"),
+                )
+                .body(body)
+                .send()
+                .await
+                .with_context(|| format!("create {remote_path}"))?
+        };
+
+        if !resp.status().is_success() {
+            let code = resp.status().as_u16();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!("upload {remote_path} failed ({code}): {text}"));
+        }
+        session.clear_cache();
+        self.update(id, |t| t.transferred = size).await;
+        Ok(())
+    }
 }
 
 /// Build a RemoteFs handle for the right backend.
@@ -1442,6 +1589,7 @@ fn fs_for_session(session: &Arc<Session>) -> Box<dyn crate::remotefs::RemoteFs> 
         Session::Http(http) => Box::new(crate::remotefs::http::HttpFs::new(http.clone())),
         Session::Dropbox(dbx) => Box::new(crate::remotefs::dropbox::DropboxFs::new(dbx.clone())),
         Session::OneDrive(od) => Box::new(crate::remotefs::onedrive::OneDriveFs::new(od.clone())),
+        Session::GDrive(gd) => Box::new(crate::remotefs::gdrive::GDriveFs::new(gd.clone())),
         Session::Agent(agent) => Box::new(crate::remotefs::agent::AgentFs::new(agent.clone())),
     }
 }
@@ -1524,6 +1672,7 @@ async fn remote_size(session: &Arc<Session>, path: &str) -> Result<u64> {
             Ok(dbx.size(&crate::remotefs::dropbox::dropbox_api_path(path)).await)
         }
         Session::OneDrive(od) => Ok(od.size(&crate::remotefs::onedrive::item_ref(path)).await),
+        Session::GDrive(gd) => Ok(gd.size(path).await),
         Session::Agent(agent) => Ok(agent_stat(agent, path).await.0),
     }
 }
@@ -1658,6 +1807,25 @@ async fn remote_resolve(
                             .exists(&crate::remotefs::onedrive::item_ref(&candidate))
                             .await
                         {
+                            break;
+                        }
+                    }
+                    (candidate, false)
+                }
+            })
+        }
+        Session::GDrive(gd) => {
+            let exists = gd.exists(initial_remote).await;
+            Ok(match policy {
+                OverwritePolicy::Overwrite => (initial_remote.to_string(), false),
+                OverwritePolicy::Skip => (initial_remote.to_string(), exists),
+                OverwritePolicy::Rename if !exists => (initial_remote.to_string(), false),
+                OverwritePolicy::Rename => {
+                    let mut candidate = initial_remote.to_string();
+                    for i in 1..=999 {
+                        let (stem, ext) = split_ext(initial_remote);
+                        candidate = format!("{stem}_{i}{ext}");
+                        if !gd.exists(&candidate).await {
                             break;
                         }
                     }

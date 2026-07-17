@@ -17,6 +17,7 @@ export type Protocol =
   | "http"
   | "dropbox"
   | "onedrive"
+  | "gdrive"
   | "faro-agent";
 
 export interface ConnectionProfile {
@@ -57,6 +58,7 @@ export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {
   http: 443,
   dropbox: 443,
   onedrive: 443,
+  gdrive: 443,
   "faro-agent": 8722,
 };
 
@@ -71,6 +73,7 @@ export const PROTOCOL_LABEL: Record<Protocol, string> = {
   http: "HTTP",
   dropbox: "Dropbox",
   onedrive: "OneDrive",
+  gdrive: "Google Drive",
   "faro-agent": "Faro Agent",
 };
 
