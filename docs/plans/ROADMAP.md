@@ -42,7 +42,7 @@ thematic detail.
 | 4 | `4_disk-usage-explorer` | ✅ built (GUI click-through on a live backend left) | First *visible*, read-only consumer of #3 — proves the foundation at low risk. |
 | 5 | `5_additional-backends` | 🔄 Phases 0–2, 4, 5 shipped (S3/GCS/WebDAV/HTTP + all 4 OAuth clouds) | Only SMB (Phase 3) remains — blocked on MSVC/libsmbclient. |
 | 6 | `6_directory-diff` | ⬜ | Reuses #3's scan engine (two trees) + `change_signal`/`etag`. |
-| 7 | `7_fleet-search` | ⬜ | Reuses #3's scan engine; later a `faro.db` filename index. |
+| 7 | `7_fleet-search` | ✅ built (live-backend GUI click-through left) | Reuses #3's scan engine; later a `faro.db` filename index. |
 | 8 | `8_fleet-skills` | ⬜ | AI-authored fleet automations over the bridge. Independent. |
 | 9 | `9_on-demand-virtual-folders` | ⬜ | OneDrive-style placeholders (Plan 2 Phase 3). Large, per-OS, Windows-first. |
 | 10 | `10_faro-cli-agent-dx` | ⬜ | faro-cli/Agent-Bridge remote exec/write DX. **Phase 0 (CLI version-drift check + update) is a live pain point — do before the polish plans.** Independent of the scan foundation. |
@@ -204,9 +204,21 @@ the **Track A2** scan engine (walks two trees) and its `change_signal`/`etag`
 for `--hash` mode. ⬜
 
 ## Track H — Fleet Search (Plan 7)
-Name + content search across any connection; exec `rg`/`grep` fast path on
-SSH/agent, walk fallback. Reuses the **Track A2** scan engine (and, later, a
-`faro.db` filename index). GUI + CLI + `faro_search` MCP tool. ⬜
+Name + content search across any connection; exec `rg`/`grep`/`find` fast path
+on SSH/agent, object-flat name listing on buckets, walk fallback. Reuses the
+**Track A2** scan engine (a `faro.db` filename index is a later refinement).
+
+- ✅ **Phase 1–2** — `search.rs` engine: generic name BFS (files + dirs) +
+  read-and-grep content walk, then the exec fast path (`rg --json` → `grep -rn`
+  → `find -iname`) for SSH/agent and object-flat name search, each falling back
+  to the walk with a recorded note. Content on grep-less backends (object/FTP/
+  cloud) is opt-in. Verified via the CLI against a real tree.
+- ✅ **Phase 4** — `faro-cli search` (direct) + the `faro_search` bridge/MCP tool
+  and `faro-cli agent search` upgraded to content grep.
+- ✅ **Phase 3** — GUI Fleet Search panel (streaming `SearchManager`, Name|Content
+  toggle, grouped content previews), opened from the folder context menu /
+  toolbar. ⬜ Remaining: GUI click-through on a live SSH/S3/agent backend (engine
+  verified at runtime; app boots clean).
 
 ## Track I — Fleet Skills (Plan 8)
 Reusable, parameterized, **AI-authorable** automations over the fleet, MCP-native

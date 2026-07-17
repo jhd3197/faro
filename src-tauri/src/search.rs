@@ -1620,6 +1620,48 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    // The exact engine path the GUI SearchManager drives: run_search streaming
+    // into a HitSink, plus cooperative cancel. (search() is the collecting
+    // wrapper; the manager calls run_search directly with a streaming closure.)
+    #[tokio::test]
+    async fn run_search_streams_and_honors_cancel() {
+        use crate::remotefs::local::LocalFs;
+        let base = std::env::temp_dir().join(format!("faro_search_stream_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        for i in 0..5 {
+            std::fs::write(base.join(format!("f{i}.log")), "x").unwrap();
+        }
+        let root = base.to_string_lossy().to_string();
+
+        // Streaming: run_search pushes each hit into the sink as it's found.
+        let cancel = CancelToken::new();
+        let mut streamed: Vec<String> = Vec::new();
+        let stats = {
+            let mut push = |h: SearchHit| streamed.push(h.relative.clone());
+            let mut sink = HitSink::new(1000, &mut push);
+            run_search(&LocalFs, None, &root, &q("*.log", SearchKind::Name), &cancel, &mut sink)
+                .await
+                .unwrap()
+        };
+        assert_eq!(streamed.len(), 5);
+        assert_eq!(stats.strategy, SearchStrategy::Generic);
+        assert!(!stats.truncated);
+
+        // A pre-cancelled token stops the walk before it yields anything.
+        let cancelled = CancelToken::new();
+        cancelled.cancel();
+        let mut none: Vec<SearchHit> = Vec::new();
+        {
+            let mut push = |h: SearchHit| none.push(h);
+            let mut sink = HitSink::new(1000, &mut push);
+            let _ = run_search(&LocalFs, None, &root, &q("*.log", SearchKind::Name), &cancelled, &mut sink).await;
+        }
+        assert!(none.is_empty());
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
     // ---- exec fast-path parsers (Phase 2) ----
 
     #[test]
