@@ -1372,6 +1372,53 @@ fn resolve_server(ep: &Endpoint, name: &str) -> Result<String> {
     }
 }
 
+/// True when `p` starts with a Windows drive prefix (`C:\` or `C:/`).
+fn is_windows_drive_path(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
+}
+
+/// Best-effort: is the connected server a Windows machine? Reads `/info`'s
+/// `remote.os` (cached at connect for Faro Agents; `uname -s` for SSH). Any
+/// failure or unknown OS → false, so the mangling guard errs toward firing.
+fn server_is_windows(ep: &Endpoint, session_id: &str) -> bool {
+    let Ok(body) = http_post(ep, "/info", serde_json::json!({ "sessionId": session_id })) else {
+        return false;
+    };
+    body.get("remote")
+        .and_then(|r| r.get("os"))
+        .and_then(|v| v.as_str())
+        .map(|os| os.eq_ignore_ascii_case("windows"))
+        .unwrap_or(false)
+}
+
+/// Reject a remote-path argument that Git Bash / MSYS almost certainly mangled.
+/// When a remote path arrives Windows-drive-prefixed (`C:\…` / `C:/…`) but the
+/// target isn't actually a Windows machine, MSYS rewrote a POSIX path like
+/// `/var/www` into `C:/Program Files/Git/var/www` *before* faro-cli saw it —
+/// uploading there would silently land in a nonsense directory. Turn that into a
+/// clear, actionable error (Plan 10 Phase 3). The `/info` round-trip only happens
+/// on the drive-prefixed error path, so the common good path pays nothing.
+fn guard_mangled_remote_path(ep: &Endpoint, session_id: &str, remote_path: &str) -> Result<()> {
+    // Only pay for the OS lookup when the path actually looks mangled.
+    let is_windows_target = is_windows_drive_path(remote_path) && server_is_windows(ep, session_id);
+    check_mangled_remote_path(remote_path, is_windows_target)
+}
+
+/// Pure decision behind [`guard_mangled_remote_path`], split out so the
+/// reject/allow rule and its message are unit-testable without a live bridge.
+fn check_mangled_remote_path(remote_path: &str, is_windows_target: bool) -> Result<()> {
+    if !is_windows_drive_path(remote_path) || is_windows_target {
+        return Ok(());
+    }
+    bail!(
+        "that remote path looks like Git Bash rewrote it (MSYS path conversion turned a \
+         POSIX path such as /var/www into `{remote_path}`). Re-run with `MSYS_NO_PATHCONV=1`, \
+         prefix the path with `//` (e.g. `//var/www`), or drop text straight in with \
+         `faro-cli agent write`."
+    )
+}
+
 fn cmd_agent(action: AgentCmd) -> Result<()> {
     let ep = read_endpoint()?;
     warn_if_stale(&ep);
@@ -1531,6 +1578,7 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
         }
         AgentCmd::Download { server, remote_path, local_dir } => {
             let id = resolve_server(&ep, &server)?;
+            guard_mangled_remote_path(&ep, &id, &remote_path)?;
             let mut req = serde_json::json!({ "sessionId": id, "path": remote_path });
             if let Some(d) = local_dir {
                 req["localDir"] = serde_json::Value::String(d);
@@ -1541,6 +1589,7 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
         }
         AgentCmd::Upload { server, local_path, remote_dir } => {
             let id = resolve_server(&ep, &server)?;
+            guard_mangled_remote_path(&ep, &id, &remote_dir)?;
             let body = http_post(
                 &ep,
                 "/upload",
@@ -1551,6 +1600,7 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
         }
         AgentCmd::UploadDir { server, local_dir, remote_dir, overwrite } => {
             let id = resolve_server(&ep, &server)?;
+            guard_mangled_remote_path(&ep, &id, &remote_dir)?;
             let body = http_post(
                 &ep,
                 "/upload_dir",
@@ -2303,7 +2353,37 @@ fn fmt_bytes(n: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_semver;
+    use super::{check_mangled_remote_path, is_windows_drive_path, parse_semver};
+
+    #[test]
+    fn mangled_path_rejected_only_on_non_windows_target() {
+        // Drive-prefixed path against a POSIX server → rejected with the hint.
+        let err = check_mangled_remote_path("C:/Program Files/Git/var/www", false)
+            .expect_err("should reject a mangled path on a POSIX target");
+        let msg = format!("{err}");
+        assert!(msg.contains("MSYS_NO_PATHCONV=1"));
+        assert!(msg.contains("agent write"));
+        // Same path against a genuine Windows machine → allowed (real drive path).
+        assert!(check_mangled_remote_path("C:/Users/me/app", true).is_ok());
+        // A normal POSIX remote path is always fine, target OS regardless.
+        assert!(check_mangled_remote_path("/var/www/html", false).is_ok());
+        assert!(check_mangled_remote_path("//var/www", false).is_ok());
+    }
+
+    #[test]
+    fn detects_windows_drive_paths() {
+        // MSYS-mangled remote paths (Plan 10 Phase 3) — these trip the guard.
+        assert!(is_windows_drive_path("C:/Program Files/Git/var/www"));
+        assert!(is_windows_drive_path(r"C:\Users\me"));
+        assert!(is_windows_drive_path("D:/data"));
+        // Real remote POSIX paths — never flagged.
+        assert!(!is_windows_drive_path("/var/www/html"));
+        assert!(!is_windows_drive_path("//var/www")); // the leading-// escape
+        assert!(!is_windows_drive_path("./rel"));
+        assert!(!is_windows_drive_path("home/user"));
+        // A bare drive letter with no separator isn't a path prefix.
+        assert!(!is_windows_drive_path("C:"));
+    }
 
     #[test]
     fn semver_parses_and_orders() {

@@ -124,6 +124,30 @@ AI agent reaches it through the same bridge tools it uses for SSH servers
   use `find`/`tail -f`/SFTP); on a paired machine the agent is told to run a
   native equivalent through `faro_exec` instead.
 
+## Running faro-cli from Git Bash / MSYS
+
+Two gotchas hit anyone driving `faro-cli agent …` from Git Bash on Windows:
+
+- **POSIX remote paths get rewritten.** MSYS path conversion rewrites a leading
+  `/var/www/html` argument into a Windows path (`C:/Program Files/Git/var/www/…`)
+  *before* `faro-cli` ever sees it — so an upload silently lands in a nonsense
+  directory. `faro-cli agent upload` / `upload-dir` / `download` / `write` now
+  **detect a Windows-drive-prefixed remote path against a non-Windows server and
+  refuse it** with a hint instead of uploading. To pass a real POSIX remote path,
+  do one of:
+  - prefix it with `MSYS_NO_PATHCONV=1`, e.g.
+    `MSYS_NO_PATHCONV=1 faro-cli agent upload prod ./app.tar /var/www`;
+  - double the leading slash — `//var/www` — which MSYS leaves alone; or
+  - drop text straight onto the box with `faro-cli agent write` (no local staging
+    file, no upload path to mangle).
+- **The CLI can lag the app.** `faro-cli` and `faro-agentd` are **separate
+  release downloads** from the desktop app (see Distribution below), so after an
+  app update the on-PATH CLI can be older than the running app — advertising flags
+  the CLI predates. `faro-cli agent …` compares its build version to the app
+  version published in `agent-endpoint.json` and prints a one-line staleness
+  warning when it's behind; update with `faro-cli self-update` or from
+  Faro → Settings.
+
 ## Distribution
 
 There are three ways to get an agent onto the machine you want to control,
