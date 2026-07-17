@@ -66,6 +66,12 @@ pub struct SyncPair {
     pub remote_root: String,
     pub direction: SyncDirection,
     pub strategy: SyncStrategy,
+    /// How the pair materializes files locally. `Mirror` (default) moves whole
+    /// files eagerly, today's behavior. `OnDemand` registers OS placeholders
+    /// that hydrate on open — Plan 9, Windows-only, driven by the `VirtualFs`
+    /// subsystem instead of the reconcile loop below.
+    #[serde(default)]
+    pub mode: SyncMode,
     pub enabled: bool,
     #[serde(default = "default_poll_secs")]
     pub poll_interval_secs: u64,
@@ -89,6 +95,18 @@ const DEFAULT_MIRROR_DELETE_CAP: u32 = 100;
 
 fn default_mirror_delete_cap() -> u32 {
     DEFAULT_MIRROR_DELETE_CAP
+}
+
+/// How a pair keeps local files in step with the remote.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SyncMode {
+    /// Whole files, moved eagerly by the reconcile loop (Plan 2). The default.
+    #[default]
+    Mirror,
+    /// OneDrive-style placeholders that hydrate on open, driven by the
+    /// `VirtualFs` provider (Plan 9). Windows-only; degrades to inert elsewhere.
+    OnDemand,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -186,6 +204,35 @@ impl FolderSync {
                 tracing::warn!("folder sync '{}' failed to auto-start: {e:#}", p.name);
             }
         }
+        // Hand the on-demand pairs to the VirtualFs provider and reconcile
+        // orphaned sync roots (registered but no longer configured).
+        self.reconcile_virtualfs(&app).await;
+    }
+
+    /// The enabled on-demand pairs, as the provider's lighter [`OnDemandPair`].
+    async fn enabled_ondemand_pairs(&self) -> Vec<crate::virtualfs::OnDemandPair> {
+        self.settings
+            .lock()
+            .await
+            .pairs
+            .iter()
+            .filter(|p| p.enabled && p.mode == SyncMode::OnDemand)
+            .map(|p| crate::virtualfs::OnDemandPair {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                local_root: p.local_root.clone(),
+                profile_id: p.profile_id.clone(),
+                remote_root: p.remote_root.clone(),
+            })
+            .collect()
+    }
+
+    /// Push the current on-demand pair set into the VirtualFs subsystem, which
+    /// registers/starts the new ones and unregisters orphaned roots.
+    async fn reconcile_virtualfs(&self, app: &AppHandle) {
+        let pairs = self.enabled_ondemand_pairs().await;
+        let vfs = app.state::<AppState>().virtualfs.clone();
+        vfs.reconcile(app, pairs).await;
     }
 
     /// Merge config with live status for the UI.
@@ -230,16 +277,20 @@ impl FolderSync {
         if pair.enabled {
             self.start_pair(app, &pair).await?;
         }
+        self.reconcile_virtualfs(app).await;
         Ok(())
     }
 
-    pub async fn remove(&self, id: &str) -> Result<()> {
+    pub async fn remove(&self, app: &AppHandle, id: &str) -> Result<()> {
         self.stop_pair(id).await;
         {
             let mut s = self.settings.lock().await;
             s.pairs.retain(|p| p.id != id);
         }
-        self.persist().await
+        self.persist().await?;
+        // Unregister the OS sync root if this was an on-demand pair.
+        self.reconcile_virtualfs(app).await;
+        Ok(())
     }
 
     pub async fn set_enabled(&self, app: &AppHandle, id: &str, enabled: bool) -> Result<()> {
@@ -261,6 +312,7 @@ impl FolderSync {
         } else {
             self.stop_pair(id).await;
         }
+        self.reconcile_virtualfs(app).await;
         Ok(())
     }
 
@@ -284,6 +336,13 @@ impl FolderSync {
     }
 
     async fn start_pair(&self, app: &AppHandle, pair: &SyncPair) -> Result<()> {
+        // On-demand pairs are driven by the VirtualFs provider (placeholders +
+        // hydration on access), not this eager reconcile loop. `reconcile_virtualfs`
+        // stands them up; nothing to spawn here.
+        if pair.mode == SyncMode::OnDemand {
+            return Ok(());
+        }
+
         let mut running = self.running.lock().await;
         if running.contains_key(&pair.id) {
             return Ok(());
@@ -697,7 +756,7 @@ fn glob_rec(p: &[u8], t: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_safety, is_excluded, SyncPair};
+    use super::{apply_safety, is_excluded, SyncMode, SyncPair};
     use crate::sync::{self, SyncDirection, SyncStrategy};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -758,6 +817,7 @@ mod tests {
             remote_root: String::new(),
             direction: SyncDirection::LocalToRemote,
             strategy: SyncStrategy::Mirror,
+            mode: SyncMode::Mirror,
             enabled: true,
             poll_interval_secs: 60,
             exclude: exclude.iter().map(|s| s.to_string()).collect(),
@@ -861,9 +921,10 @@ pub async fn foldersync_upsert(
 #[tauri::command]
 pub async fn foldersync_remove(
     id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Vec<PairView>, String> {
-    state.foldersync.remove(&id).await.map_err(err)?;
+    state.foldersync.remove(&app, &id).await.map_err(err)?;
     // Drop the pair's index rows so a future pair reusing the id starts clean.
     let _ = state.db.clear_pair(&id);
     Ok(state.foldersync.views().await)
