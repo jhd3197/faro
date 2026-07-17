@@ -233,13 +233,35 @@ enum AgentCmd {
         /// Glob pattern, e.g. '*.log'.
         pattern: String,
     },
-    /// Find entries whose name contains a substring, recursively.
+    /// Search a connected server by file name or by content (grep).
+    ///
+    /// Name search (default) matches entry names (a `*`/`?` makes it a glob).
+    /// `--content` greps file contents — server-side via `rg`/`grep` on SSH /
+    /// Faro Agent servers. Read-only; goes through Faro's approval + console.
     Search {
         server: String,
-        /// Case-insensitive substring to match against entry names.
+        /// What to look for (a name glob/substring, or a content pattern).
         query: String,
         /// Root directory to search under (default: ".").
         path: Option<String>,
+        /// Grep file contents instead of matching names.
+        #[arg(long)]
+        content: bool,
+        /// Treat the content pattern as a regex (implies --content).
+        #[arg(long)]
+        regex: bool,
+        /// Case-sensitive matching (default: insensitive).
+        #[arg(long)]
+        case_sensitive: bool,
+        /// Only consider files whose name matches this glob (repeatable).
+        #[arg(long)]
+        include: Vec<String>,
+        /// Skip files whose name matches this glob (repeatable).
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// Allow content search to download files on grep-less backends.
+        #[arg(long)]
+        content_remote: bool,
     },
     /// Download a remote file to a local dir (default: your Downloads).
     Download {
@@ -1363,22 +1385,54 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             }
             Ok(())
         }
-        AgentCmd::Search { server, query, path } => {
+        AgentCmd::Search {
+            server,
+            query,
+            path,
+            content,
+            regex,
+            case_sensitive,
+            include,
+            exclude,
+            content_remote,
+        } => {
             let id = resolve_server(&ep, &server)?;
-            let mut req = serde_json::json!({ "sessionId": id, "query": query });
+            let mut req = serde_json::json!({
+                "sessionId": id,
+                "query": query,
+                "content": content || regex,
+                "regex": regex,
+                "caseSensitive": case_sensitive,
+                "include": include,
+                "exclude": exclude,
+                "contentRemote": content_remote,
+            });
             if let Some(p) = path {
                 req["path"] = serde_json::Value::String(p);
             }
             let body = http_post(&ep, "/search", req)?;
+            let is_content = body.get("kind").and_then(|v| v.as_str()) == Some("content");
             if let Some(matches) = body.get("matches").and_then(|v| v.as_array()) {
                 for m in matches {
-                    if let Some(p) = m.get("path").and_then(|v| v.as_str()) {
-                        println!("{p}");
+                    let path = m.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    if is_content {
+                        let line = m.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let preview = m.get("preview").and_then(|v| v.as_str()).unwrap_or("");
+                        println!(
+                            "\x1b[36m{path}\x1b[0m:\x1b[33m{line}\x1b[0m: {preview}"
+                        );
+                    } else if m.get("isDir").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        println!("{path}/");
+                    } else {
+                        println!("{path}");
                     }
                 }
             }
+            if let Some(note) = body.get("note").and_then(|v| v.as_str()) {
+                eprintln!("{}", dim(note));
+            }
             if body.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false) {
-                eprintln!("{}", warn("results truncated"));
+                eprintln!("{}", warn("results truncated (cap reached)"));
             }
             Ok(())
         }

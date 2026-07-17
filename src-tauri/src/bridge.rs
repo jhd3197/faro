@@ -35,7 +35,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
-use crate::remotefs::FileKind;
 use crate::session::{ExecStream, Session};
 use crate::sync::{SyncDirection, SyncStrategy};
 use crate::transfer::OverwritePolicy;
@@ -54,7 +53,6 @@ const EXEC_TIMEOUT_MS_MIN: u64 = 1_000;
 const EXEC_TIMEOUT_MS_MAX: u64 = 900_000;
 const SEARCH_MAX_RESULTS: usize = 200;
 const SEARCH_MAX_DEPTH: usize = 6;
-const SEARCH_MAX_DIRS: usize = 4000; // hard ceiling on directories visited
 
 /// Filename of the endpoint discovery file written next to `bridge.json` while
 /// the bridge is running. `faro-cli agent …` reads the URL + token from it, so
@@ -1053,14 +1051,15 @@ async fn handle_search(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -
         Err(e) => return e,
     };
     let session_id = body_str(&parsed, "sessionId");
-    let query = body_str(&parsed, "query");
-    if session_id.is_empty() || query.is_empty() {
+    let pattern = body_str(&parsed, "query");
+    if session_id.is_empty() || pattern.is_empty() {
         return (400, json!({"error": "sessionId and query are required"}));
     }
     let root = match body_str(&parsed, "path") {
         p if p.is_empty() => ".".to_string(),
         p => p,
     };
+    let query = build_search_query(&parsed, pattern);
     op_search(app, state, &session_id, &root, &query).await
 }
 
@@ -2872,77 +2871,96 @@ async fn op_diff(
     )
 }
 
+/// Build a [`crate::search::SearchQuery`] from a JSON body / MCP args object.
+/// Shared by the HTTP `/search` handler, the `faro_search` MCP dispatch, and the
+/// agent tool router — all hand in a `serde_json::Value` object with the same
+/// field names. The hit cap is clamped to `SEARCH_MAX_RESULTS` so an agent
+/// response stays lean.
+pub(crate) fn build_search_query(v: &Value, pattern: String) -> crate::search::SearchQuery {
+    use crate::search::{SearchKind, SearchQuery, DEFAULT_MAX_FILE_BYTES};
+    let regex = v.get("regex").and_then(|x| x.as_bool()).unwrap_or(false);
+    // `--regex` (or explicit content) selects content grep; otherwise name search.
+    let content = regex || v.get("content").and_then(|x| x.as_bool()).unwrap_or(false);
+    let str_arr = |key: &str| {
+        v.get(key)
+            .and_then(|a| a.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let max = v
+        .get("maxResults")
+        .and_then(|x| x.as_u64())
+        .map(|n| (n as usize).clamp(1, SEARCH_MAX_RESULTS))
+        .unwrap_or(SEARCH_MAX_RESULTS);
+    SearchQuery {
+        pattern,
+        kind: if content { SearchKind::Content } else { SearchKind::Name },
+        regex,
+        case_sensitive: v.get("caseSensitive").and_then(|x| x.as_bool()).unwrap_or(false),
+        include_globs: str_arr("include"),
+        exclude_globs: str_arr("exclude"),
+        content_remote: v.get("contentRemote").and_then(|x| x.as_bool()).unwrap_or(false),
+        max_results: max,
+        max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+    }
+}
+
+/// Search a connected server by file **name** or by **content** (Plan 7). Runs
+/// through the shared search engine, so content grep uses the server-side
+/// `rg`/`grep` fast path on SSH/agent and object stores name-match a flat key
+/// listing. Gated ONCE as a READ (like `glob`/`tail`, it only walks/greps — it
+/// never mutates).
 pub(crate) async fn op_search(
     app: &AppHandle,
     state: &Arc<BridgeState>,
     session_id: &str,
     root: &str,
-    query: &str,
+    query: &crate::search::SearchQuery,
 ) -> (u16, Value) {
+    use crate::search::SearchKind;
     let manager = app.state::<AppState>().sessions.clone();
     let Some(sess) = manager.get(session_id).await else {
         return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
     };
     let name = sess.profile().name.clone();
-    if let Err(resp) = gate(
-        app,
-        state,
-        session_id,
-        &name,
-        OpClass::Read,
-        "search",
-        &format!("search \"{query}\" in {root}"),
-        None,
-    )
-    .await
-    {
+    let kind_label = match query.kind {
+        SearchKind::Name => "name",
+        SearchKind::Content => "content",
+    };
+    let summary = format!("{kind_label} search \"{}\" in {root}", query.pattern);
+    if let Err(resp) = gate(app, state, session_id, &name, OpClass::Read, "search", &summary, None).await {
         return resp;
     }
 
     let fs = crate::commands::fs_for_session(&sess);
-    let needle = query.to_lowercase();
-    let mut hits: Vec<Value> = Vec::new();
-    let mut stack: Vec<(String, usize)> = vec![(root.to_string(), 0)];
-    let mut visited = 0usize;
-    while let Some((dir, depth)) = stack.pop() {
-        if hits.len() >= SEARCH_MAX_RESULTS || visited >= SEARCH_MAX_DIRS {
-            break;
+    match crate::search::search(fs.as_ref(), Some(sess.as_ref()), root, query).await {
+        Ok(result) => {
+            let matches: Vec<Value> =
+                result.hits.iter().filter_map(|h| serde_json::to_value(h).ok()).collect();
+            state
+                .log(
+                    app,
+                    activity("search", session_id, format!("{summary} ({} hits)", matches.len()), true),
+                )
+                .await;
+            (
+                200,
+                json!({
+                    "kind": kind_label,
+                    "strategy": result.stats.strategy,
+                    "truncated": result.stats.truncated,
+                    "note": result.stats.note,
+                    "matches": matches,
+                }),
+            )
         }
-        visited += 1;
-        let entries = match fs.list_dir(&dir).await {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries {
-            if entry.name.to_lowercase().contains(&needle) {
-                hits.push(json!({
-                    "name": entry.name,
-                    "path": entry.path,
-                    "kind": entry.kind,
-                    "size": entry.size,
-                }));
-                if hits.len() >= SEARCH_MAX_RESULTS {
-                    break;
-                }
-            }
-            if matches!(entry.kind, FileKind::Directory) && depth < SEARCH_MAX_DEPTH {
-                stack.push((entry.path.clone(), depth + 1));
-            }
+        Err(e) => {
+            state
+                .log(app, activity("error", session_id, format!("{summary} — {e}"), false))
+                .await;
+            (400, json!({"error": format!("{e:#}")}))
         }
     }
-    let truncated = hits.len() >= SEARCH_MAX_RESULTS || visited >= SEARCH_MAX_DIRS;
-    state
-        .log(
-            app,
-            activity(
-                "search",
-                session_id,
-                format!("search \"{query}\" in {root} ({} hits)", hits.len()),
-                true,
-            ),
-        )
-        .await;
-    (200, json!({ "matches": hits, "truncated": truncated }))
 }
 
 /// Status of a transfer the agent previously started. No gate — the agent owns
@@ -3312,12 +3330,18 @@ fn mcp_tools_list() -> Value {
             },
             {
                 "name": "faro_search",
-                "description": "Find files/directories on the user's connected server whose name contains a substring (case-insensitive), recursively under a root path. Works for all protocols. Bounded in depth and results.",
+                "description": "Search a connected server by file NAME or by CONTENT (grep), recursively under a root path. Works on ANY protocol. NAME search (default) matches each entry's name — a pattern with '*'/'?' is a glob (e.g. '*.log'), otherwise a case-insensitive substring; it returns files AND directories. CONTENT search (set content=true, or regex=true) greps inside files: on SSH / Faro Agent servers it runs ripgrep/grep SERVER-SIDE (fast, no download) and returns matching lines with line numbers + previews; on object stores / FTP / WebDAV / cloud it must DOWNLOAD each file, so it's refused unless you set contentRemote=true. Use include/exclude name globs to scope which files are considered. Read-only. Results are capped (see truncated); the `strategy` field says which path ran (shell = server-side grep, generic = walk, objectFlat = bucket listing).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "query": { "type": "string", "description": "Case-insensitive substring to match against entry names." },
+                        "query": { "type": "string", "description": "What to look for: a name glob/substring, or (with content/regex) the grep pattern." },
                         "path": { "type": "string", "description": "Root directory to search under. Defaults to \".\"." },
+                        "content": { "type": "boolean", "description": "Grep file CONTENTS instead of matching names. Default false." },
+                        "regex": { "type": "boolean", "description": "Treat the content pattern as a regular expression (implies content). Default false = literal." },
+                        "caseSensitive": { "type": "boolean", "description": "Case-sensitive matching. Default false." },
+                        "include": { "type": "array", "items": { "type": "string" }, "description": "Only consider files whose name matches one of these globs (e.g. ['*.rs','*.toml'])." },
+                        "exclude": { "type": "array", "items": { "type": "string" }, "description": "Skip files whose name matches any of these globs." },
+                        "contentRemote": { "type": "boolean", "description": "Allow content search to DOWNLOAD every file on backends with no server-side grep (object stores, FTP, WebDAV, cloud). Default false." },
                         "session": session_prop
                     },
                     "required": ["query"],
@@ -3597,10 +3621,11 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             }
         }
         "faro_search" => {
-            let Some(query) = arg_str(&args, "query") else {
+            let Some(pattern) = arg_str(&args, "query") else {
                 return tool_error("`query` is required");
             };
             let root = arg_str(&args, "path").unwrap_or_else(|| ".".to_string());
+            let query = build_search_query(&args, pattern);
             match resolve_session(app, state, session_arg, SessionNeed::Any).await {
                 Ok(id) => mcp_wrap(op_search(app, state, &id, &root, &query).await),
                 Err(msg) => tool_error(&msg),
