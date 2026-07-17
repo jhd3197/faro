@@ -206,6 +206,20 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
+
+    /// Fetch a URL behind HTTP Basic Auth using a saved HTTP(S) profile's creds.
+    ///
+    /// Reuses the stored username/password of a saved HTTP(S) connection (Plan 5
+    /// Phase 4's HttpFs) to GET an auth-walled page — e.g. a rendered page on a
+    /// staging site — and writes the body to stdout. The profile is matched by the
+    /// URL's host; pass --profile to choose explicitly. Never echoes credentials.
+    Fetch {
+        /// The URL to GET (http/https).
+        url: String,
+        /// Saved HTTP(S) profile to use (by name/id). Omit to match on the host.
+        #[arg(long)]
+        profile: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -533,6 +547,8 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::Skill { action } => cmd_skill(action),
         // Self-update fetches a release asset from GitHub over HTTPS.
         Cmd::SelfUpdate { tag, check } => cmd_self_update(tag, check),
+        // Authenticated GET through a saved HTTP profile's creds.
+        Cmd::Fetch { url, profile } => cmd_fetch(&store, &url, profile).await,
     }
 }
 
@@ -1216,6 +1232,83 @@ fn print_search_human(result: &faro_lib::search::SearchResult) {
         summary.push_str(&format!(" · {note}"));
     }
     eprintln!("\n{}", dim(&summary));
+}
+
+// ---- Authenticated fetch (Plan 10 Phase 5) -----------------------------
+
+/// GET `url_str` through a saved HTTP(S) profile's stored Basic-Auth creds and
+/// write the body to stdout. The profile is chosen explicitly (`--profile`) or
+/// matched to the URL's host. The Authorization header is applied by the session
+/// and never printed.
+async fn cmd_fetch(store: &ProfileStore, url_str: &str, profile_opt: Option<String>) -> Result<()> {
+    let url = reqwest::Url::parse(url_str).with_context(|| format!("parse URL {url_str}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("fetch needs an http/https URL (got {})", url.scheme());
+    }
+    let host = url.host_str().ok_or_else(|| anyhow!("URL has no host"))?;
+
+    let profile = match profile_opt {
+        Some(name) => {
+            let p = find_profile(store, &name).await?;
+            if p.protocol != "http" && p.protocol != "https" {
+                bail!("`{}` is not an HTTP/HTTPS profile", p.name);
+            }
+            p
+        }
+        None => {
+            let profiles = store.list().await?;
+            let matches: Vec<ConnectionProfile> = profiles
+                .into_iter()
+                .filter(|p| {
+                    (p.protocol == "http" || p.protocol == "https")
+                        && profile_host(p).as_deref().map(|h| h.eq_ignore_ascii_case(host))
+                            .unwrap_or(false)
+                })
+                .collect();
+            match matches.len() {
+                1 => matches.into_iter().next().unwrap(),
+                0 => bail!(
+                    "no saved HTTP profile matches host `{host}`. Add one in Faro, or pass \
+                     --profile <name>."
+                ),
+                _ => bail!(
+                    "more than one saved HTTP profile matches host `{host}`; pass --profile <name>."
+                ),
+            }
+        }
+    };
+
+    let session = open_session(&profile).await?;
+    let Session::Http(http) = session else {
+        bail!("`{}` is not an HTTP/HTTPS profile", profile.name);
+    };
+    let resp = http
+        .request(reqwest::Method::GET, url)
+        .send()
+        .await
+        .context("GET failed")?;
+    let status = resp.status();
+    let body = resp.bytes().await.context("read response body")?;
+    let mut so = io::stdout();
+    so.write_all(&body).ok();
+    so.flush().ok();
+    if !status.is_success() {
+        eprintln!("\n{}", warn(&format!("HTTP {}", status.as_u16())));
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// The host of an HTTP(S) profile's URL (stored in `endpoint`), for matching a
+/// `fetch` URL to a saved profile.
+fn profile_host(p: &ConnectionProfile) -> Option<String> {
+    let raw = p.endpoint.as_deref()?.trim();
+    let with_scheme = if raw.contains("://") {
+        raw.to_string()
+    } else {
+        format!("https://{raw}")
+    };
+    reqwest::Url::parse(&with_scheme).ok()?.host_str().map(|h| h.to_string())
 }
 
 async fn cmd_profiles_list(store: &ProfileStore) -> Result<()> {

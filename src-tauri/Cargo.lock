@@ -1549,6 +1549,7 @@ dependencies = [
  "futures",
  "indicatif",
  "object_store",
+ "reqwest 0.12.28",
  "russh",
  "serde_json",
  "tokio",
