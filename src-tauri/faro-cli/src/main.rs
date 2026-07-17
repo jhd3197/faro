@@ -286,8 +286,10 @@ enum AgentCmd {
         /// Read the program to run from stdin, verbatim.
         #[arg(long)]
         stdin: bool,
-        /// SSH only. Launch as a background job and return a job id immediately
-        /// (poll with `agent job`). For multi-minute work that would time out.
+        /// Launch as a background job and return a job id immediately (poll with
+        /// `agent job`). For multi-minute work that would time out. Works on SSH
+        /// servers and paired Faro Agent machines (agent needs faro-agentd from
+        /// Plan 10+). Can't be combined with --file/--stdin yet.
         #[arg(long)]
         detach: bool,
         /// The command to run. Quote it, or pass it as trailing arguments. Omit
@@ -312,7 +314,8 @@ enum AgentCmd {
         #[arg(long)]
         timeout_ms: Option<u64>,
     },
-    /// Poll a background job started with `agent exec --detach` (SSH only).
+    /// Poll a background job started with `agent exec --detach` (SSH server or
+    /// paired Faro Agent).
     Job {
         /// Saved server name (as shown in Faro) or its session id.
         server: String,
