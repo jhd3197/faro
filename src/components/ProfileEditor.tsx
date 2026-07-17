@@ -168,15 +168,17 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
   const isWebdav = protocol === "webdav";
   const isHttp = protocol === "http";
   const isDropbox = protocol === "dropbox";
+  const isOnedrive = protocol === "onedrive";
+  const isCloudOAuth = isDropbox || isOnedrive;
   const isObject = isObjectProtocol(protocol);
   const isAgent = isAgentProtocol(protocol);
 
-  // Dropbox: OAuth authorization state. Editing an already-authorized profile
-  // (its account label is persisted) starts authorized.
-  const [dropboxAuthed, setDropboxAuthed] = useState<boolean>(
-    seed?.protocol === "dropbox" && !!seed?.account
+  // OAuth clouds (Dropbox/OneDrive/…): authorization state. Editing an
+  // already-authorized profile (its account label is persisted) starts authorized.
+  const [cloudAuthed, setCloudAuthed] = useState<boolean>(
+    (seed?.protocol === "dropbox" || seed?.protocol === "onedrive") && !!seed?.account
   );
-  const [dropboxAccount, setDropboxAccount] = useState<string>(seed?.account ?? "");
+  const [cloudAccount, setCloudAccount] = useState<string>(seed?.account ?? "");
 
   /// Build the profile from the current form state. Shared by Save and by the
   /// pairing flow (which must persist the profile before it can pair by id).
@@ -201,8 +203,8 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
               ? `${bucket}@gcs`
               : isWebdav || isHttp
                 ? `${username ? `${username}@` : ""}${hostFromUrl(endpoint)}`
-                : isDropbox
-                  ? dropboxAccount || "Dropbox"
+                : isCloudOAuth
+                  ? cloudAccount || PROTOCOL_LABEL[protocol]
                   : isAgent
                     ? `Agent @ ${host}`
                     : `${username}@${host}`),
@@ -216,19 +218,19 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
               : "s3.amazonaws.com")
         : isWebdav || isHttp
           ? hostFromUrl(endpoint)
-          : isDropbox
-            ? "dropbox.com"
+          : isCloudOAuth
+            ? `${protocol}.com`
             : host,
       port,
-      username: isAzure ? azureAccount : isAgent || isGcs || isDropbox ? "" : username,
-      auth: isAgent || isDropbox ? { kind: "password", password: "" } : auth,
+      username: isAzure ? azureAccount : isAgent || isGcs || isCloudOAuth ? "" : username,
+      auth: isAgent || isCloudOAuth ? { kind: "password", password: "" } : auth,
       defaultRemotePath: defaultRemotePath || undefined,
       color: profile?.color,
       autoConnect: autoConnect || undefined,
       bucket: isObject ? bucket : undefined,
       region: isS3 ? region : undefined,
       endpoint: isObject || isWebdav || isHttp ? endpoint || undefined : undefined,
-      account: isAzure ? azureAccount : isDropbox ? dropboxAccount || undefined : undefined,
+      account: isAzure ? azureAccount : isCloudOAuth ? cloudAccount || undefined : undefined,
       agentKey: isAgent ? agentKey : undefined,
       group: group.trim() || undefined,
       sortOrder: profile?.sortOrder,
@@ -272,8 +274,8 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
           ? !!endpoint && !!password
           : isHttp
             ? !!endpoint
-            : isDropbox
-              ? dropboxAuthed
+            : isCloudOAuth
+              ? cloudAuthed
               : isAgent
                 ? !!host && !!agentKey
                 : !!host && !!username;
@@ -292,8 +294,8 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             ? [!endpoint && "server URL", !password && "password / token"]
             : isHttp
               ? [!endpoint && "URL"]
-              : isDropbox
-                ? [!dropboxAuthed && "Dropbox authorization"]
+              : isCloudOAuth
+                ? [!cloudAuthed && `${PROTOCOL_LABEL[protocol]} authorization`]
                 : isAgent
                   ? [!host && "host", !agentKey && "pairing"]
                   : [!host && "host", !username && "username"]
@@ -339,7 +341,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
 
         <Field label="Protocol">
           <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-bg-subtle p-1">
-            {(["sftp", "ftp", "ftps", "s3", "azure", "gcs", "webdav", "http", "dropbox", "faro-agent"] as Protocol[]).map((p) => (
+            {(["sftp", "ftp", "ftps", "s3", "azure", "gcs", "webdav", "http", "dropbox", "onedrive", "faro-agent"] as Protocol[]).map((p) => (
               <ProtocolButton
                 key={p}
                 active={protocol === p}
@@ -406,19 +408,21 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             password={password}
             setPassword={setPassword}
           />
-        ) : isDropbox ? (
-          <DropboxSection
+        ) : isCloudOAuth ? (
+          <OAuthConnectSection
+            label={PROTOCOL_LABEL[protocol]}
+            authorize={isDropbox ? ipc.dropboxAuthorize : ipc.onedriveAuthorize}
             profileId={id}
-            authed={dropboxAuthed}
-            account={dropboxAccount}
+            authed={cloudAuthed}
+            account={cloudAccount}
             onAuthorized={(label) => {
-              setDropboxAuthed(true);
-              setDropboxAccount(label);
-              if (!name) setName(label || "Dropbox");
+              setCloudAuthed(true);
+              setCloudAccount(label);
+              if (!name) setName(label || PROTOCOL_LABEL[protocol]);
             }}
             onReset={() => {
-              setDropboxAuthed(false);
-              setDropboxAccount("");
+              setCloudAuthed(false);
+              setCloudAccount("");
             }}
           />
         ) : isAgent ? (
@@ -902,16 +906,20 @@ function AzureSection({
   );
 }
 
-/// Dropbox OAuth connect. Like agent pairing: authorizing runs a browser flow
-/// and stores tokens in the OS keychain keyed by the profile id, then the editor
-/// persists the profile. No password lives in Faro.
-function DropboxSection({
+/// OAuth cloud connect (Dropbox / OneDrive / …). Like agent pairing: authorizing
+/// runs a browser flow and stores tokens in the OS keychain keyed by the profile
+/// id, then the editor persists the profile. No password lives in Faro.
+function OAuthConnectSection({
+  label,
+  authorize: runAuthorize,
   profileId,
   authed,
   account,
   onAuthorized,
   onReset,
 }: {
+  label: string;
+  authorize: (profileId: string) => Promise<{ accountLabel: string }>;
   profileId: string;
   authed: boolean;
   account: string;
@@ -923,14 +931,14 @@ function DropboxSection({
   const authorize = async () => {
     setBusy(true);
     try {
-      const res = await ipc.dropboxAuthorize(profileId);
+      const res = await runAuthorize(profileId);
       onAuthorized(res.accountLabel);
       toast.success(
-        "Connected to Dropbox",
+        `Connected to ${label}`,
         res.accountLabel ? `Authorized as ${res.accountLabel}` : undefined
       );
     } catch (e) {
-      toast.error("Dropbox authorization failed", String(e));
+      toast.error(`${label} authorization failed`, String(e));
     } finally {
       setBusy(false);
     }
@@ -939,8 +947,8 @@ function DropboxSection({
   return (
     <>
       <Hint>
-        Connect a Dropbox account. Authorizing opens your browser once; Faro
-        stores the refresh token in your OS keychain and never sees your Dropbox
+        Connect a {label} account. Authorizing opens your browser once; Faro
+        stores the refresh token in your OS keychain and never sees your {label}{" "}
         password.
       </Hint>
 
@@ -966,7 +974,7 @@ function DropboxSection({
           className="btn-accent mb-3 flex w-full items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
         >
           {busy ? <Loader2 size={14} className="animate-spin" /> : <Box size={14} />}
-          {busy ? "Waiting for authorization…" : "Connect with Dropbox"}
+          {busy ? "Waiting for authorization…" : `Connect with ${label}`}
         </button>
       )}
     </>
@@ -1359,6 +1367,8 @@ function protocolHint(p: Protocol): string {
       return "Read-only · :443";
     case "dropbox":
       return "OAuth · Cloud";
+    case "onedrive":
+      return "OAuth · Cloud";
     case "faro-agent":
       return "Machine · :8722";
   }
@@ -1382,6 +1392,7 @@ function ProtocolButton({
   else if (label === "WebDAV") Icon = Globe;
   else if (label === "HTTP") Icon = Download;
   else if (label === "Dropbox") Icon = Box;
+  else if (label === "OneDrive") Icon = Cloud;
   else if (label === "Faro Agent") Icon = MonitorSmartphone;
   return (
     <button

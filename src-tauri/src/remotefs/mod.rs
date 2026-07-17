@@ -7,6 +7,7 @@ pub mod ftp;
 pub mod http;
 pub mod local;
 pub mod object;
+pub mod onedrive;
 pub mod sftp;
 pub mod webdav;
 

@@ -424,6 +424,19 @@ async fn download_to(
             }
             file.flush().await?;
         }
+        Session::OneDrive(od) => {
+            use futures::StreamExt;
+            let resp = od
+                .get_stream(&crate::remotefs::onedrive::content_ref(remote_path))
+                .await?;
+            let mut file = tokio::fs::File::create(local_path).await?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk).await?;
+            }
+            file.flush().await?;
+        }
         Session::Agent(agent) => {
             use base64::Engine as _;
             use faro_agent_proto::msg::{Request, Response};
@@ -560,6 +573,30 @@ async fn upload_from(
                 let code = resp.status().as_u16();
                 let text = resp.text().await.unwrap_or_default();
                 return Err(anyhow::anyhow!("dropbox upload {remote_path} ({code}): {text}"));
+            }
+        }
+        Session::OneDrive(od) => {
+            use tokio_util::io::ReaderStream;
+            let token = od.access_token().await?;
+            let f = tokio::fs::File::open(&local).await?;
+            let body = reqwest::Body::wrap_stream(ReaderStream::new(f));
+            let resp = od
+                .client
+                .put(format!(
+                    "{}{}",
+                    od.graph_base,
+                    crate::remotefs::onedrive::content_ref(remote_path)
+                ))
+                .bearer_auth(&token)
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(body)
+                .send()
+                .await
+                .with_context(|| format!("onedrive upload {remote_path}"))?;
+            if !resp.status().is_success() {
+                let code = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!("onedrive upload {remote_path} ({code}): {text}"));
             }
         }
         Session::Agent(agent) => {

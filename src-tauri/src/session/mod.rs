@@ -3,12 +3,14 @@ pub mod dropbox;
 pub mod ftp;
 pub mod http;
 pub mod object;
+pub mod onedrive;
 pub mod webdav;
 pub use agent::{agent_pair, AgentSession};
 pub use dropbox::{dropbox_connect, DropboxSession};
 pub use ftp::{ftp_connect, FtpSession};
 pub use http::{http_connect, HttpSession};
 pub use object::{object_connect, ObjectSession};
+pub use onedrive::{onedrive_connect, OneDriveSession};
 pub use webdav::{webdav_connect, WebdavSession};
 
 use crate::known_hosts;
@@ -1132,6 +1134,10 @@ pub async fn open_session(
             let dbx = dropbox_connect(profile).await?;
             Ok(Session::Dropbox(Arc::new(dbx)))
         }
+        "onedrive" => {
+            let od = onedrive_connect(profile).await?;
+            Ok(Session::OneDrive(Arc::new(od)))
+        }
         other => Err(anyhow!("unsupported protocol: {other}")),
     }
 }
@@ -1386,6 +1392,7 @@ pub enum Session {
     Webdav(Arc<WebdavSession>),
     Http(Arc<HttpSession>),
     Dropbox(Arc<DropboxSession>),
+    OneDrive(Arc<OneDriveSession>),
     Agent(Arc<AgentSession>),
 }
 
@@ -1398,6 +1405,7 @@ impl Session {
             Self::Webdav(s) => &s.profile,
             Self::Http(s) => &s.profile,
             Self::Dropbox(s) => &s.profile,
+            Self::OneDrive(s) => &s.profile,
             Self::Agent(s) => &s.profile,
         }
     }
@@ -1410,6 +1418,7 @@ impl Session {
             Self::Webdav(_) => "webdav",
             Self::Http(_) => "http",
             Self::Dropbox(_) => "dropbox",
+            Self::OneDrive(_) => "onedrive",
             Self::Agent(_) => "faro-agent",
         }
     }
@@ -1503,6 +1512,12 @@ impl SessionManager {
                 let id = dbx.id.clone();
                 (id, Session::Dropbox(Arc::new(dbx)))
             }
+            "onedrive" => {
+                let _ = app; // OAuth tokens loaded from the keychain; no prompt.
+                let od = onedrive_connect(&profile).await?;
+                let id = od.id.clone();
+                (id, Session::OneDrive(Arc::new(od)))
+            }
             "faro-agent" => {
                 let agent = AgentSession::connect(profile).await?;
                 let id = agent.id.clone();
@@ -1582,6 +1597,9 @@ impl SessionManager {
                 }
                 Session::Dropbox(_) => {
                     // Dropbox is stateless HTTP — nothing to close.
+                }
+                Session::OneDrive(_) => {
+                    // OneDrive/Graph is stateless HTTP — nothing to close.
                 }
                 Session::Agent(agent) => {
                     agent.disconnect().await;

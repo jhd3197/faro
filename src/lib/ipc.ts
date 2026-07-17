@@ -80,6 +80,10 @@ export const ipc = {
   dropboxAuthorize: (profileId: string) =>
     invoke<{ accountLabel: string }>("dropbox_authorize", { profileId }),
 
+  /** Run the interactive OneDrive OAuth flow for a profile (Microsoft Graph). */
+  onedriveAuthorize: (profileId: string) =>
+    invoke<{ accountLabel: string }>("onedrive_authorize", { profileId }),
+
   // ---- Remote control: host THIS machine as a Faro Agent (Settings) ----
 
   /** Current state of the in-app agent host (enabled, running, policy, peers,

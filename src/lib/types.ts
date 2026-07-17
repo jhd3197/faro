@@ -16,6 +16,7 @@ export type Protocol =
   | "webdav"
   | "http"
   | "dropbox"
+  | "onedrive"
   | "faro-agent";
 
 export interface ConnectionProfile {
@@ -55,6 +56,7 @@ export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {
   webdav: 443,
   http: 443,
   dropbox: 443,
+  onedrive: 443,
   "faro-agent": 8722,
 };
 
@@ -68,6 +70,7 @@ export const PROTOCOL_LABEL: Record<Protocol, string> = {
   webdav: "WebDAV",
   http: "HTTP",
   dropbox: "Dropbox",
+  onedrive: "OneDrive",
   "faro-agent": "Faro Agent",
 };
 

@@ -1,5 +1,6 @@
 use crate::session::{
-    DropboxSession, FtpSession, HttpSession, ObjectSession, Session, SshSession, WebdavSession,
+    DropboxSession, FtpSession, HttpSession, ObjectSession, OneDriveSession, Session, SshSession,
+    WebdavSession,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -275,6 +276,16 @@ impl TransferManager {
                     )
                     .await
                 }
+                Session::OneDrive(od) => {
+                    mgr.run_onedrive_download(
+                        &id_for_task,
+                        od.clone(),
+                        &remote_path,
+                        &final_path,
+                        &app,
+                    )
+                    .await
+                }
                 Session::Agent(agent) => {
                     mgr.run_agent_download(
                         &id_for_task,
@@ -487,6 +498,16 @@ impl TransferManager {
                     mgr.run_dropbox_upload(
                         &id_for_task,
                         dbx.clone(),
+                        &local,
+                        &final_remote,
+                        &app,
+                    )
+                    .await
+                }
+                Session::OneDrive(od) => {
+                    mgr.run_onedrive_upload(
+                        &id_for_task,
+                        od.clone(),
                         &local,
                         &final_remote,
                         &app,
@@ -1219,6 +1240,194 @@ impl TransferManager {
         self.update(id, |t| t.transferred = size).await;
         Ok(())
     }
+
+    /// Stream a OneDrive download: GET the item's `/content` (Graph 302s to a
+    /// pre-authorized URL, which reqwest follows), written chunk by chunk.
+    async fn run_onedrive_download(
+        &self,
+        id: &str,
+        session: Arc<OneDriveSession>,
+        remote_path: &str,
+        local_path: &Path,
+        app: &AppHandle,
+    ) -> Result<()> {
+        use futures::StreamExt;
+
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+
+        let content = crate::remotefs::onedrive::content_ref(remote_path);
+        let resp = session.get_stream(&content).await?;
+
+        let mut file = tokio::fs::File::create(local_path)
+            .await
+            .with_context(|| format!("create {}", local_path.display()))?;
+        let mut stream = resp.bytes_stream();
+        let mut transferred: u64 = 0;
+        let mut last_emit = Instant::now();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.with_context(|| format!("onedrive chunk for {remote_path}"))?;
+            file.write_all(&chunk).await?;
+            transferred += chunk.len() as u64;
+            if last_emit.elapsed() > Duration::from_millis(100) {
+                self.update(id, |t| t.transferred = transferred).await;
+                if let Some(t) = self.get(id).await {
+                    let _ = app.emit("transfer://progress", &t);
+                }
+                last_emit = Instant::now();
+            }
+        }
+        file.flush().await?;
+        self.update(id, |t| t.transferred = transferred).await;
+        Ok(())
+    }
+
+    /// Upload to OneDrive: a single `PUT …/content` for small files, or a
+    /// chunked upload session for larger ones (Graph caps simple PUT at 4 MB).
+    async fn run_onedrive_upload(
+        &self,
+        id: &str,
+        session: Arc<OneDriveSession>,
+        local_path: &Path,
+        remote_path: &str,
+        app: &AppHandle,
+    ) -> Result<()> {
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+
+        let size = tokio::fs::metadata(local_path)
+            .await
+            .with_context(|| format!("stat {}", local_path.display()))?
+            .len();
+        // Graph's simple-upload ceiling is 4 MB; overridable for tests.
+        let simple_max: u64 = std::env::var("FARO_ONEDRIVE_SIMPLE_MAX")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(4 * 1024 * 1024);
+
+        if size <= simple_max {
+            self.onedrive_simple_upload(id, &session, local_path, remote_path)
+                .await?;
+        } else {
+            self.onedrive_session_upload(id, &session, local_path, remote_path, size, app)
+                .await?;
+        }
+        self.update(id, |t| t.transferred = size).await;
+        Ok(())
+    }
+
+    async fn onedrive_simple_upload(
+        &self,
+        _id: &str,
+        session: &Arc<OneDriveSession>,
+        local_path: &Path,
+        remote_path: &str,
+    ) -> Result<()> {
+        use tokio_util::io::ReaderStream;
+        let content = crate::remotefs::onedrive::content_ref(remote_path);
+        let url = format!("{}{content}", session.graph_base);
+        let mut attempt = 0;
+        loop {
+            let token = session.access_token().await?;
+            let file = tokio::fs::File::open(local_path)
+                .await
+                .with_context(|| format!("open {}", local_path.display()))?;
+            let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
+            let resp = session
+                .client
+                .put(&url)
+                .bearer_auth(&token)
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(body)
+                .send()
+                .await
+                .with_context(|| format!("PUT {remote_path}"))?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
+                attempt += 1;
+                session.force_refresh().await?;
+                continue;
+            }
+            if !resp.status().is_success() {
+                let code = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!("upload {remote_path} failed ({code}): {text}"));
+            }
+            return Ok(());
+        }
+    }
+
+    async fn onedrive_session_upload(
+        &self,
+        id: &str,
+        session: &Arc<OneDriveSession>,
+        local_path: &Path,
+        remote_path: &str,
+        size: u64,
+        app: &AppHandle,
+    ) -> Result<()> {
+        // Create the upload session.
+        let item = crate::remotefs::onedrive::item_ref(remote_path);
+        let create = format!("{item}/createUploadSession");
+        let body = serde_json::json!({
+            "item": { "@microsoft.graph.conflictBehavior": "replace" }
+        });
+        let sess = session
+            .rpc(reqwest::Method::POST, &create, Some(&body))
+            .await?;
+        let upload_url = sess
+            .get("uploadUrl")
+            .and_then(|u| u.as_str())
+            .ok_or_else(|| anyhow::anyhow!("createUploadSession returned no uploadUrl"))?
+            .to_string();
+
+        // Chunks must be a multiple of 320 KiB (except the last). ~6 MiB.
+        const CHUNK: usize = 320 * 1024 * 20;
+        let mut file = tokio::fs::File::open(local_path)
+            .await
+            .with_context(|| format!("open {}", local_path.display()))?;
+        let mut buf = vec![0u8; CHUNK];
+        let mut offset: u64 = 0;
+        let mut last_emit = Instant::now();
+        while offset < size {
+            let mut filled = 0;
+            while filled < buf.len() {
+                let n = file.read(&mut buf[filled..]).await?;
+                if n == 0 {
+                    break;
+                }
+                filled += n;
+            }
+            if filled == 0 {
+                break;
+            }
+            let start = offset;
+            let end = offset + filled as u64 - 1;
+            let range = format!("bytes {start}-{end}/{size}");
+            let resp = session
+                .client
+                .put(&upload_url)
+                .header(reqwest::header::CONTENT_LENGTH, filled as u64)
+                .header("Content-Range", range)
+                .body(bytes::Bytes::copy_from_slice(&buf[..filled]))
+                .send()
+                .await
+                .with_context(|| format!("upload chunk for {remote_path}"))?;
+            if !resp.status().is_success() {
+                let code = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!("upload {remote_path} chunk failed ({code}): {text}"));
+            }
+            offset += filled as u64;
+            if last_emit.elapsed() > Duration::from_millis(100) {
+                self.update(id, |t| t.transferred = offset).await;
+                if let Some(t) = self.get(id).await {
+                    let _ = app.emit("transfer://progress", &t);
+                }
+                last_emit = Instant::now();
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Build a RemoteFs handle for the right backend.
@@ -1232,6 +1441,7 @@ fn fs_for_session(session: &Arc<Session>) -> Box<dyn crate::remotefs::RemoteFs> 
         Session::Webdav(dav) => Box::new(crate::remotefs::webdav::WebdavFs::new(dav.clone())),
         Session::Http(http) => Box::new(crate::remotefs::http::HttpFs::new(http.clone())),
         Session::Dropbox(dbx) => Box::new(crate::remotefs::dropbox::DropboxFs::new(dbx.clone())),
+        Session::OneDrive(od) => Box::new(crate::remotefs::onedrive::OneDriveFs::new(od.clone())),
         Session::Agent(agent) => Box::new(crate::remotefs::agent::AgentFs::new(agent.clone())),
     }
 }
@@ -1313,6 +1523,7 @@ async fn remote_size(session: &Arc<Session>, path: &str) -> Result<u64> {
         Session::Dropbox(dbx) => {
             Ok(dbx.size(&crate::remotefs::dropbox::dropbox_api_path(path)).await)
         }
+        Session::OneDrive(od) => Ok(od.size(&crate::remotefs::onedrive::item_ref(path)).await),
         Session::Agent(agent) => Ok(agent_stat(agent, path).await.0),
     }
 }
@@ -1425,6 +1636,28 @@ async fn remote_resolve(
                         candidate = format!("{stem}_{i}{ext}");
                         let p = crate::remotefs::dropbox::dropbox_api_path(&candidate);
                         if !dbx.exists(&p).await {
+                            break;
+                        }
+                    }
+                    (candidate, false)
+                }
+            })
+        }
+        Session::OneDrive(od) => {
+            let exists = od.exists(&crate::remotefs::onedrive::item_ref(initial_remote)).await;
+            Ok(match policy {
+                OverwritePolicy::Overwrite => (initial_remote.to_string(), false),
+                OverwritePolicy::Skip => (initial_remote.to_string(), exists),
+                OverwritePolicy::Rename if !exists => (initial_remote.to_string(), false),
+                OverwritePolicy::Rename => {
+                    let mut candidate = initial_remote.to_string();
+                    for i in 1..=999 {
+                        let (stem, ext) = split_ext(initial_remote);
+                        candidate = format!("{stem}_{i}{ext}");
+                        if !od
+                            .exists(&crate::remotefs::onedrive::item_ref(&candidate))
+                            .await
+                        {
                             break;
                         }
                     }

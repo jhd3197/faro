@@ -329,6 +329,54 @@ pub fn delete_tokens(service: &str, profile_id: &str) {
     }
 }
 
+/// Shared token holder for the OAuth cloud backends: hands out a valid access
+/// token, refreshing (proactively on near-expiry, or on a forced 401 retry) and
+/// re-persisting to the keychain. Each provider session embeds one so the
+/// refresh logic lives in exactly one place.
+pub struct RefreshingToken {
+    service: String,
+    profile_id: String,
+    config: OAuthConfig,
+    tokens: tokio::sync::Mutex<TokenSet>,
+}
+
+impl RefreshingToken {
+    pub fn new(service: &str, profile_id: &str, config: OAuthConfig, tokens: TokenSet) -> Self {
+        Self {
+            service: service.to_string(),
+            profile_id: profile_id.to_string(),
+            config,
+            tokens: tokio::sync::Mutex::new(tokens),
+        }
+    }
+
+    /// A valid access token, refreshing + persisting first if it's near expiry.
+    pub async fn access_token(&self) -> Result<String> {
+        let mut guard = self.tokens.lock().await;
+        if is_expired(&guard) {
+            self.refresh_locked(&mut guard).await?;
+        }
+        Ok(guard.access_token.clone())
+    }
+
+    /// Force a refresh (used after a 401 on a token we thought was still valid).
+    pub async fn force_refresh(&self) -> Result<()> {
+        let mut guard = self.tokens.lock().await;
+        self.refresh_locked(&mut guard).await
+    }
+
+    async fn refresh_locked(&self, guard: &mut TokenSet) -> Result<()> {
+        let rt = guard
+            .refresh_token
+            .clone()
+            .ok_or_else(|| anyhow!("no refresh token — re-authorize this connection"))?;
+        let fresh = refresh(&self.config, &rt).await?;
+        *guard = fresh;
+        store_tokens(&self.service, &self.profile_id, guard)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

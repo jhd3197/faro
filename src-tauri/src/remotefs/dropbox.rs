@@ -167,8 +167,9 @@ fn entry_from_json(e: &serde_json::Value) -> Option<DirEntry> {
 }
 
 /// Parse a fixed-form ISO-8601 UTC timestamp (`2024-07-15T09:30:00Z`, as Dropbox
-/// emits) into a Unix timestamp. Dependency-free — the format is fixed.
-fn parse_iso8601(s: &str) -> Option<i64> {
+/// and Graph emit) into a Unix timestamp. Dependency-free — the format is fixed.
+/// Shared with the OneDrive backend.
+pub(crate) fn parse_iso8601(s: &str) -> Option<i64> {
     let s = s.trim();
     let (date, rest) = s.split_once('T')?;
     let time = rest.trim_end_matches('Z');
