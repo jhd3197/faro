@@ -15,6 +15,15 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// mDNS service type the daemon advertises and the controller browses.
 pub const SERVICE_TYPE: &str = "_faro-agent._tcp.local.";
 
+/// Bounds a caller-supplied exec timeout (`Exec.timeoutMs`) is clamped to. Shared
+/// so the daemon and the Agent Bridge agree on the ceiling — otherwise a
+/// `--timeout-ms 900000` accepted by the bridge would be silently re-capped to a
+/// lower value by the daemon (the drift Plan 10 Phase 0e closes). The floor keeps
+/// a typo like `1` from insta-killing a command; the ceiling (15 min) keeps a
+/// runaway command from parking forever.
+pub const EXEC_TIMEOUT_MS_MIN: u64 = 1_000;
+pub const EXEC_TIMEOUT_MS_MAX: u64 = 900_000;
+
 /// Kind of a directory entry — mirrors Faro's `remotefs::FileKind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

@@ -48,9 +48,11 @@ const MAX_EXEC_BYTES: usize = 512 * 1024; // cap exec output at 512 KiB
 const EXEC_TIMEOUT: Duration = Duration::from_secs(60); // default; kill a hung/streaming command
 /// Bounds for a caller-supplied exec timeout (`timeoutMs`). The floor keeps a
 /// typo like `1` from insta-killing every command; the ceiling (15 min) keeps
-/// a runaway agent from parking a command forever.
-const EXEC_TIMEOUT_MS_MIN: u64 = 1_000;
-const EXEC_TIMEOUT_MS_MAX: u64 = 900_000;
+/// a runaway agent from parking a command forever. Shared with `faro-agentd` via
+/// the proto crate so the daemon and the bridge clamp to the *same* ceiling
+/// (Plan 10 Phase 0e — a daemon-private 10-min cap used to silently shorten a
+/// bridge-accepted 15-min timeout on paired-agent targets).
+use faro_agent_proto::msg::{EXEC_TIMEOUT_MS_MAX, EXEC_TIMEOUT_MS_MIN};
 const SEARCH_MAX_RESULTS: usize = 200;
 const SEARCH_MAX_DEPTH: usize = 6;
 

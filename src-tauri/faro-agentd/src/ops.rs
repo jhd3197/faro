@@ -6,7 +6,9 @@
 
 use crate::config::Policy;
 use base64::Engine as _;
-use faro_agent_proto::msg::{DirEntry, FileKind, Request, Response, SystemInfo};
+use faro_agent_proto::msg::{
+    DirEntry, FileKind, Request, Response, SystemInfo, EXEC_TIMEOUT_MS_MAX, EXEC_TIMEOUT_MS_MIN,
+};
 use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -317,6 +319,13 @@ async fn chmod(_path: &str, _mode: u32) -> Response {
 
 // ---- exec ----
 
+/// Clamp a controller-supplied exec timeout to the SHARED bound the Agent Bridge
+/// uses (15 min), not a lower daemon-private cap — otherwise a bridge-accepted
+/// `--timeout-ms 900000` gets silently shortened here (Plan 10 Phase 0e).
+fn clamp_exec_timeout(timeout_ms: u64) -> Duration {
+    Duration::from_millis(timeout_ms.clamp(EXEC_TIMEOUT_MS_MIN, EXEC_TIMEOUT_MS_MAX))
+}
+
 async fn exec(command: &str, timeout_ms: u64, max_bytes: u64) -> Response {
     let mut cmd = build_command(command);
     cmd.stdout(std::process::Stdio::piped())
@@ -328,7 +337,7 @@ async fn exec(command: &str, timeout_ms: u64, max_bytes: u64) -> Response {
         Err(e) => return Response::error(format!("spawn shell: {e}")),
     };
 
-    let dur = Duration::from_millis(timeout_ms.clamp(1, 10 * 60 * 1000));
+    let dur = clamp_exec_timeout(timeout_ms);
     let output = tokio::time::timeout(dur, child.wait_with_output()).await;
 
     let (mut stdout, mut stderr, exit_code, timed_out) = match output {
@@ -377,4 +386,23 @@ fn build_command(command: &str) -> tokio::process::Command {
     cmd.args(["-c", command]);
     cmd.kill_on_drop(true);
     cmd
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Plan 10 Phase 0e: the daemon must clamp to the SAME 15-min ceiling the
+    // Agent Bridge accepts, so a `--timeout-ms 900000` isn't silently shortened.
+    #[test]
+    fn exec_timeout_uses_shared_15min_ceiling() {
+        // 15 min passes through unchanged (would have been capped at 10 min before).
+        assert_eq!(clamp_exec_timeout(900_000), Duration::from_millis(900_000));
+        // A 12-min request survives past the old 10-min cap.
+        assert_eq!(clamp_exec_timeout(720_000), Duration::from_millis(720_000));
+        // Above the ceiling is clamped down to 15 min, not lower.
+        assert_eq!(clamp_exec_timeout(3_600_000), Duration::from_millis(EXEC_TIMEOUT_MS_MAX));
+        // Floor still protects against a `1` typo.
+        assert_eq!(clamp_exec_timeout(0), Duration::from_millis(EXEC_TIMEOUT_MS_MIN));
+    }
 }
