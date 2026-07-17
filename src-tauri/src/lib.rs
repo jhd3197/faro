@@ -6,16 +6,20 @@ use tauri::Manager;
 // secrets directly — credentials live in profiles::ConnectionProfile, which
 // the CLI deliberately redacts in `profiles show`.
 pub mod bridge;
-mod commands;
+pub mod commands;
 pub mod agent;
 mod agent_host;
+pub mod db;
 mod deeplink;
+mod diskscan;
 mod editor;
 mod foldersync;
 pub mod importers;
 mod known_hosts;
+pub mod oauth;
 pub mod profiles;
 pub mod remotefs;
+pub mod scan;
 pub mod session;
 pub mod sync;
 mod terminal;
@@ -30,6 +34,11 @@ pub struct AppState {
     pub bridge: Arc<bridge::BridgeState>,
     pub agent_host: Arc<agent_host::AgentHost>,
     pub foldersync: Arc<foldersync::FolderSync>,
+    /// Running disk-usage scans (Plan 4). Ephemeral — not persisted.
+    pub diskscan: Arc<diskscan::ScanManager>,
+    /// Shared `faro.db` — the per-connection index (sync_state today; scan/search
+    /// caches later). See `db.rs`.
+    pub db: Arc<db::Db>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -61,6 +70,14 @@ pub fn run() {
                 profiles::ProfileStore::load_or_create(&handle)
                     .expect("failed to initialise profile store"),
             );
+            let db = {
+                let dir = handle
+                    .path()
+                    .app_data_dir()
+                    .expect("resolving app_data_dir for faro.db");
+                std::fs::create_dir_all(&dir).ok();
+                Arc::new(db::Db::open(&dir.join("faro.db")).expect("failed to open faro.db"))
+            };
             let state = AppState {
                 sessions: Arc::new(session::SessionManager::new()),
                 ptys: Arc::new(terminal::PtyManager::new()),
@@ -78,6 +95,8 @@ pub fn run() {
                     foldersync::FolderSync::load(&handle)
                         .expect("failed to initialise folder sync settings"),
                 ),
+                diskscan: Arc::new(diskscan::ScanManager::new()),
+                db,
             };
             app.manage(state);
 
@@ -136,6 +155,10 @@ pub fn run() {
             commands::discover_agents,
             commands::agent_public_key,
             commands::pair_agent,
+            commands::dropbox_authorize,
+            commands::onedrive_authorize,
+            commands::gdrive_authorize,
+            commands::box_authorize,
             agent_host::agent_host_status,
             agent_host::agent_host_set_enabled,
             agent_host::agent_host_open_pairing,
@@ -147,6 +170,11 @@ pub fn run() {
             foldersync::foldersync_remove,
             foldersync::foldersync_set_enabled,
             foldersync::foldersync_sync_now,
+            diskscan::diskscan_start,
+            diskscan::diskscan_status,
+            diskscan::diskscan_tree,
+            diskscan::diskscan_cancel,
+            diskscan::diskscan_forget,
             commands::list_agent_jobs,
             commands::kill_agent_job,
             commands::respond_to_host_prompt,

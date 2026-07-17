@@ -12,6 +12,11 @@ import {
   FileType,
   Folder,
   Link2,
+  PenTool,
+  Layers,
+  Box,
+  Figma,
+  Frame,
   type LucideIcon,
 } from "lucide-react";
 import type { DirEntry } from "../types";
@@ -48,6 +53,12 @@ add(
 add(["html", "htm"], { Icon: FileCode, className: "text-orange-400" });
 add(["css", "scss", "sass", "less"], { Icon: FileCode, className: "text-blue-400" });
 add(["sql"], { Icon: FileCode, className: "text-fuchsia-400" });
+add(["hs", "clj", "cljs", "jl", "pl", "pm", "nim", "zig", "elm", "erl"], {
+  Icon: FileCode,
+  className: "text-teal-400",
+});
+add(["tf", "tfvars", "hcl"], { Icon: FileCode, className: "text-violet-400" }); // Terraform
+add(["gradle", "cmake", "make", "mk"], { Icon: FileCog, className: "text-text-dim" });
 
 // Shell / scripts
 add(["sh", "bash", "zsh", "fish", "ps1", "bat", "cmd"], {
@@ -69,6 +80,26 @@ const IMAGE_EXTS = [
 ];
 add(IMAGE_EXTS, { Icon: FileImage, className: "text-green-400" });
 const IMAGE_SET = new Set(IMAGE_EXTS);
+
+// Design / creative — distinct glyphs + brand-ish colours so a PSD doesn't look
+// like a JPG. Raster editors → Layers; vector/illustration → PenTool.
+add(["psd", "psb"], { Icon: Layers, className: "text-blue-400" }); // Photoshop
+add(["ai"], { Icon: PenTool, className: "text-orange-400" }); // Illustrator
+add(["eps", "ps"], { Icon: PenTool, className: "text-orange-300" });
+add(["indd", "idml"], { Icon: FileText, className: "text-rose-400" }); // InDesign
+add(["fig"], { Icon: Figma, className: "text-pink-400" }); // Figma
+add(["xd"], { Icon: Frame, className: "text-fuchsia-400" }); // Adobe XD
+add(["sketch"], { Icon: PenTool, className: "text-yellow-400" });
+add(["afphoto"], { Icon: Layers, className: "text-sky-400" }); // Affinity Photo
+add(["afdesign"], { Icon: PenTool, className: "text-violet-400" }); // Affinity Designer
+add(["cdr"], { Icon: PenTool, className: "text-lime-400" }); // CorelDRAW
+
+// 3D / CAD
+add(["blend"], { Icon: Box, className: "text-orange-400" }); // Blender
+add(["obj", "fbx", "gltf", "glb", "stl", "3ds", "dae", "usdz"], {
+  Icon: Box,
+  className: "text-cyan-400",
+});
 
 // Video
 add(["mp4", "mov", "mkv", "avi", "webm", "flv", "wmv", "m4v"], {

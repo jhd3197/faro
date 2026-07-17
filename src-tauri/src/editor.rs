@@ -365,6 +365,108 @@ async fn download_to(
             }
             file.flush().await?;
         }
+        Session::Webdav(dav) => {
+            use futures::StreamExt;
+            let url = dav.url_for(remote_path, false);
+            let resp = dav
+                .request(reqwest::Method::GET, url)
+                .send()
+                .await
+                .with_context(|| format!("webdav get {remote_path}"))?;
+            if !resp.status().is_success() {
+                return Err(anyhow::anyhow!(
+                    "webdav get {remote_path}: HTTP {}",
+                    resp.status().as_u16()
+                ));
+            }
+            let mut file = tokio::fs::File::create(local_path).await?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk).await?;
+            }
+            file.flush().await?;
+        }
+        Session::Http(http) => {
+            use futures::StreamExt;
+            let url = http.url_for(remote_path, false);
+            let resp = http
+                .request(reqwest::Method::GET, url)
+                .send()
+                .await
+                .with_context(|| format!("http get {remote_path}"))?;
+            if !resp.status().is_success() {
+                return Err(anyhow::anyhow!(
+                    "http get {remote_path}: HTTP {}",
+                    resp.status().as_u16()
+                ));
+            }
+            let mut file = tokio::fs::File::create(local_path).await?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk).await?;
+            }
+            file.flush().await?;
+        }
+        Session::Dropbox(dbx) => {
+            use futures::StreamExt;
+            let arg = serde_json::json!({
+                "path": crate::remotefs::dropbox::dropbox_api_path(remote_path)
+            })
+            .to_string();
+            let resp = dbx.content_get("/2/files/download", &arg).await?;
+            let mut file = tokio::fs::File::create(local_path).await?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk).await?;
+            }
+            file.flush().await?;
+        }
+        Session::OneDrive(od) => {
+            use futures::StreamExt;
+            let resp = od
+                .get_stream(&crate::remotefs::onedrive::content_ref(remote_path))
+                .await?;
+            let mut file = tokio::fs::File::create(local_path).await?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk).await?;
+            }
+            file.flush().await?;
+        }
+        Session::GDrive(gd) => {
+            use futures::StreamExt;
+            let (file_id, _) = gd
+                .resolve_item(remote_path)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("{remote_path}: not found"))?;
+            let resp = gd.get_stream(&format!("/files/{file_id}?alt=media")).await?;
+            let mut file = tokio::fs::File::create(local_path).await?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk).await?;
+            }
+            file.flush().await?;
+        }
+        Session::Box(bx) => {
+            use futures::StreamExt;
+            let (file_id, _) = bx
+                .resolve_item(remote_path)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("{remote_path}: not found"))?;
+            let resp = bx.get_stream(&format!("/files/{file_id}/content")).await?;
+            let mut file = tokio::fs::File::create(local_path).await?;
+            let mut stream = resp.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                file.write_all(&chunk).await?;
+            }
+            file.flush().await?;
+        }
         Session::Agent(agent) => {
             use base64::Engine as _;
             use faro_agent_proto::msg::{Request, Response};
@@ -452,6 +554,128 @@ async fn upload_from(
                 .put(&p, bytes::Bytes::from(buf).into())
                 .await
                 .with_context(|| format!("object put {key}"))?;
+        }
+        Session::Webdav(dav) => {
+            use tokio_util::io::ReaderStream;
+            let file = tokio::fs::File::open(&local).await?;
+            let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
+            let url = dav.url_for(remote_path, false);
+            let resp = dav
+                .request(reqwest::Method::PUT, url)
+                .header(reqwest::header::CONTENT_LENGTH, size)
+                .body(body)
+                .send()
+                .await
+                .with_context(|| format!("webdav put {remote_path}"))?;
+            if !resp.status().is_success() {
+                return Err(anyhow::anyhow!(
+                    "webdav put {remote_path}: HTTP {}",
+                    resp.status().as_u16()
+                ));
+            }
+        }
+        Session::Http(_) => {
+            return Err(anyhow::anyhow!(
+                "HTTP source is read-only — saving edits is not supported"
+            ));
+        }
+        Session::Dropbox(dbx) => {
+            use tokio_util::io::ReaderStream;
+            let arg = serde_json::json!({
+                "path": crate::remotefs::dropbox::dropbox_api_path(remote_path),
+                "mode": "overwrite", "autorename": false, "mute": true
+            })
+            .to_string();
+            let token = dbx.access_token().await?;
+            let f = tokio::fs::File::open(&local).await?;
+            let body = reqwest::Body::wrap_stream(ReaderStream::new(f));
+            let resp = dbx
+                .client
+                .post(format!("{}/2/files/upload", dbx.content_base))
+                .bearer_auth(&token)
+                .header("Dropbox-API-Arg", &arg)
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(body)
+                .send()
+                .await
+                .with_context(|| format!("dropbox upload {remote_path}"))?;
+            if !resp.status().is_success() {
+                let code = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!("dropbox upload {remote_path} ({code}): {text}"));
+            }
+        }
+        Session::OneDrive(od) => {
+            use tokio_util::io::ReaderStream;
+            let token = od.access_token().await?;
+            let f = tokio::fs::File::open(&local).await?;
+            let body = reqwest::Body::wrap_stream(ReaderStream::new(f));
+            let resp = od
+                .client
+                .put(format!(
+                    "{}{}",
+                    od.graph_base,
+                    crate::remotefs::onedrive::content_ref(remote_path)
+                ))
+                .bearer_auth(&token)
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(body)
+                .send()
+                .await
+                .with_context(|| format!("onedrive upload {remote_path}"))?;
+            if !resp.status().is_success() {
+                let code = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!("onedrive upload {remote_path} ({code}): {text}"));
+            }
+        }
+        Session::GDrive(gd) => {
+            // Edit-in-place always targets an existing file: update its media.
+            let (file_id, _) = gd
+                .resolve_item(remote_path)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("{remote_path}: not found"))?;
+            let token = gd.access_token().await?;
+            let bytes = tokio::fs::read(&local).await?;
+            let resp = gd
+                .client
+                .patch(format!("{}/files/{file_id}?uploadType=media", gd.upload_base))
+                .bearer_auth(&token)
+                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                .body(bytes)
+                .send()
+                .await
+                .with_context(|| format!("gdrive update {remote_path}"))?;
+            if !resp.status().is_success() {
+                let code = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!("gdrive upload {remote_path} ({code}): {text}"));
+            }
+        }
+        Session::Box(bx) => {
+            // Edit-in-place uploads a new version of the existing file.
+            let (file_id, _) = bx
+                .resolve_item(remote_path)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("{remote_path}: not found"))?;
+            let token = bx.access_token().await?;
+            let bytes = tokio::fs::read(&local).await?;
+            let part = reqwest::multipart::Part::bytes(bytes)
+                .file_name(crate::session::boxdrive::basename(remote_path).to_string());
+            let form = reqwest::multipart::Form::new().part("file", part);
+            let resp = bx
+                .client
+                .post(format!("{}/files/{file_id}/content", bx.upload_base))
+                .bearer_auth(&token)
+                .multipart(form)
+                .send()
+                .await
+                .with_context(|| format!("box update {remote_path}"))?;
+            if !resp.status().is_success() {
+                let code = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                return Err(anyhow::anyhow!("box upload {remote_path} ({code}): {text}"));
+            }
         }
         Session::Agent(agent) => {
             use base64::Engine as _;

@@ -1,4 +1,4 @@
-use super::{Capabilities, DirEntry, FileKind, RemoteFs};
+use super::{Capabilities, ChangeSignal, DirEntry, FileKind, RemoteFs};
 use crate::session::ObjectSession;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -29,7 +29,12 @@ fn normalize_prefix(raw: &str) -> String {
     }
 }
 
-fn entry_for_object(key: &str, size: u64, modified_secs: Option<i64>) -> DirEntry {
+fn entry_for_object(
+    key: &str,
+    size: u64,
+    modified_secs: Option<i64>,
+    etag: Option<String>,
+) -> DirEntry {
     let name = key.rsplit('/').next().unwrap_or(key).to_string();
     DirEntry {
         name,
@@ -38,6 +43,7 @@ fn entry_for_object(key: &str, size: u64, modified_secs: Option<i64>) -> DirEntr
         size,
         modified: modified_secs,
         mode: None,
+        etag,
     }
 }
 
@@ -51,6 +57,7 @@ fn entry_for_prefix(prefix: &str) -> DirEntry {
         size: 0,
         modified: None,
         mode: None,
+        etag: None,
     }
 }
 
@@ -82,6 +89,7 @@ impl RemoteFs for ObjectFs {
                 obj.location.as_ref(),
                 obj.size as u64,
                 Some(modified),
+                obj.e_tag.clone(),
             ));
         }
         Ok(out)
@@ -146,6 +154,9 @@ impl RemoteFs for ObjectFs {
             can_rename: true,
             has_directories: false,
             has_shell: false,
+            // Object stores expose an ETag per object — an opaque change token
+            // (not necessarily an MD5 for multipart uploads). See ChangeSignal.
+            change_signal: ChangeSignal::Etag,
         }
     }
 }

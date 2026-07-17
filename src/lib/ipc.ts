@@ -35,6 +35,8 @@ import type {
   DeepLink,
   SyncPair,
   PairView,
+  ScanSnapshot,
+  DiskScanProgress,
 } from "./types";
 
 // Typed wrappers around the Tauri command surface. The string names must match
@@ -71,6 +73,24 @@ export const ipc = {
    *  so a failed pairing leaves no half-configured connection behind. */
   pairAgent: (host: string, port: number, code: string) =>
     invoke<AgentPairResult>("pair_agent", { host, port, code }),
+
+  /** Run the interactive Dropbox OAuth flow for a profile (opens the browser,
+   *  catches the loopback redirect, stores tokens in the OS keychain). Resolves
+   *  with the authorized account label. The editor saves the profile on success. */
+  dropboxAuthorize: (profileId: string) =>
+    invoke<{ accountLabel: string }>("dropbox_authorize", { profileId }),
+
+  /** Run the interactive OneDrive OAuth flow for a profile (Microsoft Graph). */
+  onedriveAuthorize: (profileId: string) =>
+    invoke<{ accountLabel: string }>("onedrive_authorize", { profileId }),
+
+  /** Run the interactive Google Drive OAuth flow for a profile. */
+  gdriveAuthorize: (profileId: string) =>
+    invoke<{ accountLabel: string }>("gdrive_authorize", { profileId }),
+
+  /** Run the interactive Box OAuth flow for a profile. */
+  boxAuthorize: (profileId: string) =>
+    invoke<{ accountLabel: string }>("box_authorize", { profileId }),
 
   // ---- Remote control: host THIS machine as a Faro Agent (Settings) ----
 
@@ -294,6 +314,22 @@ export const ipc = {
     invoke<PairView[]>("foldersync_set_enabled", { id, enabled }),
   folderSyncSyncNow: (id: string) =>
     invoke<PairView[]>("foldersync_sync_now", { id }),
+
+  // ---- Disk Usage Explorer ----
+  /** Kick off a recursive size scan of `path` on a session; returns a scan id. */
+  diskScanStart: (sessionId: SessionId, path: string) =>
+    invoke<string>("diskscan_start", { sessionId, path }),
+  /** Lightweight status (live counts while scanning). */
+  diskScanStatus: (scanId: string) =>
+    invoke<ScanSnapshot>("diskscan_status", { scanId }),
+  /** Full snapshot including the aggregated tree (present once done). */
+  diskScanTree: (scanId: string) =>
+    invoke<ScanSnapshot>("diskscan_tree", { scanId }),
+  diskScanCancel: (scanId: string) =>
+    invoke<void>("diskscan_cancel", { scanId }),
+  /** Drop a finished scan from the backend (tab closed). */
+  diskScanForget: (scanId: string) =>
+    invoke<void>("diskscan_forget", { scanId }),
 };
 
 export async function onEditSaved(
@@ -384,6 +420,29 @@ export async function onDeepLink(
   cb: (link: DeepLink) => void
 ): Promise<UnlistenFn> {
   return listen<DeepLink>("deep-link://open", (e) => cb(e.payload));
+}
+
+/** Disk-usage scan lifecycle. `progress` carries live counts; the terminal
+ *  events (`done`/`error`/`canceled`) carry a full ScanSnapshot with the tree. */
+export async function onDiskScanEvent(
+  cb: (
+    kind: "progress" | "done" | "error" | "canceled",
+    payload: DiskScanProgress | ScanSnapshot
+  ) => void
+): Promise<UnlistenFn> {
+  const unsubs = await Promise.all([
+    listen<DiskScanProgress>("diskscan://progress", (e) =>
+      cb("progress", e.payload)
+    ),
+    listen<ScanSnapshot>("diskscan://done", (e) => cb("done", e.payload)),
+    listen<ScanSnapshot>("diskscan://error", (e) => cb("error", e.payload)),
+    listen<ScanSnapshot>("diskscan://canceled", (e) =>
+      cb("canceled", e.payload)
+    ),
+  ]);
+  return () => {
+    unsubs.forEach((u) => u());
+  };
 }
 
 export async function onTransferEvent(

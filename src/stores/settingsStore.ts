@@ -181,7 +181,7 @@ const DEFAULTS: Persisted = {
   showHiddenFiles: false,
   sortField: "name",
   sortDirection: "asc",
-  paneViewMode: "details",
+  paneViewMode: "grid",
   paneDensity: "comfortable",
   browserLayout: "single",
   railExpanded: false,
@@ -197,12 +197,23 @@ const DEFAULTS: Persisted = {
   anthropicApiKey: "",
 };
 
+const VIEW_MIGRATION_KEY = "faro.viewModeDefaultV2";
+
 function load(): Persisted {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULTS;
     const parsed = JSON.parse(raw) as Partial<Persisted>;
-    return { ...DEFAULTS, ...parsed };
+    const merged = { ...DEFAULTS, ...parsed };
+    // One-time migration: the default file view moved from "details" to "grid".
+    // Flip existing installs that were still on the old default once, then
+    // respect whatever the user picks afterward.
+    if (localStorage.getItem(VIEW_MIGRATION_KEY) !== "done") {
+      if (merged.paneViewMode === "details") merged.paneViewMode = "grid";
+      localStorage.setItem(VIEW_MIGRATION_KEY, "done");
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+    }
+    return merged;
   } catch {
     return DEFAULTS;
   }

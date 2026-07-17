@@ -1,9 +1,21 @@
 pub mod agent;
+pub mod boxdrive;
+pub mod dropbox;
 pub mod ftp;
+pub mod gdrive;
+pub mod http;
 pub mod object;
+pub mod onedrive;
+pub mod webdav;
 pub use agent::{agent_pair, AgentSession};
+pub use boxdrive::{box_connect, BoxSession};
+pub use dropbox::{dropbox_connect, DropboxSession};
 pub use ftp::{ftp_connect, FtpSession};
+pub use gdrive::{gdrive_connect, GDriveSession};
+pub use http::{http_connect, HttpSession};
 pub use object::{object_connect, ObjectSession};
+pub use onedrive::{onedrive_connect, OneDriveSession};
+pub use webdav::{webdav_connect, WebdavSession};
 
 use crate::known_hosts;
 use crate::profiles::{AuthMethod, ConnectionProfile};
@@ -1110,9 +1122,33 @@ pub async fn open_session(
             let ftp = ftp_connect(profile).await?;
             Ok(Session::Ftp(Arc::new(ftp)))
         }
-        "s3" | "azure" => {
+        "s3" | "azure" | "gcs" => {
             let obj = object_connect(profile).await?;
             Ok(Session::Object(Arc::new(obj)))
+        }
+        "webdav" => {
+            let dav = webdav_connect(profile).await?;
+            Ok(Session::Webdav(Arc::new(dav)))
+        }
+        "http" | "https" => {
+            let http = http_connect(profile).await?;
+            Ok(Session::Http(Arc::new(http)))
+        }
+        "dropbox" => {
+            let dbx = dropbox_connect(profile).await?;
+            Ok(Session::Dropbox(Arc::new(dbx)))
+        }
+        "onedrive" => {
+            let od = onedrive_connect(profile).await?;
+            Ok(Session::OneDrive(Arc::new(od)))
+        }
+        "gdrive" => {
+            let gd = gdrive_connect(profile).await?;
+            Ok(Session::GDrive(Arc::new(gd)))
+        }
+        "box" => {
+            let bx = box_connect(profile).await?;
+            Ok(Session::Box(Arc::new(bx)))
         }
         other => Err(anyhow!("unsupported protocol: {other}")),
     }
@@ -1365,6 +1401,12 @@ pub enum Session {
     Ssh(Arc<SshSession>),
     Ftp(Arc<FtpSession>),
     Object(Arc<ObjectSession>),
+    Webdav(Arc<WebdavSession>),
+    Http(Arc<HttpSession>),
+    Dropbox(Arc<DropboxSession>),
+    OneDrive(Arc<OneDriveSession>),
+    GDrive(Arc<GDriveSession>),
+    Box(Arc<BoxSession>),
     Agent(Arc<AgentSession>),
 }
 
@@ -1374,6 +1416,12 @@ impl Session {
             Self::Ssh(s) => &s.profile,
             Self::Ftp(s) => &s.profile,
             Self::Object(s) => &s.profile,
+            Self::Webdav(s) => &s.profile,
+            Self::Http(s) => &s.profile,
+            Self::Dropbox(s) => &s.profile,
+            Self::OneDrive(s) => &s.profile,
+            Self::GDrive(s) => &s.profile,
+            Self::Box(s) => &s.profile,
             Self::Agent(s) => &s.profile,
         }
     }
@@ -1383,6 +1431,12 @@ impl Session {
             Self::Ssh(_) => "sftp",
             Self::Ftp(_) => "ftp",
             Self::Object(s) => s.profile.protocol.as_str(),
+            Self::Webdav(_) => "webdav",
+            Self::Http(_) => "http",
+            Self::Dropbox(_) => "dropbox",
+            Self::OneDrive(_) => "onedrive",
+            Self::GDrive(_) => "gdrive",
+            Self::Box(_) => "box",
             Self::Agent(_) => "faro-agent",
         }
     }
@@ -1452,11 +1506,47 @@ impl SessionManager {
                 let id = ftp.id.clone();
                 (id, Session::Ftp(Arc::new(ftp)))
             }
-            "s3" | "azure" => {
+            "s3" | "azure" | "gcs" => {
                 let _ = app; // Object stores have no per-connect UI prompts.
                 let obj = object_connect(&profile).await?;
                 let id = obj.id.clone();
                 (id, Session::Object(Arc::new(obj)))
+            }
+            "webdav" => {
+                let _ = app; // WebDAV auth is carried in each request, no UI prompt.
+                let dav = webdav_connect(&profile).await?;
+                let id = dav.id.clone();
+                (id, Session::Webdav(Arc::new(dav)))
+            }
+            "http" | "https" => {
+                let _ = app; // Read-only HTTP source; no per-connect UI prompt.
+                let http = http_connect(&profile).await?;
+                let id = http.id.clone();
+                (id, Session::Http(Arc::new(http)))
+            }
+            "dropbox" => {
+                let _ = app; // OAuth tokens loaded from the keychain; no prompt.
+                let dbx = dropbox_connect(&profile).await?;
+                let id = dbx.id.clone();
+                (id, Session::Dropbox(Arc::new(dbx)))
+            }
+            "onedrive" => {
+                let _ = app; // OAuth tokens loaded from the keychain; no prompt.
+                let od = onedrive_connect(&profile).await?;
+                let id = od.id.clone();
+                (id, Session::OneDrive(Arc::new(od)))
+            }
+            "gdrive" => {
+                let _ = app; // OAuth tokens loaded from the keychain; no prompt.
+                let gd = gdrive_connect(&profile).await?;
+                let id = gd.id.clone();
+                (id, Session::GDrive(Arc::new(gd)))
+            }
+            "box" => {
+                let _ = app; // OAuth tokens loaded from the keychain; no prompt.
+                let bx = box_connect(&profile).await?;
+                let id = bx.id.clone();
+                (id, Session::Box(Arc::new(bx)))
             }
             "faro-agent" => {
                 let agent = AgentSession::connect(profile).await?;
@@ -1528,6 +1618,24 @@ impl SessionManager {
                 }
                 Session::Object(_) => {
                     // Object stores are stateless HTTP — nothing to close.
+                }
+                Session::Webdav(_) => {
+                    // WebDAV is stateless HTTP too — reqwest's pool drops itself.
+                }
+                Session::Http(_) => {
+                    // Read-only HTTP is stateless — nothing to close.
+                }
+                Session::Dropbox(_) => {
+                    // Dropbox is stateless HTTP — nothing to close.
+                }
+                Session::OneDrive(_) => {
+                    // OneDrive/Graph is stateless HTTP — nothing to close.
+                }
+                Session::GDrive(_) => {
+                    // Google Drive is stateless HTTP — nothing to close.
+                }
+                Session::Box(_) => {
+                    // Box is stateless HTTP — nothing to close.
                 }
                 Session::Agent(agent) => {
                     agent.disconnect().await;

@@ -1,4 +1,4 @@
-use super::{Capabilities, DirEntry, FileKind, RemoteFs};
+use super::{Capabilities, ChangeSignal, DirEntry, FileKind, RemoteFs};
 use crate::session::SshSession;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -60,6 +60,7 @@ impl RemoteFs for SftpFs {
                         size: attrs.size.unwrap_or(0),
                         modified: attrs.mtime.map(|t| t as i64),
                         mode: attrs.permissions,
+                        etag: None,
                     });
                 }
                 Ok(out)
@@ -153,6 +154,7 @@ impl RemoteFs for SftpFs {
             can_rename: true,
             has_directories: true,
             has_shell: true,
+            change_signal: ChangeSignal::MtimeSize,
         }
     }
 }

@@ -11,6 +11,9 @@ export interface DirEntry {
   size: number;
   modified?: number; // unix seconds
   mode?: number; // posix mode bits when applicable
+  /** Backend's opaque change token (object stores expose an ETag). Absent for
+   *  backends that rely on mtime+size. A change *token*, not a content hash. */
+  etag?: string;
 }
 
 export interface Capabilities {
@@ -22,6 +25,9 @@ export interface Capabilities {
    *  terminal here". Optional so older adapters that omit it just don't get
    *  those actions. */
   hasShell?: boolean;
+  /** How this backend reports change — drives the sync index's staleness check.
+   *  Optional so older adapters that omit it default to mtime+size behaviour. */
+  changeSignal?: "mtimeSize" | "etag" | "hash";
 }
 
 // A session handle is opaque to the UI — it's whatever your adapter understands

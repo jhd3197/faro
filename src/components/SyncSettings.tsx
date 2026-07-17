@@ -107,6 +107,12 @@ function PairRow({ pair }: { pair: PairView }) {
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] text-text-dim">
             <span className="uppercase tracking-wider">{pair.strategy}</span>
+            {pair.exclude?.length > 0 && (
+              <span title={pair.exclude.join("\n")}>
+                {pair.exclude.length} exclude
+                {pair.exclude.length === 1 ? "" : "s"}
+              </span>
+            )}
             {syncing ? (
               <span className="flex items-center gap-1 text-warning">
                 <Loader2 size={10} className="animate-spin" />
@@ -192,6 +198,8 @@ function PairForm({ onDone }: { onDone: () => void }) {
   const [direction, setDirection] = useState<SyncDirection>("localToRemote");
   const [strategy, setStrategy] = useState<SyncStrategy>("additive");
   const [pollIntervalSecs, setPollIntervalSecs] = useState(60);
+  const [excludeText, setExcludeText] = useState("");
+  const [mirrorDeleteCap, setMirrorDeleteCap] = useState(100);
   const [busy, setBusy] = useState(false);
 
   const pickProfile = (id: string) => {
@@ -231,6 +239,8 @@ function PairForm({ onDone }: { onDone: () => void }) {
       strategy,
       enabled: true,
       pollIntervalSecs,
+      exclude: parseExclude(excludeText),
+      mirrorDeleteCap,
     };
     try {
       await upsert(pair);
@@ -328,11 +338,48 @@ function PairForm({ onDone }: { onDone: () => void }) {
       </div>
 
       {strategy === "mirror" && (
-        <div className="flex items-start gap-2 rounded-md border border-danger/30 bg-danger-soft/60 px-2.5 py-2 text-[11.5px] text-text-muted">
-          <AlertTriangle size={12} className="mt-0.5 shrink-0 text-danger" />
-          Mirror deletes files on the destination that don't exist on the source.
+        <div className="space-y-2 rounded-md border border-danger/30 bg-danger-soft/60 px-2.5 py-2">
+          <div className="flex items-start gap-2 text-[11.5px] text-text-muted">
+            <AlertTriangle size={12} className="mt-0.5 shrink-0 text-danger" />
+            Mirror deletes files on the destination that don't exist on the
+            source. As a safeguard, Faro refuses to delete when the source folder
+            is empty or unreadable, and caps deletions per sync.
+          </div>
+          <div className="flex items-center gap-1.5 pl-5">
+            <span className="text-[11px] text-text-muted">
+              Max deletes per sync
+            </span>
+            <input
+              type="number"
+              min={0}
+              max={100000}
+              value={mirrorDeleteCap}
+              onChange={(e) =>
+                setMirrorDeleteCap(
+                  Math.max(0, Math.min(100000, parseInt(e.target.value) || 0))
+                )
+              }
+              className="w-20 rounded-md border border-border bg-bg-panel px-2 py-1 text-sm outline-none focus:border-accent"
+            />
+            <span className="text-[11px] text-text-dim">0 = no cap</span>
+          </div>
         </div>
       )}
+
+      <Field label="Exclude patterns">
+        <textarea
+          value={excludeText}
+          onChange={(e) => setExcludeText(e.target.value)}
+          placeholder={"node_modules\n.git\n*.tmp\n/dist"}
+          rows={3}
+          spellCheck={false}
+          className="w-full resize-y rounded-md border border-border bg-bg-panel px-2.5 py-1.5 font-mono text-[12px] outline-none focus:border-accent"
+        />
+        <div className="mt-1 text-[10.5px] text-text-dim">
+          One gitignore-style pattern per line (also comma-separated). Matches are
+          never uploaded or mirror-deleted.
+        </div>
+      </Field>
 
       <Field label="Poll interval">
         <div className="flex items-center gap-1.5">
@@ -372,6 +419,15 @@ function PairForm({ onDone }: { onDone: () => void }) {
       </div>
     </div>
   );
+}
+
+/** Split the exclude textarea into clean patterns (newline- or comma-separated,
+ *  blanks and `#` comments dropped). Mirrors the backend's tolerant parsing. */
+function parseExclude(text: string): string[] {
+  return text
+    .split(/[\n,]/)
+    .map((s) => s.trim())
+    .filter((s) => s !== "" && !s.startsWith("#"));
 }
 
 function Field({

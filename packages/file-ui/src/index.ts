@@ -31,6 +31,9 @@ export {
   type FileIconSpec,
 } from "./lib/fileIcons";
 
+// A Material Icon Theme SVG URL for a filename (folders/unknown → undefined).
+export { materialIconUrl } from "./lib/materialIcons";
+
 // Hooks + utils.
 export { usePathHistory } from "./hooks/usePathHistory";
 export { useDialog } from "./hooks/useDialog";

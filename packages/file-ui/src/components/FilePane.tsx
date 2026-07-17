@@ -14,6 +14,7 @@ import {
   ExternalLink,
   FileArchive,
   TerminalSquare,
+  PieChart,
   Info,
   Search,
   X,
@@ -43,6 +44,7 @@ import { usePathHistory } from "../hooks/usePathHistory";
 import { cn } from "../lib/cn";
 import { fmtSize, fmtMtime, formatMode } from "../lib/format";
 import { isImage, type FileIconSpec } from "../lib/fileIcons";
+import { materialIconUrl } from "../lib/materialIcons";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { PromptModal } from "./PromptModal";
 import { ConfirmModal } from "./ConfirmModal";
@@ -568,6 +570,19 @@ export function FilePane({
               .catch((e) => setError(String(e))),
         });
       }
+      // Analyze disk usage under this folder (treemap + size breakdown). Works
+      // on every backend — no shell needed, the scan falls back to a walk.
+      if (single.kind === "directory" && fs.analyzeDiskUsage) {
+        items.push({
+          label: "Analyze disk usage",
+          icon: <PieChart size={12} />,
+          onClick: () =>
+            sessionId &&
+            fs
+              .analyzeDiskUsage!(sessionId, single.path)
+              .catch((e) => setError(String(e))),
+        });
+      }
       // Duplicate needs a server-side copy (cp over SSH) or local fs copy; object
       // stores / FTP can't, so hide it there.
       if (fs.duplicate && (sessionId === LOCAL_SESSION || caps?.hasShell)) {
@@ -812,6 +827,21 @@ export function FilePane({
             title="Upload files or a folder to this directory"
           >
             <Upload size={11} /> Upload
+          </button>
+        )}
+        {fs.analyzeDiskUsage && (
+          <button
+            onClick={() =>
+              sessionId &&
+              fs
+                .analyzeDiskUsage!(sessionId, path)
+                .catch((e) => setError(String(e)))
+            }
+            disabled={!sessionId}
+            className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"
+            title="Analyze disk usage in this folder"
+          >
+            <PieChart size={13} />
           </button>
         )}
         {caps?.hasDirectories !== false && (
@@ -1256,12 +1286,28 @@ function Row({
     entry.kind === "file"
       ? "Double-click to transfer • Right-click for more"
       : "Double-click to open • Right-click for more";
-  const iconEl = <Icon size={13} className={cn("shrink-0", iconColor)} />;
+  // Prefer a Material Icon Theme SVG for known file types; fall back to the
+  // lucide glyph for folders, symlinks, and unmatched files.
+  const matUrl = entry.kind === "file" ? materialIconUrl(entry.name) : undefined;
+  const glyph = (size: number) =>
+    matUrl ? (
+      <img
+        src={matUrl}
+        width={size}
+        height={size}
+        alt=""
+        draggable={false}
+        className="shrink-0 select-none"
+      />
+    ) : (
+      <Icon size={size} className={cn("shrink-0", iconColor)} />
+    );
+  const iconEl = glyph(13);
   // Show a real image preview in the grid when the adapter can supply bytes.
   const canThumb = !!loadThumb && !!sessionId && isImage(entry);
 
   if (viewMode === "grid") {
-    const bigIcon = <Icon size={30} className={cn("shrink-0", iconColor)} />;
+    const bigIcon = glyph(30);
     return (
       <div
         data-idx={index}

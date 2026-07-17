@@ -2,6 +2,7 @@ use crate::profiles::{AuthMethod, ConnectionProfile};
 use anyhow::{anyhow, Context, Result};
 use object_store::aws::AmazonS3Builder;
 use object_store::azure::MicrosoftAzureBuilder;
+use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::ObjectStore;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -23,6 +24,7 @@ pub async fn object_connect(profile: &ConnectionProfile) -> Result<ObjectSession
     match profile.protocol.as_str() {
         "s3" => s3_connect(profile).await,
         "azure" => azure_connect(profile).await,
+        "gcs" => gcs_connect(profile).await,
         other => Err(anyhow!("not an object-store protocol: {other}")),
     }
 }
@@ -119,6 +121,47 @@ async fn azure_connect(profile: &ConnectionProfile) -> Result<ObjectSession> {
         id: Uuid::new_v4().to_string(),
         profile: profile.clone(),
         container,
+        store: Arc::new(store),
+    })
+}
+
+/// Native Google Cloud Storage, the same one-builder move that added Azure:
+/// `object_store`'s `gcp` feature does the signing. Credentials come from a
+/// service-account key — either a path to the downloaded JSON (auth = Key) or the
+/// JSON pasted directly (auth = Password). The bucket rides in `profile.bucket`,
+/// exactly like an S3 bucket / Azure container.
+async fn gcs_connect(profile: &ConnectionProfile) -> Result<ObjectSession> {
+    let bucket = profile
+        .bucket
+        .as_ref()
+        .ok_or_else(|| anyhow!("GCS profile is missing the bucket name"))?
+        .clone();
+
+    let mut builder = GoogleCloudStorageBuilder::new().with_bucket_name(&bucket);
+
+    match &profile.auth {
+        AuthMethod::Key { path, .. } => {
+            builder = builder.with_service_account_path(path.clone());
+        }
+        AuthMethod::Password { password } if !password.trim().is_empty() => {
+            builder = builder.with_service_account_key(password.clone());
+        }
+        _ => {
+            return Err(anyhow!(
+                "GCS backend needs a service-account key: either a path to the JSON \
+                 key file (Private key file auth) or the pasted JSON (Password auth)."
+            ))
+        }
+    }
+
+    let store = builder
+        .build()
+        .with_context(|| format!("constructing GCS client for bucket {bucket}"))?;
+
+    Ok(ObjectSession {
+        id: Uuid::new_v4().to_string(),
+        profile: profile.clone(),
+        container: bucket,
         store: Arc::new(store),
     })
 }

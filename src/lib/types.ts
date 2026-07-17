@@ -6,7 +6,20 @@ export type AuthMethod =
   | { kind: "key"; path: string; passphrase?: string }
   | { kind: "agent" };
 
-export type Protocol = "sftp" | "ftp" | "ftps" | "s3" | "azure" | "faro-agent";
+export type Protocol =
+  | "sftp"
+  | "ftp"
+  | "ftps"
+  | "s3"
+  | "azure"
+  | "gcs"
+  | "webdav"
+  | "http"
+  | "dropbox"
+  | "onedrive"
+  | "gdrive"
+  | "box"
+  | "faro-agent";
 
 export interface ConnectionProfile {
   id: string;
@@ -41,6 +54,13 @@ export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {
   ftps: 21,
   s3: 443,
   azure: 443,
+  gcs: 443,
+  webdav: 443,
+  http: 443,
+  dropbox: 443,
+  onedrive: 443,
+  gdrive: 443,
+  box: 443,
   "faro-agent": 8722,
 };
 
@@ -50,11 +70,18 @@ export const PROTOCOL_LABEL: Record<Protocol, string> = {
   ftps: "FTPS",
   s3: "S3",
   azure: "Azure",
+  gcs: "GCS",
+  webdav: "WebDAV",
+  http: "HTTP",
+  dropbox: "Dropbox",
+  onedrive: "OneDrive",
+  gdrive: "Google Drive",
+  box: "Box",
   "faro-agent": "Faro Agent",
 };
 
 export function isObjectProtocol(p: Protocol): boolean {
-  return p === "s3" || p === "azure";
+  return p === "s3" || p === "azure" || p === "gcs";
 }
 
 /** A Faro Agent connection controls a whole remote machine, not a login on a
@@ -159,7 +186,7 @@ export interface ImporterPaths {
 
 export type SyncDirection = "localToRemote" | "remoteToLocal";
 export type SyncStrategy = "additive" | "mirror";
-export type SyncReason = "missing" | "newer" | "sizeChanged";
+export type SyncReason = "missing" | "newer" | "sizeChanged" | "edited";
 
 export interface SyncFile {
   relative: string;
@@ -201,6 +228,8 @@ export interface SyncPair {
   strategy: SyncStrategy;
   enabled: boolean;
   pollIntervalSecs: number; // default 60
+  exclude: string[]; // gitignore-style patterns; never pushed nor mirror-deleted
+  mirrorDeleteCap: number; // max deletes per Mirror reconcile; 0 = unlimited
 }
 
 /** A sync pair plus its live runtime status (what the backend returns). */
@@ -210,6 +239,49 @@ export interface PairView extends SyncPair {
   inFlight: number;
   lastSynced: number | null; // ms epoch
   lastError: string | null;
+}
+
+// ---- Disk Usage Explorer (mirrors src-tauri/src/diskscan.rs) ----
+
+export type ScanState = "scanning" | "done" | "error" | "canceled";
+/** Which strategy produced the scan. Phase 1 is always "generic"; the exec and
+ *  object-store fast paths report "shell" / "objectFlat". */
+export type ScanStrategy = "generic" | "shell" | "objectFlat";
+
+/** One node in the aggregated size tree. `size` is total bytes under the node
+ *  (own size for a file, sum of descendants for a directory). */
+export interface DuNode {
+  name: string;
+  path: string;
+  kind: FileKind;
+  size: number;
+  children?: DuNode[];
+}
+
+/** A scan snapshot: live progress while scanning, the `tree` once done. */
+export interface ScanSnapshot {
+  id: string;
+  sessionId: string;
+  root: string;
+  state: ScanState;
+  strategy: ScanStrategy;
+  dirsScanned: number;
+  filesFound: number;
+  totalBytes: number;
+  error?: string;
+  /** Why the fast path fell back to the walk, when it did. */
+  note?: string;
+  tree?: DuNode;
+  startedAt: number;
+}
+
+/** The lightweight `diskscan://progress` event body. */
+export interface DiskScanProgress {
+  id: string;
+  dirsScanned: number;
+  filesFound: number;
+  totalBytes: number;
+  strategy: ScanStrategy;
 }
 
 // ---- Edit-in-place ----
@@ -233,33 +305,172 @@ export interface EditErrorEvent {
   message: string;
 }
 
-export type S3Provider = "aws" | "r2" | "b2";
+export type S3Provider =
+  | "aws"
+  | "r2"
+  | "b2"
+  | "wasabi"
+  | "spaces"
+  | "minio"
+  | "storj"
+  | "hetzner"
+  | "scaleway"
+  | "oci"
+  | "ibm"
+  | "supabase"
+  | "generic";
 
 export interface S3ProviderPreset {
   label: string;
+  /** Short vendor sub-label under the button (e.g. "Amazon", "Cloudflare"). */
+  vendor: string;
   description: string;
   endpointHint: string; // displayed as placeholder
   defaultRegion: string;
 }
 
+// Curated S3-compatible presets. Each is purely a New-Connection convenience:
+// the backend (`session/object.rs`) treats every non-AWS endpoint the same —
+// path-style addressing, credentials from access-key/secret. Providers with a
+// per-account endpoint (R2, MinIO, Spaces, Hetzner, OCI, IBM, Supabase) show the
+// template as a placeholder; the user fills in their account/region/namespace.
 export const S3_PROVIDER_PRESETS: Record<S3Provider, S3ProviderPreset> = {
   aws: {
     label: "AWS S3",
+    vendor: "Amazon",
     description: "Native Amazon S3; endpoint derived from region.",
     endpointHint: "(leave blank — derived from region)",
     defaultRegion: "us-east-1",
   },
   r2: {
     label: "Cloudflare R2",
+    vendor: "Cloudflare",
     description: "S3-compatible. Region is always 'auto'.",
     endpointHint: "https://<account>.r2.cloudflarestorage.com",
     defaultRegion: "auto",
   },
   b2: {
     label: "Backblaze B2",
+    vendor: "Backblaze",
     description: "S3-compatible. Endpoint is per-bucket region.",
     endpointHint: "https://s3.us-west-002.backblazeb2.com",
     defaultRegion: "us-west-002",
+  },
+  wasabi: {
+    label: "Wasabi",
+    vendor: "Wasabi",
+    description: "S3-compatible hot storage. Endpoint is region-specific.",
+    endpointHint: "https://s3.us-east-1.wasabisys.com",
+    defaultRegion: "us-east-1",
+  },
+  spaces: {
+    label: "DO Spaces",
+    vendor: "DigitalOcean",
+    description: "DigitalOcean Spaces. Endpoint is the datacenter region.",
+    endpointHint: "https://nyc3.digitaloceanspaces.com",
+    defaultRegion: "nyc3",
+  },
+  minio: {
+    label: "MinIO",
+    vendor: "Self-hosted",
+    description: "Self-hosted MinIO. Point the endpoint at your server.",
+    endpointHint: "https://minio.example.com:9000",
+    defaultRegion: "us-east-1",
+  },
+  storj: {
+    label: "Storj",
+    vendor: "Storj DCS",
+    description: "Storj S3-compatible gateway. Region is ignored.",
+    endpointHint: "https://gateway.storjshare.io",
+    defaultRegion: "us-east-1",
+  },
+  hetzner: {
+    label: "Hetzner",
+    vendor: "Hetzner",
+    description: "Hetzner Object Storage. Endpoint is the location.",
+    endpointHint: "https://fsn1.your-objectstorage.com",
+    defaultRegion: "fsn1",
+  },
+  scaleway: {
+    label: "Scaleway",
+    vendor: "Scaleway",
+    description: "Scaleway Object Storage. Endpoint is region-specific.",
+    endpointHint: "https://s3.fr-par.scw.cloud",
+    defaultRegion: "fr-par",
+  },
+  oci: {
+    label: "Oracle OCI",
+    vendor: "Oracle",
+    description: "OCI Object Storage (S3 compat). Endpoint carries the namespace.",
+    endpointHint: "https://<namespace>.compat.objectstorage.us-ashburn-1.oraclecloud.com",
+    defaultRegion: "us-ashburn-1",
+  },
+  ibm: {
+    label: "IBM COS",
+    vendor: "IBM Cloud",
+    description: "IBM Cloud Object Storage (S3 compat). Endpoint is region-specific.",
+    endpointHint: "https://s3.us-south.cloud-object-storage.appdomain.cloud",
+    defaultRegion: "us-south",
+  },
+  supabase: {
+    label: "Supabase",
+    vendor: "Supabase",
+    description: "Supabase Storage S3 endpoint. Region matches the project.",
+    endpointHint: "https://<project>.supabase.co/storage/v1/s3",
+    defaultRegion: "us-east-1",
+  },
+  generic: {
+    label: "S3-compatible",
+    vendor: "Self-hosted",
+    description: "Any S3 API server (Ceph RGW, Garage, SeaweedFS, …).",
+    endpointHint: "https://s3.example.com",
+    defaultRegion: "us-east-1",
+  },
+};
+
+export type WebdavProvider = "nextcloud" | "owncloud" | "storagebox" | "generic";
+
+export interface WebdavProviderPreset {
+  label: string;
+  vendor: string;
+  description: string;
+  /** URL template shown as a placeholder; `<user>` is substituted from the
+   *  username when a preset is applied. */
+  urlHint: string;
+  /** Whether this preset expects a username (Basic auth). */
+  wantsUser: boolean;
+}
+
+// WebDAV presets (the Phase-0 preset idea generalized beyond S3). Selecting one
+// prefills the server-URL template; the user swaps in their host/username.
+export const WEBDAV_PROVIDER_PRESETS: Record<WebdavProvider, WebdavProviderPreset> = {
+  nextcloud: {
+    label: "Nextcloud",
+    vendor: "Nextcloud",
+    description: "Use an app password (Settings → Security → Devices & sessions).",
+    urlHint: "https://cloud.example.com/remote.php/dav/files/<user>/",
+    wantsUser: true,
+  },
+  owncloud: {
+    label: "ownCloud",
+    vendor: "ownCloud",
+    description: "Same DAV path as Nextcloud; an app password is recommended.",
+    urlHint: "https://cloud.example.com/remote.php/dav/files/<user>/",
+    wantsUser: true,
+  },
+  storagebox: {
+    label: "Storage Box",
+    vendor: "Hetzner",
+    description: "Hetzner Storage Box over WebDAV. Enable WebDAV in the panel.",
+    urlHint: "https://<user>.your-storagebox.de",
+    wantsUser: true,
+  },
+  generic: {
+    label: "Generic",
+    vendor: "WebDAV",
+    description: "Any WebDAV server. Basic auth, or leave the user blank for a bearer token.",
+    urlHint: "https://dav.example.com/",
+    wantsUser: true,
   },
 };
 

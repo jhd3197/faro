@@ -1,5 +1,5 @@
 use crate::agent::ChatRequest;
-use crate::profiles::ConnectionProfile;
+use crate::profiles::{AuthMethod, ConnectionProfile};
 use crate::remotefs::{Capabilities, DirEntry, RemoteFs};
 use crate::session::{HostDecision, JobHandle, Session, SshSession};
 use crate::transfer::{OverwritePolicy, Transfer, TransferStatus};
@@ -51,6 +51,22 @@ pub async fn delete_profile(
     id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    // Clean up any keychain-stored OAuth tokens for this profile.
+    if let Ok(Some(p)) = state.profiles.get(&id).await {
+        match p.protocol.as_str() {
+            "dropbox" => {
+                crate::oauth::delete_tokens(crate::session::dropbox::DROPBOX_SERVICE, &id)
+            }
+            "onedrive" => {
+                crate::oauth::delete_tokens(crate::session::onedrive::ONEDRIVE_SERVICE, &id)
+            }
+            "gdrive" => {
+                crate::oauth::delete_tokens(crate::session::gdrive::GDRIVE_SERVICE, &id)
+            }
+            "box" => crate::oauth::delete_tokens(crate::session::boxdrive::BOX_SERVICE, &id),
+            _ => {}
+        }
+    }
     state.profiles.delete(&id).await.map_err(err)
 }
 
@@ -157,6 +173,164 @@ pub async fn pair_agent(host: String, port: u16, code: String) -> Result<AgentPa
         hostname: outcome.system_info.hostname,
         os: outcome.system_info.os,
     })
+}
+
+// ---------- Dropbox (OAuth cloud) ----------
+
+/// Result of a Dropbox authorization, shown to the user to confirm the account.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DropboxAuthResult {
+    pub account_label: String,
+}
+
+/// Run the interactive Dropbox OAuth flow (opens the browser, catches the
+/// loopback redirect), store the tokens in the OS keychain keyed by `profile_id`,
+/// and return the account label. Mirrors agent pairing: the editor persists the
+/// profile once this succeeds, so a cancelled flow leaves no saved connection.
+#[tauri::command]
+pub async fn dropbox_authorize(profile_id: String) -> Result<DropboxAuthResult, String> {
+    let config = crate::session::dropbox::dropbox_config();
+    let (tokens, _raw) = crate::oauth::authorize_loopback(&config).await.map_err(err)?;
+    crate::oauth::store_tokens(
+        crate::session::dropbox::DROPBOX_SERVICE,
+        &profile_id,
+        &tokens,
+    )
+    .map_err(err)?;
+
+    // Fetch the account label with a throwaway session over the fresh tokens.
+    let probe = ConnectionProfile {
+        id: profile_id.clone(),
+        name: String::new(),
+        protocol: "dropbox".into(),
+        host: "dropbox.com".into(),
+        port: 443,
+        username: String::new(),
+        auth: AuthMethod::Password { password: String::new() },
+        default_remote_path: None,
+        color: None,
+        auto_connect: None,
+        bucket: None,
+        region: None,
+        endpoint: None,
+        account: None,
+        agent_key: None,
+        group: None,
+        sort_order: None,
+    };
+    let account_label = match crate::session::dropbox_connect(&probe).await {
+        Ok(session) => session.account_label().await.unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+    Ok(DropboxAuthResult { account_label })
+}
+
+/// Run the interactive OneDrive OAuth flow, store tokens in the keychain keyed by
+/// `profile_id`, and return the account label. Same shape as `dropbox_authorize`.
+#[tauri::command]
+pub async fn onedrive_authorize(profile_id: String) -> Result<DropboxAuthResult, String> {
+    let config = crate::session::onedrive::onedrive_config();
+    let (tokens, _raw) = crate::oauth::authorize_loopback(&config).await.map_err(err)?;
+    crate::oauth::store_tokens(
+        crate::session::onedrive::ONEDRIVE_SERVICE,
+        &profile_id,
+        &tokens,
+    )
+    .map_err(err)?;
+
+    let probe = ConnectionProfile {
+        id: profile_id.clone(),
+        name: String::new(),
+        protocol: "onedrive".into(),
+        host: "onedrive.com".into(),
+        port: 443,
+        username: String::new(),
+        auth: AuthMethod::Password { password: String::new() },
+        default_remote_path: None,
+        color: None,
+        auto_connect: None,
+        bucket: None,
+        region: None,
+        endpoint: None,
+        account: None,
+        agent_key: None,
+        group: None,
+        sort_order: None,
+    };
+    let account_label = match crate::session::onedrive_connect(&probe).await {
+        Ok(session) => session.account_label().await.unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+    Ok(DropboxAuthResult { account_label })
+}
+
+/// Run the interactive Google Drive OAuth flow, store tokens, return the label.
+#[tauri::command]
+pub async fn gdrive_authorize(profile_id: String) -> Result<DropboxAuthResult, String> {
+    let config = crate::session::gdrive::gdrive_config();
+    let (tokens, _raw) = crate::oauth::authorize_loopback(&config).await.map_err(err)?;
+    crate::oauth::store_tokens(crate::session::gdrive::GDRIVE_SERVICE, &profile_id, &tokens)
+        .map_err(err)?;
+
+    let probe = ConnectionProfile {
+        id: profile_id.clone(),
+        name: String::new(),
+        protocol: "gdrive".into(),
+        host: "drive.google.com".into(),
+        port: 443,
+        username: String::new(),
+        auth: AuthMethod::Password { password: String::new() },
+        default_remote_path: None,
+        color: None,
+        auto_connect: None,
+        bucket: None,
+        region: None,
+        endpoint: None,
+        account: None,
+        agent_key: None,
+        group: None,
+        sort_order: None,
+    };
+    let account_label = match crate::session::gdrive_connect(&probe).await {
+        Ok(session) => session.account_label().await.unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+    Ok(DropboxAuthResult { account_label })
+}
+
+/// Run the interactive Box OAuth flow, store tokens, return the label.
+#[tauri::command]
+pub async fn box_authorize(profile_id: String) -> Result<DropboxAuthResult, String> {
+    let config = crate::session::boxdrive::box_config();
+    let (tokens, _raw) = crate::oauth::authorize_loopback(&config).await.map_err(err)?;
+    crate::oauth::store_tokens(crate::session::boxdrive::BOX_SERVICE, &profile_id, &tokens)
+        .map_err(err)?;
+
+    let probe = ConnectionProfile {
+        id: profile_id.clone(),
+        name: String::new(),
+        protocol: "box".into(),
+        host: "box.com".into(),
+        port: 443,
+        username: String::new(),
+        auth: AuthMethod::Password { password: String::new() },
+        default_remote_path: None,
+        color: None,
+        auto_connect: None,
+        bucket: None,
+        region: None,
+        endpoint: None,
+        account: None,
+        agent_key: None,
+        group: None,
+        sort_order: None,
+    };
+    let account_label = match crate::session::box_connect(&probe).await {
+        Ok(session) => session.account_label().await.unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+    Ok(DropboxAuthResult { account_label })
 }
 
 /// List the in-flight tracked commands (agent/bridge `exec`s, tails) running on a
@@ -474,6 +648,15 @@ async fn fs_for(
     Ok(fs_for_session(&session))
 }
 
+/// `fs_for` for other subsystems (e.g. the disk-usage scanner) that resolve a
+/// `RemoteFs` from a session id — same `local`-aware dispatch, exported.
+pub async fn fs_for_public(
+    session_id: &str,
+    state: &AppState,
+) -> Result<Box<dyn RemoteFs>, String> {
+    fs_for(session_id, state).await
+}
+
 pub fn fs_for_session(session: &Arc<Session>) -> Box<dyn RemoteFs> {
     match &**session {
         Session::Ssh(ssh) => Box::new(crate::remotefs::sftp::SftpFs::new(ssh.clone())),
@@ -481,6 +664,12 @@ pub fn fs_for_session(session: &Arc<Session>) -> Box<dyn RemoteFs> {
         Session::Object(obj) => {
             Box::new(crate::remotefs::object::ObjectFs::new(obj.clone()))
         }
+        Session::Webdav(dav) => Box::new(crate::remotefs::webdav::WebdavFs::new(dav.clone())),
+        Session::Http(http) => Box::new(crate::remotefs::http::HttpFs::new(http.clone())),
+        Session::Dropbox(dbx) => Box::new(crate::remotefs::dropbox::DropboxFs::new(dbx.clone())),
+        Session::OneDrive(od) => Box::new(crate::remotefs::onedrive::OneDriveFs::new(od.clone())),
+        Session::GDrive(gd) => Box::new(crate::remotefs::gdrive::GDriveFs::new(gd.clone())),
+        Session::Box(bx) => Box::new(crate::remotefs::boxdrive::BoxFs::new(bx.clone())),
         Session::Agent(agent) => Box::new(crate::remotefs::agent::AgentFs::new(agent.clone())),
     }
 }

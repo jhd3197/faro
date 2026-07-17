@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { FilePane } from "@faro/file-ui";
 import { SyncDialog } from "./SyncDialog";
 import { useConnections } from "@/stores/connectionsStore";
 import { useTransfers, toTransferItem } from "@/stores/transfersStore";
+import { useLayout } from "@/stores/layoutStore";
 import { LOCAL_SESSION } from "@/lib/types";
 import type { DirEntry } from "@/lib/types";
 import { ArrowRightLeft } from "lucide-react";
@@ -31,6 +32,21 @@ export function DualPaneBrowser() {
     if (!activeSessionId) return;
     setRemotePaths((m) => ({ ...m, [activeSessionId]: path }));
   };
+
+  // "Reveal in browser" from the Disk Usage explorer. Local targets go to the
+  // local pane; a matching server target updates that session's remote pane.
+  const revealTarget = useLayout((s) => s.revealTarget);
+  const clearReveal = useLayout((s) => s.clearReveal);
+  useEffect(() => {
+    if (!revealTarget) return;
+    if (revealTarget.sessionId === LOCAL_SESSION) {
+      setLocalPath(revealTarget.path);
+      clearReveal();
+    } else if (revealTarget.sessionId === activeSessionId) {
+      setRemotePaths((m) => ({ ...m, [activeSessionId]: revealTarget.path }));
+      clearReveal();
+    }
+  }, [revealTarget, activeSessionId, clearReveal]);
 
   const uploadAll = (entries: DirEntry[]) => {
     if (!activeSessionId) return;

@@ -1,4 +1,4 @@
-# Plan 4 — On-demand virtual folders (Plan 2, Phase 3)
+# Plan 9 — On-demand virtual folders (Plan 2, Phase 3)
 
 ## Status: DESIGNED, NOT BUILT
 

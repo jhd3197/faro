@@ -57,13 +57,19 @@ mdns-sd = "0.11"
 # FTP / FTPS — sync API, driven from tokio via spawn_blocking.
 suppaftp = { version = "6", features = ["native-tls"] }
 
-# S3 / R2 / B2 — Apache Arrow's polymorphic object_store crate. v0.6 will reuse
-# this with the `azure` feature for Azure Blob.
-object_store = { version = "0.11", features = ["aws", "azure"] }
+# S3 / R2 / B2 — Apache Arrow's polymorphic object_store crate. The same crate
+# backs Azure Blob (`azure` feature) and native Google Cloud Storage (`gcp`).
+object_store = { version = "0.11", features = ["aws", "azure", "gcp"] }
 bytes = "1"
 
 # Importers — quick-xml for FileZilla's sitemanager.xml.
 quick-xml = "0.36"
+
+# Shared connection index (faro.db). The `bundled` feature compiles SQLite from
+# source so there's no system-SQLite dependency. One DB under app_data_dir holds
+# per-feature tables (sync_state today; scan_cache / search_index / diff_hash
+# later). See docs/plans/3_scan-index-foundation.md.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Misc
 anyhow = "1"
@@ -74,12 +80,23 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "5"
 sha2 = "0.10"
 base64 = "0.22"
-reqwest = { version = "0.12", features = ["json"] }
+# `stream` powers ranged/streamed WebDAV GET+PUT bodies; `multipart` powers Box's
+# multipart/form-data uploads and Google Drive multipart create.
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
+# Wraps a tokio File as a Stream for streaming WebDAV PUT uploads.
+tokio-util = { version = "0.7", features = ["io"] }
+# Decode percent-encoded WebDAV PROPFIND href paths back into file names.
+percent-encoding = "2"
 
 # Filesystem watcher — powers the right-click "Edit with…" flow that
 # downloads a remote file to a tempfile, opens it in the user's editor, and
 # uploads it back on every save.
 notify = "6"
+
+# OS keychain for OAuth tokens (Dropbox et al., Plan 5 Phase 5). Native backends
+# only (Windows Credential Manager / macOS Keychain / Linux keyutils) so there's
+# no dbus/secret-service build dependency.
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 
 # Windows-only: registry access for the PuTTY sessions importer.
 [target.'cfg(windows)'.dependencies]

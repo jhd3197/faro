@@ -62,6 +62,12 @@ export interface FileSystemAdapter {
    * and the pane doesn't offer "Open terminal here". Remote sessions only.
    */
   openTerminal?(sessionId: SessionId, path: string): Promise<void>;
+  /**
+   * Optional: analyze disk usage under `path` (a WinDirStat-style treemap +
+   * size-ranked breakdown). Omit it and the pane doesn't offer the "Analyze
+   * disk usage" action.
+   */
+  analyzeDiskUsage?(sessionId: SessionId, path: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

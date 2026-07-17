@@ -49,6 +49,7 @@ import { KeyboardShortcutsDialog } from "./components/KeyboardShortcutsDialog";
 import { AgentBridge, AgentBridgeHost } from "./components/AgentBridge";
 import { AgentConsoleDock } from "./components/AgentConsole";
 import { AgentChatDock } from "./components/AgentChat";
+import { DiskUsageHost } from "./components/DiskUsage";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { relTime } from "./lib/format";
 import { cn } from "./lib/cn";
@@ -118,6 +119,7 @@ export default function App() {
       <Toaster />
       <AgentBridgeHost />
       <OverwriteDialogHost />
+      <DiskUsageHost />
       <CommandPalette />
       <KeyboardShortcutsDialog />
       <div className="flex flex-1 overflow-hidden">
@@ -593,7 +595,7 @@ function DeepLinkListener() {
 /// Map a parsed deep link to editor seed values. `pair` links become a
 /// faro-agent profile; everything else a server profile of the named protocol.
 function deepLinkToPrefill(dl: DeepLink): Partial<ConnectionProfile> {
-  const known: Protocol[] = ["sftp", "ftp", "ftps", "s3", "azure", "faro-agent"];
+  const known: Protocol[] = ["sftp", "ftp", "ftps", "s3", "azure", "gcs", "webdav", "http", "dropbox", "onedrive", "gdrive", "box", "faro-agent"];
   const protocol: Protocol =
     dl.action === "pair"
       ? "faro-agent"

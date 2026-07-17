@@ -6,12 +6,14 @@ import {
   PROTOCOL_DEFAULT_PORT,
   PROTOCOL_LABEL,
   S3_PROVIDER_PRESETS,
+  WEBDAV_PROVIDER_PRESETS,
   isObjectProtocol,
   isAgentProtocol,
   type AuthMethod,
   type ConnectionProfile,
   type Protocol,
   type S3Provider,
+  type WebdavProvider,
   type DiscoveredAgent,
 } from "@/lib/types";
 import {
@@ -19,6 +21,9 @@ import {
   ShieldOff,
   Terminal as TerminalIcon,
   Cloud,
+  Globe,
+  Download,
+  Box,
   Eye,
   EyeOff,
   Wand2,
@@ -45,6 +50,15 @@ function genId(): string {
   return crypto.randomUUID();
 }
 
+/// Best-effort hostname from a WebDAV server URL, for the rail label.
+function hostFromUrl(u: string): string {
+  try {
+    return new URL(u.includes("://") ? u : `https://${u}`).hostname;
+  } catch {
+    return u;
+  }
+}
+
 /// Guess which provider a saved S3 profile belongs to from its endpoint URL.
 /// We never need this to be perfect — it just preselects a preset button.
 function guessProvider(endpoint?: string): S3Provider {
@@ -52,7 +66,16 @@ function guessProvider(endpoint?: string): S3Provider {
   const e = endpoint.toLowerCase();
   if (e.includes("r2.cloudflarestorage.com")) return "r2";
   if (e.includes("backblazeb2.com")) return "b2";
-  return "aws";
+  if (e.includes("wasabisys.com")) return "wasabi";
+  if (e.includes("digitaloceanspaces.com")) return "spaces";
+  if (e.includes("storjshare.io")) return "storj";
+  if (e.includes("your-objectstorage.com")) return "hetzner";
+  if (e.includes("scw.cloud")) return "scaleway";
+  if (e.includes("oraclecloud.com")) return "oci";
+  if (e.includes("cloud-object-storage.appdomain.cloud")) return "ibm";
+  if (e.includes("supabase.co")) return "supabase";
+  // A bare endpoint we don't recognize is some self-hosted / niche S3 server.
+  return "generic";
 }
 
 export function ProfileEditor({ profile, prefill, onClose }: Props) {
@@ -119,8 +142,10 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
       setPort(PROTOCOL_DEFAULT_PORT[p]);
     }
     if (isObjectProtocol(p)) {
-      // Object stores only do key auth — coerce to password.
-      setAuthKind("password");
+      // Object stores authenticate by key material, not interactive login. S3 /
+      // Azure carry it in the password field; GCS uses a service-account JSON,
+      // which defaults to a key *file* path (Password mode pastes the JSON).
+      setAuthKind(p === "gcs" ? "key" : "password");
     }
     if ((p === "ftp" || p === "ftps") && authKind !== "password") {
       setAuthKind("password");
@@ -139,8 +164,27 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
   const isFtp = protocol === "ftp" || protocol === "ftps";
   const isS3 = protocol === "s3";
   const isAzure = protocol === "azure";
+  const isGcs = protocol === "gcs";
+  const isWebdav = protocol === "webdav";
+  const isHttp = protocol === "http";
+  const isDropbox = protocol === "dropbox";
+  const isOnedrive = protocol === "onedrive";
+  const isGdrive = protocol === "gdrive";
+  const isBox = protocol === "box";
+  const isCloudOAuth = isDropbox || isOnedrive || isGdrive || isBox;
   const isObject = isObjectProtocol(protocol);
   const isAgent = isAgentProtocol(protocol);
+
+  // OAuth clouds (Dropbox/OneDrive/…): authorization state. Editing an
+  // already-authorized profile (its account label is persisted) starts authorized.
+  const [cloudAuthed, setCloudAuthed] = useState<boolean>(
+    (seed?.protocol === "dropbox" ||
+      seed?.protocol === "onedrive" ||
+      seed?.protocol === "gdrive" ||
+      seed?.protocol === "box") &&
+      !!seed?.account
+  );
+  const [cloudAccount, setCloudAccount] = useState<string>(seed?.account ?? "");
 
   /// Build the profile from the current form state. Shared by Save and by the
   /// pairing flow (which must persist the profile before it can pair by id).
@@ -161,21 +205,38 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
           ? `${bucket}@${s3Provider}`
           : isAzure
             ? `${azureAccount}/${bucket}`
-            : isAgent
-              ? `Agent @ ${host}`
-              : `${username}@${host}`),
+            : isGcs
+              ? `${bucket}@gcs`
+              : isWebdav || isHttp
+                ? `${username ? `${username}@` : ""}${hostFromUrl(endpoint)}`
+                : isCloudOAuth
+                  ? cloudAccount || PROTOCOL_LABEL[protocol]
+                  : isAgent
+                    ? `Agent @ ${host}`
+                    : `${username}@${host}`),
       protocol,
-      host: isObject ? endpoint || (isAzure ? "blob.core.windows.net" : "s3.amazonaws.com") : host,
+      host: isObject
+        ? endpoint ||
+          (isAzure
+            ? "blob.core.windows.net"
+            : isGcs
+              ? "storage.googleapis.com"
+              : "s3.amazonaws.com")
+        : isWebdav || isHttp
+          ? hostFromUrl(endpoint)
+          : isCloudOAuth
+            ? `${protocol}.com`
+            : host,
       port,
-      username: isAzure ? azureAccount : isAgent ? "" : username,
-      auth: isAgent ? { kind: "password", password: "" } : auth,
+      username: isAzure ? azureAccount : isAgent || isGcs || isCloudOAuth ? "" : username,
+      auth: isAgent || isCloudOAuth ? { kind: "password", password: "" } : auth,
       defaultRemotePath: defaultRemotePath || undefined,
       color: profile?.color,
       autoConnect: autoConnect || undefined,
       bucket: isObject ? bucket : undefined,
       region: isS3 ? region : undefined,
-      endpoint: isObject ? endpoint || undefined : undefined,
-      account: isAzure ? azureAccount : undefined,
+      endpoint: isObject || isWebdav || isHttp ? endpoint || undefined : undefined,
+      account: isAzure ? azureAccount : isCloudOAuth ? cloudAccount || undefined : undefined,
       agentKey: isAgent ? agentKey : undefined,
       group: group.trim() || undefined,
       sortOrder: profile?.sortOrder,
@@ -208,22 +269,42 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
     void connectProfile(id);
   };
 
+  const gcsCredOk = authKind === "key" ? !!keyPath : !!password;
   const canSave = isS3
     ? !!bucket && !!username && !!password
     : isAzure
       ? !!azureAccount && !!bucket && !!password
-      : isAgent
-        ? !!host && !!agentKey
-        : !!host && !!username;
+      : isGcs
+        ? !!bucket && gcsCredOk
+        : isWebdav
+          ? !!endpoint && !!password
+          : isHttp
+            ? !!endpoint
+            : isCloudOAuth
+              ? cloudAuthed
+              : isAgent
+                ? !!host && !!agentKey
+                : !!host && !!username;
   // Name what's still required so a disabled Save isn't a dead end.
   const missing = (
     isS3
       ? [!bucket && "bucket", !username && "access key ID", !password && "secret key"]
       : isAzure
         ? [!azureAccount && "account", !bucket && "container", !password && "access key"]
-        : isAgent
-          ? [!host && "host", !agentKey && "pairing"]
-          : [!host && "host", !username && "username"]
+        : isGcs
+          ? [
+              !bucket && "bucket",
+              !gcsCredOk && (authKind === "key" ? "key file path" : "JSON key"),
+            ]
+          : isWebdav
+            ? [!endpoint && "server URL", !password && "password / token"]
+            : isHttp
+              ? [!endpoint && "URL"]
+              : isCloudOAuth
+                ? [!cloudAuthed && `${PROTOCOL_LABEL[protocol]} authorization`]
+                : isAgent
+                  ? [!host && "host", !agentKey && "pairing"]
+                  : [!host && "host", !username && "username"]
   ).filter(Boolean);
 
   return (
@@ -266,7 +347,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
 
         <Field label="Protocol">
           <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-bg-subtle p-1">
-            {(["sftp", "ftp", "ftps", "s3", "azure", "faro-agent"] as Protocol[]).map((p) => (
+            {(["sftp", "ftp", "ftps", "s3", "azure", "gcs", "webdav", "http", "dropbox", "onedrive", "gdrive", "box", "faro-agent"] as Protocol[]).map((p) => (
               <ProtocolButton
                 key={p}
                 active={protocol === p}
@@ -303,6 +384,60 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             setAccessKey={setPassword}
             endpoint={endpoint}
             setEndpoint={setEndpoint}
+          />
+        ) : isGcs ? (
+          <GcsSection
+            bucket={bucket}
+            setBucket={setBucket}
+            keyMode={authKind === "key" ? "file" : "paste"}
+            setKeyMode={(m) => setAuthKind(m === "file" ? "key" : "password")}
+            keyPath={keyPath}
+            setKeyPath={setKeyPath}
+            keyJson={password}
+            setKeyJson={setPassword}
+          />
+        ) : isWebdav ? (
+          <WebdavSection
+            url={endpoint}
+            setUrl={setEndpoint}
+            username={username}
+            setUsername={setUsername}
+            password={password}
+            setPassword={setPassword}
+          />
+        ) : isHttp ? (
+          <HttpSection
+            url={endpoint}
+            setUrl={setEndpoint}
+            username={username}
+            setUsername={setUsername}
+            password={password}
+            setPassword={setPassword}
+          />
+        ) : isCloudOAuth ? (
+          <OAuthConnectSection
+            label={PROTOCOL_LABEL[protocol]}
+            authorize={
+              isDropbox
+                ? ipc.dropboxAuthorize
+                : isOnedrive
+                  ? ipc.onedriveAuthorize
+                  : isGdrive
+                    ? ipc.gdriveAuthorize
+                    : ipc.boxAuthorize
+            }
+            profileId={id}
+            authed={cloudAuthed}
+            account={cloudAccount}
+            onAuthorized={(label) => {
+              setCloudAuthed(true);
+              setCloudAccount(label);
+              if (!name) setName(label || PROTOCOL_LABEL[protocol]);
+            }}
+            onReset={() => {
+              setCloudAuthed(false);
+              setCloudAccount("");
+            }}
           />
         ) : isAgent ? (
           <AgentSection
@@ -785,6 +920,341 @@ function AzureSection({
   );
 }
 
+/// OAuth cloud connect (Dropbox / OneDrive / …). Like agent pairing: authorizing
+/// runs a browser flow and stores tokens in the OS keychain keyed by the profile
+/// id, then the editor persists the profile. No password lives in Faro.
+function OAuthConnectSection({
+  label,
+  authorize: runAuthorize,
+  profileId,
+  authed,
+  account,
+  onAuthorized,
+  onReset,
+}: {
+  label: string;
+  authorize: (profileId: string) => Promise<{ accountLabel: string }>;
+  profileId: string;
+  authed: boolean;
+  account: string;
+  onAuthorized: (label: string) => void;
+  onReset: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  const authorize = async () => {
+    setBusy(true);
+    try {
+      const res = await runAuthorize(profileId);
+      onAuthorized(res.accountLabel);
+      toast.success(
+        `Connected to ${label}`,
+        res.accountLabel ? `Authorized as ${res.accountLabel}` : undefined
+      );
+    } catch (e) {
+      toast.error(`${label} authorization failed`, String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <Hint>
+        Connect a {label} account. Authorizing opens your browser once; Faro
+        stores the refresh token in your OS keychain and never sees your {label}{" "}
+        password.
+      </Hint>
+
+      {authed ? (
+        <div className="mb-3 flex items-center justify-between rounded-md border border-success/30 bg-success/10 px-2.5 py-2">
+          <span className="flex items-center gap-1.5 text-xs text-text">
+            <Check size={13} className="text-success" />
+            Connected{account ? ` as ${account}` : ""}.
+          </span>
+          <button
+            type="button"
+            onClick={onReset}
+            className="text-[11px] text-text-dim underline hover:text-text"
+          >
+            Reconnect
+          </button>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={authorize}
+          disabled={busy}
+          className="btn-accent mb-3 flex w-full items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {busy ? <Loader2 size={14} className="animate-spin" /> : <Box size={14} />}
+          {busy ? "Waiting for authorization…" : `Connect with ${label}`}
+        </button>
+      )}
+    </>
+  );
+}
+
+function HttpSection({
+  url,
+  setUrl,
+  username,
+  setUsername,
+  password,
+  setPassword,
+}: {
+  url: string;
+  setUrl: (v: string) => void;
+  username: string;
+  setUsername: (v: string) => void;
+  password: string;
+  setPassword: (v: string) => void;
+}) {
+  const [auth, setAuth] = useState<boolean>(!!username);
+  return (
+    <>
+      <Hint>
+        Read-only browse of any static file server. Point at a directory with an
+        autoindex (nginx / Apache) to browse it, or paste a direct file URL to
+        pull a single artifact. No uploads, renames, or deletes.
+      </Hint>
+
+      <Field label="URL">
+        <input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="https://files.example.com/pub/"
+          className={inputCls}
+        />
+      </Field>
+
+      <label className="mb-3 flex cursor-pointer items-center gap-2.5 rounded-md border border-border bg-bg-subtle px-2.5 py-2">
+        <input
+          type="checkbox"
+          checked={auth}
+          onChange={(e) => {
+            setAuth(e.target.checked);
+            if (!e.target.checked) {
+              setUsername("");
+              setPassword("");
+            }
+          }}
+          className="h-3.5 w-3.5 shrink-0 accent-[rgb(var(--accent))]"
+        />
+        <span className="text-xs font-medium text-text">
+          Server needs HTTP Basic auth
+        </span>
+      </label>
+
+      {auth && (
+        <>
+          <Field label="Username">
+            <input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              className={inputCls}
+            />
+          </Field>
+          <Field label="Password">
+            <PasswordInput value={password} onChange={setPassword} />
+          </Field>
+        </>
+      )}
+    </>
+  );
+}
+
+function WebdavSection({
+  url,
+  setUrl,
+  username,
+  setUsername,
+  password,
+  setPassword,
+}: {
+  url: string;
+  setUrl: (v: string) => void;
+  username: string;
+  setUsername: (v: string) => void;
+  password: string;
+  setPassword: (v: string) => void;
+}) {
+  const [provider, setProvider] = useState<WebdavProvider>("nextcloud");
+  // Bearer mode = no username (the value in `password` is the token).
+  const [mode, setMode] = useState<"basic" | "bearer">(
+    !username && password ? "bearer" : "basic"
+  );
+  const preset = WEBDAV_PROVIDER_PRESETS[provider];
+
+  const applyPreset = (p: WebdavProvider) => {
+    setProvider(p);
+    const tpl = WEBDAV_PROVIDER_PRESETS[p].urlHint;
+    // Prefill the URL template, substituting a known username where it appears.
+    setUrl(username ? tpl.replace("<user>", username) : tpl);
+  };
+
+  return (
+    <>
+      <Field label="Provider">
+        <div className="grid grid-cols-4 gap-1 rounded-md border border-border bg-bg-subtle p-1">
+          {(Object.keys(WEBDAV_PROVIDER_PRESETS) as WebdavProvider[]).map((p) => {
+            const data = WEBDAV_PROVIDER_PRESETS[p];
+            return (
+              <button
+                key={p}
+                type="button"
+                onClick={() => applyPreset(p)}
+                className={
+                  "flex flex-col items-start rounded-sm px-2 py-1.5 text-left transition-colors " +
+                  (provider === p
+                    ? "bg-accent-soft text-text ring-1 ring-inset ring-accent/40"
+                    : "text-text-muted hover:bg-bg-hover hover:text-text")
+                }
+              >
+                <span className="flex items-center gap-1 text-[11px] font-semibold">
+                  <Globe size={11} className={provider === p ? "text-accent" : ""} />
+                  {data.label}
+                </span>
+                <span className="text-[10px] text-text-dim">{data.vendor}</span>
+              </button>
+            );
+          })}
+        </div>
+      </Field>
+
+      <Hint>{preset.description}</Hint>
+
+      <Field label="Server URL">
+        <input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder={preset.urlHint}
+          className={inputCls}
+        />
+      </Field>
+
+      <Field label="Auth">
+        <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-bg-subtle p-1">
+          {(["basic", "bearer"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => {
+                setMode(m);
+                if (m === "bearer") setUsername("");
+              }}
+              className={
+                "rounded-sm px-2 py-1.5 text-[11px] font-semibold transition-colors " +
+                (mode === m
+                  ? "bg-accent-soft text-text ring-1 ring-inset ring-accent/40"
+                  : "text-text-muted hover:bg-bg-hover hover:text-text")
+              }
+            >
+              {m === "basic" ? "Username + password" : "Bearer token"}
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      {mode === "basic" && (
+        <Field label="Username">
+          <input
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            placeholder="alice"
+            className={inputCls}
+          />
+        </Field>
+      )}
+
+      <Field label={mode === "basic" ? "Password" : "Bearer token"}>
+        <PasswordInput value={password} onChange={setPassword} />
+      </Field>
+    </>
+  );
+}
+
+function GcsSection({
+  bucket,
+  setBucket,
+  keyMode,
+  setKeyMode,
+  keyPath,
+  setKeyPath,
+  keyJson,
+  setKeyJson,
+}: {
+  bucket: string;
+  setBucket: (v: string) => void;
+  keyMode: "file" | "paste";
+  setKeyMode: (v: "file" | "paste") => void;
+  keyPath: string;
+  setKeyPath: (v: string) => void;
+  keyJson: string;
+  setKeyJson: (v: string) => void;
+}) {
+  return (
+    <>
+      <Hint>
+        Google Cloud Storage. Create a service account with Storage access, then
+        use its JSON key (Cloud console → IAM &amp; Admin → Service accounts →
+        Keys). Point at the downloaded file, or paste the key directly.
+      </Hint>
+
+      <Field label="Bucket">
+        <input
+          value={bucket}
+          onChange={(e) => setBucket(e.target.value)}
+          placeholder="my-gcs-bucket"
+          className={inputCls}
+        />
+      </Field>
+
+      <Field label="Service account key">
+        <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-bg-subtle p-1">
+          {(["file", "paste"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setKeyMode(m)}
+              className={
+                "rounded-sm px-2 py-1.5 text-[11px] font-semibold transition-colors " +
+                (keyMode === m
+                  ? "bg-accent-soft text-text ring-1 ring-inset ring-accent/40"
+                  : "text-text-muted hover:bg-bg-hover hover:text-text")
+              }
+            >
+              {m === "file" ? "Key file path" : "Paste JSON"}
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      {keyMode === "file" ? (
+        <Field label="Key file path">
+          <input
+            value={keyPath}
+            onChange={(e) => setKeyPath(e.target.value)}
+            placeholder="~/keys/service-account.json"
+            className={inputCls}
+          />
+        </Field>
+      ) : (
+        <Field label="Service account JSON">
+          <textarea
+            value={keyJson}
+            onChange={(e) => setKeyJson(e.target.value)}
+            placeholder='{ "type": "service_account", ... }'
+            spellCheck={false}
+            rows={5}
+            className={cn(inputCls, "resize-y font-mono text-[11px] leading-snug")}
+          />
+        </Field>
+      )}
+    </>
+  );
+}
+
 function S3Section({
   provider,
   onProviderChange,
@@ -817,7 +1287,7 @@ function S3Section({
     <>
       <Field label="Provider">
         <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-bg-subtle p-1">
-          {(["aws", "r2", "b2"] as S3Provider[]).map((p) => {
+          {(Object.keys(S3_PROVIDER_PRESETS) as S3Provider[]).map((p) => {
             const data = S3_PROVIDER_PRESETS[p];
             return (
               <button
@@ -835,7 +1305,7 @@ function S3Section({
                   <Cloud size={11} className={provider === p ? "text-accent" : ""} />
                   {data.label}
                 </span>
-                <span className="text-[10px] text-text-dim">{p === "aws" ? "Amazon" : p === "r2" ? "Cloudflare" : "Backblaze"}</span>
+                <span className="text-[10px] text-text-dim">{data.vendor}</span>
               </button>
             );
           })}
@@ -903,6 +1373,20 @@ function protocolHint(p: Protocol): string {
       return "Object · :443";
     case "azure":
       return "Blob · :443";
+    case "gcs":
+      return "Object · :443";
+    case "webdav":
+      return "HTTP · :443";
+    case "http":
+      return "Read-only · :443";
+    case "dropbox":
+      return "OAuth · Cloud";
+    case "onedrive":
+      return "OAuth · Cloud";
+    case "gdrive":
+      return "OAuth · Cloud";
+    case "box":
+      return "OAuth · Cloud";
     case "faro-agent":
       return "Machine · :8722";
   }
@@ -922,7 +1406,13 @@ function ProtocolButton({
   let Icon = TerminalIcon;
   if (label === "FTPS") Icon = ShieldCheck;
   else if (label === "FTP") Icon = ShieldOff;
-  else if (label === "S3" || label === "Azure") Icon = Cloud;
+  else if (label === "S3" || label === "Azure" || label === "GCS") Icon = Cloud;
+  else if (label === "WebDAV") Icon = Globe;
+  else if (label === "HTTP") Icon = Download;
+  else if (label === "Dropbox") Icon = Box;
+  else if (label === "OneDrive") Icon = Cloud;
+  else if (label === "Google Drive") Icon = Cloud;
+  else if (label === "Box") Icon = Box;
   else if (label === "Faro Agent") Icon = MonitorSmartphone;
   return (
     <button

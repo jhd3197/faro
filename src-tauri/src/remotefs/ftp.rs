@@ -1,4 +1,4 @@
-use super::{Capabilities, DirEntry, FileKind, RemoteFs};
+use super::{Capabilities, ChangeSignal, DirEntry, FileKind, RemoteFs};
 use crate::session::FtpSession;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
@@ -55,6 +55,7 @@ fn entry_from_listing(parent: &str, line: &str) -> Option<DirEntry> {
         size: f.size() as u64,
         modified,
         mode: None,
+        etag: None,
     })
 }
 
@@ -153,6 +154,7 @@ impl RemoteFs for FtpFs {
             can_rename: true,
             has_directories: true,
             has_shell: false,
+            change_signal: ChangeSignal::MtimeSize,
         }
     }
 }

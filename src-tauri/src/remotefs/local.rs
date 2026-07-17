@@ -1,4 +1,4 @@
-use super::{Capabilities, DirEntry, FileKind, RemoteFs};
+use super::{Capabilities, ChangeSignal, DirEntry, FileKind, RemoteFs};
 use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use std::path::Path;
@@ -39,6 +39,7 @@ impl RemoteFs for LocalFs {
                 size: meta.len(),
                 modified,
                 mode: None,
+                etag: None,
             });
         }
         Ok(out)
@@ -98,6 +99,7 @@ impl RemoteFs for LocalFs {
             can_rename: true,
             has_directories: true,
             has_shell: false,
+            change_signal: ChangeSignal::MtimeSize,
         }
     }
 }

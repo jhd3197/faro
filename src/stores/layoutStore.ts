@@ -42,6 +42,13 @@ interface LayoutState {
   browseLocal: boolean;
   setBrowseLocal: (v: boolean) => void;
 
+  // A one-shot "show this path in the file browser" request (from the Disk
+  // Usage explorer's "Reveal" action). The active browser consumes it and
+  // clears it. `path` is the directory to open (a file's parent).
+  revealTarget: { sessionId: string; path: string } | null;
+  requestReveal: (sessionId: string, path: string) => void;
+  clearReveal: () => void;
+
   paletteOpen: boolean;
   setPaletteOpen: (v: boolean) => void;
   togglePalette: () => void;
@@ -73,6 +80,10 @@ export const useLayout = create<LayoutState>((set) => ({
 
   browseLocal: false,
   setBrowseLocal: (v) => set({ browseLocal: v }),
+
+  revealTarget: null,
+  requestReveal: (sessionId, path) => set({ revealTarget: { sessionId, path } }),
+  clearReveal: () => set({ revealTarget: null }),
 
   paletteOpen: false,
   setPaletteOpen: (v) => set({ paletteOpen: v }),
