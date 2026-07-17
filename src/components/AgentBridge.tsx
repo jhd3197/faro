@@ -46,6 +46,7 @@ const APPROVAL_COPY: Record<string, { title: string; foot: string }> = {
   upload_dir: { title: "Agent wants to upload a directory", foot: "Uploads the whole tree through Faro's transfer engine." },
   sync: { title: "Agent wants to sync directories", foot: "Copies through Faro's transfer engine; mirror mode deletes destination files missing from the source." },
   search: { title: "Agent wants to search the server", foot: "Searches through your authenticated Faro session." },
+  skill: { title: "Agent wants to run a Skill across servers", foot: "Runs the skill's steps on every listed server through your authenticated Faro sessions." },
 };
 function approvalCopy(kind: string) {
   return (
@@ -82,6 +83,13 @@ function summaryStats(
     const del = command.match(/delete (\d+) files? on the destination \(mirror\)/);
     if (del)
       stats.push({ label: `DELETES ${del[1]} files on the destination`, danger: true });
+  } else if (kind === "skill") {
+    // "Run skill "X" on N server(s) (…) — M step(s) each"
+    const servers = command.match(/on (\d+) servers? \(/);
+    if (servers)
+      stats.push({ label: `${servers[1]} server${servers[1] === "1" ? "" : "s"}`, danger: true });
+    const steps = command.match(/— (\d+) steps? each/);
+    if (steps) stats.push({ label: `${steps[1]} step${steps[1] === "1" ? "" : "s"} each` });
   }
   return stats;
 }

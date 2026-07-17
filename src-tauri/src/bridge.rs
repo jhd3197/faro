@@ -4986,4 +4986,151 @@ mod tests {
 
         std::fs::remove_dir_all(&root).ok();
     }
+
+    // ---- Skills (Plan 8) ----
+
+    fn skill_with_params(params: Vec<SkillParam>) -> Skill {
+        Skill {
+            params,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn param_map_defaults_and_overrides() {
+        let skill = skill_with_params(vec![
+            SkillParam {
+                name: "service".into(),
+                required: true,
+                ..Default::default()
+            },
+            SkillParam {
+                name: "signal".into(),
+                default: Some("HUP".into()),
+                ..Default::default()
+            },
+        ]);
+        let mut provided = HashMap::new();
+        provided.insert("service".to_string(), "nginx".to_string());
+        let map = build_param_map(&skill, &provided).unwrap();
+        assert_eq!(map.get("service").unwrap(), "nginx");
+        // Declared default fills in when not provided.
+        assert_eq!(map.get("signal").unwrap(), "HUP");
+        // Provided wins over the declared default.
+        provided.insert("signal".to_string(), "TERM".to_string());
+        let map = build_param_map(&skill, &provided).unwrap();
+        assert_eq!(map.get("signal").unwrap(), "TERM");
+    }
+
+    #[test]
+    fn param_map_requires_required() {
+        let skill = skill_with_params(vec![SkillParam {
+            name: "service".into(),
+            required: true,
+            ..Default::default()
+        }]);
+        let err = build_param_map(&skill, &HashMap::new()).unwrap_err();
+        assert!(err.contains("service"));
+    }
+
+    #[test]
+    fn substitute_replaces_placeholders() {
+        let mut params = HashMap::new();
+        params.insert("service".to_string(), "nginx".to_string());
+        params.insert("signal".to_string(), "HUP".to_string());
+        assert_eq!(
+            substitute("systemctl reload ${service} # ${signal}", &params),
+            "systemctl reload nginx # HUP"
+        );
+        // An unresolved placeholder is left verbatim.
+        assert_eq!(substitute("echo ${missing}", &params), "echo ${missing}");
+    }
+
+    #[test]
+    fn migrate_command_seeds_single_step_approved_skill() {
+        let cmd = SavedCommand {
+            id: "c1".into(),
+            name: "disk".into(),
+            command: "df -h".into(),
+            description: String::new(),
+        };
+        let skill = migrate_command_to_skill(&cmd);
+        assert_eq!(skill.name, "disk");
+        assert_eq!(skill.steps.len(), 1);
+        assert_eq!(skill.steps[0].command, "df -h");
+        assert_eq!(skill.status, SkillStatus::Approved);
+        assert_eq!(skill.created_by, "user");
+        assert!(!skill.id.is_empty());
+    }
+
+    #[test]
+    fn skill_tool_name_sanitizes() {
+        // Colons/spaces/dots collapse to underscores (MCP names allow no colon).
+        assert_eq!(skill_tool_name("Restart Web"), "skill_restart_web");
+        assert_eq!(skill_tool_name("rotate.logs"), "skill_rotate_logs");
+        assert_eq!(skill_tool_name("  audit  "), "skill_audit");
+    }
+
+    #[test]
+    fn clip_trims_on_char_boundary() {
+        // Short strings pass through untouched.
+        assert_eq!(clip("hello", 100), "hello");
+        // A multi-byte char at the cut point isn't split.
+        let s = "aé"; // 'a' = 1 byte, 'é' = 2 bytes
+        let out = clip(s, 2);
+        assert!(out.starts_with('a'));
+        assert!(out.contains("clipped"));
+    }
+
+    fn one_step_skill(name: &str) -> Skill {
+        Skill {
+            name: name.into(),
+            steps: vec![SkillStep {
+                name: String::new(),
+                command: "true".into(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// The safety crux: a hand-authored skill is born approved, but an
+    /// AI-authored one is forced to a proposal it can't self-approve; only the
+    /// (local-UI) approve path flips it to runnable.
+    #[tokio::test]
+    async fn skills_store_propose_approve_delete() {
+        // No config_path (default) → persist() is a no-op, so this touches no disk.
+        let state = BridgeState::default();
+
+        // Hand-authored via the local UI path → approved.
+        let list = state.upsert_skill(one_step_skill("restart")).await;
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].status, SkillStatus::Approved);
+        let restart_id = list[0].id.clone();
+        assert!(!restart_id.is_empty());
+
+        // AI path: even if the definition claims approved/user, it's forced to a
+        // proposal authored by "ai" with a fresh id.
+        let sneaky = Skill {
+            status: SkillStatus::Approved,
+            created_by: "user".into(),
+            id: "attacker-chosen".into(),
+            ..one_step_skill("ai-skill")
+        };
+        let proposed = state.propose_skill(sneaky).await;
+        assert_eq!(proposed.status, SkillStatus::Proposed);
+        assert_eq!(proposed.created_by, "ai");
+        assert_ne!(proposed.id, "attacker-chosen");
+
+        // The human approve gate flips it to runnable.
+        let found = state.find_skill("ai-skill").await.unwrap();
+        assert_eq!(found.status, SkillStatus::Proposed);
+        let list = state.approve_skill(&found.id).await;
+        let ai = list.iter().find(|s| s.name == "ai-skill").unwrap();
+        assert_eq!(ai.status, SkillStatus::Approved);
+
+        // Delete removes exactly the targeted skill.
+        let list = state.delete_skill(&restart_id).await;
+        assert!(list.iter().all(|s| s.id != restart_id));
+        assert_eq!(list.len(), 1);
+    }
 }
