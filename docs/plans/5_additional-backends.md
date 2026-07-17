@@ -122,15 +122,35 @@ Then sequence by API friction, **not** brand size:
    and set the App key in `session/dropbox.rs` (`DROPBOX_APP_KEY`) or via
    `FARO_DROPBOX_APP_KEY`. PKCE ⇒ no app secret. The browser-consent leg needs a
    real app key + account and is the only unverified step.
-2. ⬜ **OneDrive** — Microsoft Graph supports path addressing
-   (`/drive/root:/path`); near-Dropbox effort, reuses `oauth.rs`.
-3. ⬜ **Google Drive** — strictly ID-addressed; needs the path↔ID resolver/cache.
-4. ⬜ **Box** — enterprise draw; ID-addressed like Drive, reuses its resolver.
-5. *(Optional)* **pCloud** — path-based API, small effort, smaller audience.
+2. ✅ **OneDrive** — **shipped.** Microsoft Graph path addressing
+   (`/me/drive/root:/path:`). `session/onedrive.rs` + `remotefs/onedrive.rs`
+   (list + nextLink paging, PATCH move, MKCOL/delete, cTag token) + streaming
+   download / simple-or-chunked-session upload + `onedrive_authorize`. Verified
+   against `tests/onedrive_mock.py`.
+3. ✅ **Google Drive** — **shipped.** Strictly ID-addressed → a path↔ID
+   resolver with a cache (`session/gdrive.rs`): `files?q='<parent>' in parents`,
+   multipart create / media update, PATCH add/removeParents move, md5 token.
+   Verified against `tests/gdrive_mock.py` (nested-path resolver + full CRUD).
+4. ✅ **Box** — **shipped.** ID-addressed like Drive, reuses the resolver shape
+   (`session/boxdrive.rs`): `/folders/{id}/items`, multipart/form-data upload,
+   PUT move, recursive delete, sha1 token. Verified against `tests/box_mock.py`.
+5. *(Optional, not built)* **pCloud** — path-based API, small effort, smaller
+   audience.
 
-Dropbox, Drive, and OneDrive all expose **delta cursors**
-(`list_folder/continue`, `changes.list`, Graph delta) — surface as a
-push/delta capability so the folder-sync engine can skip polling for them.
+All four reuse `oauth.rs` (loopback+PKCE+keychain) and the shared
+`RefreshingToken` (proactive refresh + 401-retry). Each needs the same
+maintainer step to go live: register the provider app with redirect
+`http://localhost:53682/` and set its client id
+(`{DROPBOX,ONEDRIVE,GDRIVE,BOX}_CLIENT_ID` constant or `FARO_*_CLIENT_ID`).
+Every provider's OAuth-token/API path is verified against a local mock; the only
+unverified leg is the interactive browser consent, which needs a real app + account.
+
+**Not yet done:** the **delta-cursor** capability. Dropbox
+(`list_folder/continue`), Graph delta, and Drive `changes.list` could surface as
+a push/delta signal so folder-sync skips polling — a follow-up (needs a new
+`Capabilities` field + sync-engine support), not part of the RemoteFs pilot.
+**Chunked upload** is only implemented for OneDrive; Dropbox refuses >150 MB and
+GDrive/Box buffer the file for multipart — a follow-up for very large files.
 
 ### Considered and passed (for now)
 - **Mega** — client-side crypto protocol, no sane Rust path.
