@@ -5,6 +5,7 @@
 //! behind it) can tell "the owner disallowed this" apart from "it failed".
 
 use crate::config::Policy;
+use crate::jobs::JobStore;
 use base64::Engine as _;
 use faro_agent_proto::msg::{
     DirEntry, FileKind, Request, Response, SystemInfo, EXEC_TIMEOUT_MS_MAX, EXEC_TIMEOUT_MS_MIN,
@@ -22,8 +23,9 @@ fn b64() -> base64::engine::general_purpose::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
 }
 
-/// Handle one request. `client_name` is only used for logging by the caller.
-pub async fn handle(req: Request, policy: Policy) -> Response {
+/// Handle one request. `client_name` is only used for logging by the caller;
+/// `jobs` is the shared store backing detached background jobs.
+pub async fn handle(req: Request, policy: Policy, jobs: &JobStore) -> Response {
     match req {
         Request::Ping => Response::Pong,
         Request::SystemInfo => Response::SystemInfo(system_info()),
@@ -57,6 +59,62 @@ pub async fn handle(req: Request, policy: Policy) -> Response {
         Request::Exec { command, timeout_ms, max_bytes } => {
             exec(&command, timeout_ms, max_bytes).await
         }
+
+        // --- detached background jobs (gated like exec) ---
+        Request::ExecStart { .. } | Request::ExecPoll { .. } | Request::ExecKill { .. }
+            if !policy.allow_exec =>
+        {
+            Response::denied("command execution is disabled on this machine")
+        }
+        Request::ExecStart { job_id, command, max_bytes } => {
+            exec_start(jobs, &job_id, &command, max_bytes)
+        }
+        Request::ExecPoll { job_id } => exec_poll(jobs, &job_id),
+        Request::ExecKill { job_id } => exec_kill(jobs, &job_id),
+    }
+}
+
+/// Launch a detached background job (Plan 10 Phase 4). Returns at once; the job
+/// keeps running under the daemon and its output/exit are read back via
+/// [`Request::ExecPoll`]. The caller (Agent Bridge) owns `job_id` generation.
+fn exec_start(jobs: &JobStore, job_id: &str, command: &str, max_bytes: u64) -> Response {
+    let cap = max_bytes.clamp(1, 4 * 1024 * 1024) as usize;
+    match jobs.start(job_id, command, cap) {
+        Ok(()) => Response::ExecStarted { job_id: job_id.to_string() },
+        Err(e) => Response::error(format!("spawn background job: {e}")),
+    }
+}
+
+/// Poll a detached job's captured output + status. An unknown id comes back with
+/// `not_found` set (never started, or pruned) rather than an error, so the
+/// controller can phrase it as "no such job".
+fn exec_poll(jobs: &JobStore, job_id: &str) -> Response {
+    match jobs.poll(job_id) {
+        Some(s) => Response::ExecStatus {
+            running: s.running,
+            exit_code: s.exit_code,
+            stdout: s.stdout,
+            stderr: s.stderr,
+            truncated: s.truncated,
+            not_found: false,
+        },
+        None => Response::ExecStatus {
+            running: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            truncated: false,
+            not_found: true,
+        },
+    }
+}
+
+/// Kill a running detached job (best-effort).
+fn exec_kill(jobs: &JobStore, job_id: &str) -> Response {
+    if jobs.kill(job_id) {
+        Response::Ok
+    } else {
+        Response::error("no such job")
     }
 }
 
@@ -373,7 +431,7 @@ async fn exec(command: &str, timeout_ms: u64, max_bytes: u64) -> Response {
 }
 
 #[cfg(windows)]
-fn build_command(command: &str) -> tokio::process::Command {
+pub(crate) fn build_command(command: &str) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("powershell");
     cmd.args(["-NoProfile", "-NonInteractive", "-Command", command]);
     cmd.kill_on_drop(true);
@@ -381,7 +439,7 @@ fn build_command(command: &str) -> tokio::process::Command {
 }
 
 #[cfg(not(windows))]
-fn build_command(command: &str) -> tokio::process::Command {
+pub(crate) fn build_command(command: &str) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("sh");
     cmd.args(["-c", command]);
     cmd.kill_on_drop(true);
@@ -422,6 +480,7 @@ mod tests {
         let resp = handle(
             Request::Exec { command: script.to_string(), timeout_ms: 30_000, max_bytes: 65_536 },
             policy,
+            &JobStore::new(),
         )
         .await;
 

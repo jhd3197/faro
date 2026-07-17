@@ -92,6 +92,13 @@ Three new units, plus wiring into the existing app:
 | `WriteChunk{path,offset,data,truncate,done}` | ranged write (upload)  |
 | `Delete{path,recursive}` / `CreateDir` / `Rename` / `Chmod` | fs mutations |
 | `Exec{command,timeoutMs,maxBytes}` | run a native shell command       |
+| `ExecStart{jobId,command,maxBytes}` | launch a detached background job |
+| `ExecPoll{jobId}` / `ExecKill{jobId}` | poll / kill a background job    |
+
+The `ExecStart`/`ExecPoll`/`ExecKill` trio is **additive** (Plan 10 Phase 4) — a
+pre-Plan-10 daemon doesn't recognise it, so the controller degrades to a clear
+"update the agent" message rather than a silent failure. The protocol version is
+unchanged, so every existing op keeps working against an older daemon.
 
 Every logical message is JSON, split into ≤64 KiB Noise segments (each with a
 continuation flag) so large directory listings and file chunks stream safely
@@ -118,8 +125,17 @@ AI agent reaches it through the same bridge tools it uses for SSH servers
   once finished; `faro-cli agent jobs <server>` lists running/finished jobs. Job
   dirs older than 7 days are pruned on the next launch. This retires the manual
   `nohup … & ; tail -f log` loop. Gated as an Exec (never auto-approved except by
-  allow-all); polling is a Read. Detached exec on a **paired Faro Agent** target
-  is not supported yet — run without `--detach`, or use an SSH server.
+  allow-all); polling is a Read.
+- **Background jobs on a paired Faro Agent** — the same `--detach` / `faro_job`
+  surface works against a paired machine: the daemon spawns the command, tracks
+  it by id in memory (capped output per stream, finished jobs reaped on a TTL),
+  and answers `ExecPoll` with the capture + exit code. The one difference from
+  the SSH arm: agent jobs live only for the daemon's lifetime — a daemon restart
+  forgets in-flight jobs (a later poll returns "no such job"), whereas the SSH
+  arm's on-disk `~/.faro/jobs` dir survives one. Requires **faro-agentd from
+  Plan 10 or newer** on the target; an older daemon doesn't know the op and the
+  bridge reports a clear "update the agent" error. `agent jobs` (list) stays
+  SSH-only for now; poll agent jobs by id.
 - **`faro_exec_script`** — runs a whole **multi-line script verbatim**
   (`/exec_script`, `faro-cli agent script <server> <file>` or `agent exec
   --file/--stdin`). The script bytes are read locally and shipped as an opaque

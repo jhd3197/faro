@@ -1896,14 +1896,12 @@ async fn op_exec_detached(
 ) -> (u16, Value) {
     use base64::Engine as _;
     let manager = app.state::<AppState>().sessions.clone();
-    if manager.get_agent(session_id).await.is_some() {
-        return (
-            400,
-            json!({"error": "detached jobs aren't supported on Faro Agent targets yet — run without --detach, or use an SSH server."}),
-        );
+    // Faro Agent target: launch via the daemon's ExecStart (Plan 10 Phase 4).
+    if let Some(agent) = manager.get_agent(session_id).await {
+        return op_exec_detached_agent(app, state, &agent, session_id, command, dry_run).await;
     }
     let Some(ssh) = manager.get_ssh(session_id).await else {
-        return (400, json!({"error": "detached exec needs an SSH/SFTP connection."}));
+        return (400, json!({"error": "detached exec needs an SSH/SFTP or Faro Agent connection."}));
     };
     let session_name = ssh.profile.name.clone();
     if !state.is_enabled(session_id).await {
@@ -1950,6 +1948,63 @@ async fn op_exec_detached(
     }
 }
 
+/// Launch a detached job on a paired Faro Agent (Plan 10 Phase 4, agent arm):
+/// the daemon spawns it under the bridge-chosen job id and returns at once; poll
+/// it with `/job`. Gated identically to the SSH arm.
+async fn op_exec_detached_agent(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    agent: &Arc<crate::session::AgentSession>,
+    session_id: &str,
+    command: &str,
+    dry_run: bool,
+) -> (u16, Value) {
+    let session_name = agent.profile.name.clone();
+    if !state.is_enabled(session_id).await {
+        return (403, json!({
+            "error": format!("connection '{session_name}' has not granted agent access. Ask the user to open Faro → Agent Bridge and toggle 'Allow agent access' for it.")
+        }));
+    }
+    if dry_run {
+        let policy = *state.policy.lock().await;
+        return (200, json!({
+            "wouldRun": command,
+            "detach": true,
+            "needsApproval": !policy.allow_all,
+        }));
+    }
+    if let Err(resp) = gate(
+        app,
+        state,
+        session_id,
+        &session_name,
+        OpClass::Exec,
+        "exec",
+        &format!("run detached (background job): {command}"),
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+    let job_id = Uuid::new_v4().to_string();
+    // 512 KiB per stream, matching the SSH poll cap.
+    match agent.exec_start(&job_id, command, 512 * 1024).await {
+        Ok(id) => {
+            state
+                .log(app, activity("exec", session_id, format!("detached job {id}: {command}"), true))
+                .await;
+            (200, json!({ "jobId": id, "status": "started" }))
+        }
+        Err(e) => (
+            500,
+            json!({"error": format!(
+                "failed to start background job on agent '{session_name}': {e}. The agent may predate Plan 10 (update faro-agentd), or the connection dropped."
+            )}),
+        ),
+    }
+}
+
 /// Parse the `job_poll_script` output into a status object.
 fn parse_job_poll(text: &str) -> Value {
     use base64::Engine as _;
@@ -1980,7 +2035,7 @@ fn parse_job_poll(text: &str) -> Value {
     json!({ "running": running, "exitCode": exit, "stdout": stdout, "stderr": stderr })
 }
 
-/// Poll a detached job's progress/output (SSH only). Read-only.
+/// Poll a detached job's progress/output (SSH server or Faro Agent). Read-only.
 async fn op_job(
     app: &AppHandle,
     state: &Arc<BridgeState>,
@@ -1988,8 +2043,28 @@ async fn op_job(
     job_id: &str,
 ) -> (u16, Value) {
     let manager = app.state::<AppState>().sessions.clone();
+    // Faro Agent target: poll via the daemon's ExecPoll (Plan 10 Phase 4).
+    if let Some(agent) = manager.get_agent(session_id).await {
+        let name = agent.profile.name.clone();
+        if let Err(resp) =
+            gate(app, state, session_id, &name, OpClass::Read, "job", &format!("read job {job_id}"), None).await
+        {
+            return resp;
+        }
+        return match agent.exec_poll(job_id).await {
+            Ok(s) if s.not_found => (
+                404,
+                json!({"error": "no such job on that agent (it may have been pruned, or the daemon restarted)", "jobId": job_id}),
+            ),
+            Ok(s) => (
+                200,
+                json!({ "running": s.running, "exitCode": s.exit_code, "stdout": s.stdout, "stderr": s.stderr, "jobId": job_id }),
+            ),
+            Err(e) => (500, json!({"error": e.to_string()})),
+        };
+    }
     let Some(ssh) = manager.get_ssh(session_id).await else {
-        return (400, json!({"error": "jobs are SSH-only for now."}));
+        return (400, json!({"error": "detached jobs need an SSH/SFTP or Faro Agent connection."}));
     };
     let name = ssh.profile.name.clone();
     if let Err(resp) = gate(app, state, session_id, &name, OpClass::Read, "job", &format!("read job {job_id}"), None).await {
@@ -4520,7 +4595,7 @@ async fn mcp_tools_list(state: &Arc<BridgeState>) -> Value {
                         "command": { "type": "string", "description": "The command to run. Keep it non-interactive (no pagers/prompts). Prefer read-only status and diagnostic commands. `sudo` is supported: when the user has enabled it, Faro answers sudo's password prompt with their connection password — so just write `sudo <cmd>` normally; do NOT add `-S`, a password, or `echo <pw> |`." },
                         "dryRun": { "type": "boolean", "description": "If true, return a preview of what would run and whether it would need approval, without executing." },
                         "timeoutMs": { "type": "integer", "description": "Optional timeout in milliseconds for commands that legitimately run long (builds, backups). Default 60000; clamped to [1000, 900000]. The 512 KiB output cap is unchanged." },
-                        "detach": { "type": "boolean", "description": "SSH only. Launch the command as a BACKGROUND job and return a jobId immediately instead of waiting — for multi-minute work (backfills, migrations) that would blow the timeout. Poll it with faro_job. The command keeps running server-side even across bridge restarts." },
+                        "detach": { "type": "boolean", "description": "Launch the command as a BACKGROUND job and return a jobId immediately instead of waiting — for multi-minute work (backfills, migrations) that would blow the timeout. Poll it with faro_job. Works on SSH servers and paired Faro Agent machines. On SSH the job keeps running server-side even across bridge restarts; on a Faro Agent it runs until the job finishes or the daemon restarts. A Faro Agent must run faro-agentd from Plan 10 or newer." },
                         "session": session_prop
                     },
                     "required": ["command"],
@@ -4529,7 +4604,7 @@ async fn mcp_tools_list(state: &Arc<BridgeState>) -> Value {
             },
             {
                 "name": "faro_job",
-                "description": "Poll a background job started by faro_exec with detach=true (SSH only). Returns whether it's still running, its exit code once finished, and its captured stdout/stderr (each capped at 512 KiB). Call repeatedly until running is false.",
+                "description": "Poll a background job started by faro_exec with detach=true (on an SSH server or a paired Faro Agent). Returns whether it's still running, its exit code once finished, and its captured stdout/stderr (each capped at 512 KiB). Call repeatedly until running is false.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -5028,7 +5103,8 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             let Some(job_id) = arg_str(&args, "jobId") else {
                 return tool_error("`jobId` is required");
             };
-            let session_id = match resolve_session(app, state, session_arg, SessionNeed::SshOnly).await {
+            // SSH servers and Faro Agent machines both run detached jobs now.
+            let session_id = match resolve_session(app, state, session_arg, SessionNeed::Exec).await {
                 Ok(id) => id,
                 Err(msg) => return tool_error(&msg),
             };

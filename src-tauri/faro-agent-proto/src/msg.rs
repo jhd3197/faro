@@ -127,6 +127,27 @@ pub enum Request {
         timeout_ms: u64,
         max_bytes: u64,
     },
+    /// Launch `command` as a **detached background job** and return at once with
+    /// its `jobId` (poll with [`Request::ExecPoll`]). The daemon-target analogue
+    /// of the SSH `~/.faro/jobs` dir — retires the `nohup … & ; tail -f log` loop
+    /// for multi-minute work that would blow the exec timeout (Plan 10 Phase 4).
+    /// The caller (Agent Bridge) supplies the `job_id` so id generation lives in
+    /// one place. These three ops are **additive** — a pre-Plan-10 daemon doesn't
+    /// know them and will drop the request; the controller degrades to a clear
+    /// "update the daemon" message. Gated like [`Request::Exec`].
+    ExecStart {
+        job_id: String,
+        command: String,
+        max_bytes: u64,
+    },
+    /// Poll a detached job's captured (capped) stdout/stderr and status.
+    ExecPoll {
+        job_id: String,
+    },
+    /// Kill a running detached job (best-effort). Replies [`Response::Ok`].
+    ExecKill {
+        job_id: String,
+    },
 }
 
 /// The daemon's reply. `Error` carries a human-readable message for any request.
@@ -163,6 +184,22 @@ pub enum Response {
         exit_code: Option<i32>,
         truncated: bool,
         timed_out: bool,
+    },
+    /// A detached job was launched (reply to [`Request::ExecStart`]).
+    ExecStarted {
+        job_id: String,
+    },
+    /// A detached job's current state (reply to [`Request::ExecPoll`]): `running`
+    /// until it exits, then `exit_code`; `stdout`/`stderr` are the capped capture
+    /// so far. `not_found` means the id is unknown (never started, or pruned).
+    ExecStatus {
+        running: bool,
+        exit_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+        truncated: bool,
+        #[serde(default)]
+        not_found: bool,
     },
     /// The daemon refused or failed the request. `denied` distinguishes a policy
     /// refusal (the machine's owner disallowed this class of op) from an
