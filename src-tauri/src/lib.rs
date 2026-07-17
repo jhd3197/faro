@@ -11,6 +11,7 @@ pub mod agent;
 mod agent_host;
 pub mod db;
 mod deeplink;
+pub mod diff;
 mod diskscan;
 mod editor;
 mod foldersync;
