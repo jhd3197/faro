@@ -123,6 +123,46 @@ enum Cmd {
         all: bool,
     },
 
+    /// Search a directory tree by file name or by content (grep).
+    ///
+    /// The target is `profile:/path` (a saved profile) or a local path. Name
+    /// search matches each entry's name (a `*`/`?` makes it a glob, else a
+    /// substring); `--content` greps file contents (literal, or `--regex`).
+    /// On SSH / Faro Agent servers content search runs `rg`/`grep` server-side;
+    /// object stores name-match a flat key listing. Exits 0 when something
+    /// matched, 1 when nothing did.
+    Search {
+        /// Target: `profile:/path` or a local path.
+        target: String,
+        /// What to look for (a name glob/substring, or a content pattern).
+        pattern: String,
+        /// Grep file contents instead of matching names.
+        #[arg(long)]
+        content: bool,
+        /// Treat the content pattern as a regular expression (implies --content).
+        #[arg(long)]
+        regex: bool,
+        /// Case-sensitive matching (default: insensitive).
+        #[arg(long)]
+        case_sensitive: bool,
+        /// Only consider files whose name matches this glob (repeatable).
+        #[arg(long)]
+        include: Vec<String>,
+        /// Skip files whose name matches this glob (repeatable).
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// Allow content search to DOWNLOAD every file on backends with no
+        /// server-side grep (object stores, FTP, WebDAV, cloud). Off by default.
+        #[arg(long)]
+        content_remote: bool,
+        /// Cap on returned hits (default 1000).
+        #[arg(long)]
+        max: Option<usize>,
+        /// Emit the raw JSON result.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Manage saved profiles.
     Profiles {
         #[command(subcommand)]
@@ -334,6 +374,24 @@ async fn run(cli: Cli) -> Result<()> {
             dry_run,
         } => cmd_sync(&store, &local, &remote, direction, mirror, dry_run).await,
         Cmd::Diff { a, b, hash, json, all } => cmd_diff(&store, &a, &b, hash, json, all).await,
+        Cmd::Search {
+            target,
+            pattern,
+            content,
+            regex,
+            case_sensitive,
+            include,
+            exclude,
+            content_remote,
+            max,
+            json,
+        } => {
+            cmd_search(
+                &store, &target, &pattern, content, regex, case_sensitive, include, exclude,
+                content_remote, max, json,
+            )
+            .await
+        }
         Cmd::Profiles { action } => match action {
             ProfileCmd::List => cmd_profiles_list(&store).await,
             ProfileCmd::Show { name } => cmd_profiles_show(&store, &name).await,
@@ -914,6 +972,116 @@ fn print_diff_human(result: &faro_lib::diff::DiffResult, all: bool) {
             if result.hashed { " (hashed)" } else { "" }
         ))
     );
+}
+
+// ---- Fleet search ------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+async fn cmd_search(
+    store: &ProfileStore,
+    target: &str,
+    pattern: &str,
+    content: bool,
+    regex: bool,
+    case_sensitive: bool,
+    include: Vec<String>,
+    exclude: Vec<String>,
+    content_remote: bool,
+    max: Option<usize>,
+    json: bool,
+) -> Result<()> {
+    use faro_lib::search::{SearchKind, SearchQuery, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_RESULTS};
+
+    // Resolve the target to a RemoteFs + optional live session (local = None).
+    let (fs, session, root): (Box<dyn RemoteFs>, Option<Session>, String) = match parse_target(target) {
+        Target::Local(p) => (Box::new(faro_lib::remotefs::local::LocalFs), None, p),
+        Target::Remote { profile_name, path } => {
+            let profile = find_profile(store, &profile_name).await?;
+            let session = open_session(&profile).await?;
+            let fs = fs_for(&session);
+            (fs, Some(session), path)
+        }
+    };
+    let root = if root.trim().is_empty() { ".".to_string() } else { root };
+
+    // `--regex` implies content search (a regex over names is unusual; the plan
+    // scopes regex to content grep).
+    let content = content || regex;
+    let query = SearchQuery {
+        pattern: pattern.to_string(),
+        kind: if content { SearchKind::Content } else { SearchKind::Name },
+        regex,
+        case_sensitive,
+        include_globs: include,
+        exclude_globs: exclude,
+        content_remote,
+        max_results: max.unwrap_or(DEFAULT_MAX_RESULTS),
+        max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+    };
+
+    if !json {
+        eprintln!(
+            "{}",
+            dim(&format!(
+                "Searching {root} for {pattern:?}{}",
+                if content { " (content)" } else { "" }
+            ))
+        );
+    }
+
+    let result = faro_lib::search::search(fs.as_ref(), session.as_ref(), &root, &query).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        print_search_human(&result);
+    }
+
+    // grep convention: 0 when something matched, 1 when nothing did.
+    std::process::exit(if result.hits.is_empty() { 1 } else { 0 })
+}
+
+fn print_search_human(result: &faro_lib::search::SearchResult) {
+    use faro_lib::search::{SearchKind, SearchStrategy};
+
+    for h in &result.hits {
+        match result.kind {
+            SearchKind::Name => {
+                if h.is_dir {
+                    println!("\x1b[34m{}/\x1b[0m", h.relative);
+                } else {
+                    println!("{}  {}", h.relative, dim(&fmt_bytes(h.size)));
+                }
+            }
+            SearchKind::Content => {
+                let line = h.line.unwrap_or(0);
+                let preview = h.preview.as_deref().unwrap_or("");
+                println!(
+                    "\x1b[36m{}\x1b[0m:\x1b[33m{}\x1b[0m: {}",
+                    h.relative, line, preview
+                );
+            }
+        }
+    }
+
+    if result.hits.is_empty() {
+        eprintln!("No matches.");
+    }
+
+    let s = &result.stats;
+    let strat = match s.strategy {
+        SearchStrategy::Generic => "walk",
+        SearchStrategy::Shell => "exec",
+        SearchStrategy::ObjectFlat => "object",
+    };
+    let mut summary = format!("{} hits · {strat}", result.hits.len());
+    if s.truncated {
+        summary.push_str(" · capped (more matches exist)");
+    }
+    if let Some(note) = &s.note {
+        summary.push_str(&format!(" · {note}"));
+    }
+    eprintln!("\n{}", dim(&summary));
 }
 
 async fn cmd_profiles_list(store: &ProfileStore) -> Result<()> {
