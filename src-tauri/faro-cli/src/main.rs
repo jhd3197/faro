@@ -99,6 +99,30 @@ enum Cmd {
         dry_run: bool,
     },
 
+    /// Compare two directory trees and report what differs.
+    ///
+    /// Each side is `profile:/path` (a saved profile), `local:/path`, or a plain
+    /// local path — so **remote↔remote** works too (staging vs prod, two servers,
+    /// two buckets), which no local diff tool can do. By default files are
+    /// compared by size; `--hash` confirms same-size files by content (sha256).
+    /// Exits 0 when the trees are identical, 1 when they differ.
+    Diff {
+        /// Side A: `profile:/path`, `local:/path`, or a local path.
+        a: String,
+        /// Side B: `profile:/path`, `local:/path`, or a local path.
+        b: String,
+        /// Confirm same-size files by content hash (sha256). Opt-in — it reads
+        /// every same-size file (server-side over SSH where possible).
+        #[arg(long)]
+        hash: bool,
+        /// Emit the full result as JSON (every entry, including unchanged).
+        #[arg(long)]
+        json: bool,
+        /// Also list unchanged files in the human output (JSON always includes them).
+        #[arg(long)]
+        all: bool,
+    },
+
     /// Manage saved profiles.
     Profiles {
         #[command(subcommand)]
@@ -291,6 +315,7 @@ async fn run(cli: Cli) -> Result<()> {
             mirror,
             dry_run,
         } => cmd_sync(&store, &local, &remote, direction, mirror, dry_run).await,
+        Cmd::Diff { a, b, hash, json, all } => cmd_diff(&store, &a, &b, hash, json, all).await,
         Cmd::Profiles { action } => match action {
             ProfileCmd::List => cmd_profiles_list(&store).await,
             ProfileCmd::Show { name } => cmd_profiles_show(&store, &name).await,
@@ -713,6 +738,164 @@ async fn cmd_sync(
     }
     eprintln!("Sync complete.");
     Ok(())
+}
+
+// ---- Directory diff ----------------------------------------------------
+
+/// One side of a diff: a local path, or an opened remote session + path. The
+/// session is kept alive because `--hash` reads bytes through it after the walk.
+enum DiffSide {
+    Local(String),
+    Remote { session: Session, path: String },
+}
+
+/// Parse a diff side. Same rules as `parse_target`, plus an explicit `local:`
+/// prefix (the plan's documented syntax) that forces the local filesystem even
+/// where a same-named profile exists.
+fn parse_diff_target(raw: &str) -> Target {
+    if let Some((name, path)) = raw.split_once(':') {
+        if name.eq_ignore_ascii_case("local") {
+            return Target::Local(path.to_string());
+        }
+    }
+    parse_target(raw)
+}
+
+async fn resolve_diff_side(store: &ProfileStore, raw: &str) -> Result<DiffSide> {
+    match parse_diff_target(raw) {
+        Target::Local(p) => Ok(DiffSide::Local(p)),
+        Target::Remote { profile_name, path } => {
+            let profile = find_profile(store, &profile_name).await?;
+            let session = open_session(&profile).await?;
+            Ok(DiffSide::Remote { session, path })
+        }
+    }
+}
+
+async fn cmd_diff(
+    store: &ProfileStore,
+    a: &str,
+    b: &str,
+    hash: bool,
+    json: bool,
+    all: bool,
+) -> Result<()> {
+    let side_a = resolve_diff_side(store, a).await?;
+    let side_b = resolve_diff_side(store, b).await?;
+
+    let fs_a: Box<dyn RemoteFs> = match &side_a {
+        DiffSide::Local(_) => Box::new(faro_lib::remotefs::local::LocalFs),
+        DiffSide::Remote { session, .. } => fs_for(session),
+    };
+    let fs_b: Box<dyn RemoteFs> = match &side_b {
+        DiffSide::Local(_) => Box::new(faro_lib::remotefs::local::LocalFs),
+        DiffSide::Remote { session, .. } => fs_for(session),
+    };
+
+    let (root_a, sess_a) = match &side_a {
+        DiffSide::Local(p) => (p.as_str(), None),
+        DiffSide::Remote { session, path } => (path.as_str(), Some(session)),
+    };
+    let (root_b, sess_b) = match &side_b {
+        DiffSide::Local(p) => (p.as_str(), None),
+        DiffSide::Remote { session, path } => (path.as_str(), Some(session)),
+    };
+
+    if !json {
+        eprintln!(
+            "{}",
+            dim(&format!(
+                "Diffing {} ↔ {}{}",
+                root_a,
+                root_b,
+                if hash { " (hashing content)" } else { "" }
+            ))
+        );
+    }
+
+    let result = faro_lib::diff::diff(
+        fs_a.as_ref(),
+        root_a,
+        sess_a,
+        fs_b.as_ref(),
+        root_b,
+        sess_b,
+        hash,
+    )
+    .await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        print_diff_human(&result, all);
+    }
+
+    // Conventional diff exit code: 0 when identical, 1 when the trees differ.
+    let s = &result.summary;
+    let differ = s.only_in_a + s.only_in_b + s.different;
+    std::process::exit(if differ == 0 { 0 } else { 1 })
+}
+
+fn print_diff_human(result: &faro_lib::diff::DiffResult, all: bool) {
+    use faro_lib::diff::{DiffClass, DiffReason};
+
+    let mut shown = 0usize;
+    for e in &result.entries {
+        if e.class == DiffClass::Same && !all {
+            continue;
+        }
+        let (marker, detail) = match e.class {
+            DiffClass::OnlyInA => (
+                "\x1b[36mA only\x1b[0m",
+                e.a_size.map(fmt_bytes).unwrap_or_default(),
+            ),
+            DiffClass::OnlyInB => (
+                "\x1b[35mB only\x1b[0m",
+                e.b_size.map(fmt_bytes).unwrap_or_default(),
+            ),
+            DiffClass::Different => {
+                let why = match e.reason {
+                    Some(DiffReason::Size) => format!(
+                        "size {} → {}",
+                        e.a_size.map(fmt_bytes).unwrap_or_default(),
+                        e.b_size.map(fmt_bytes).unwrap_or_default()
+                    ),
+                    Some(DiffReason::Content) => "content".to_string(),
+                    None => String::new(),
+                };
+                ("\x1b[33mdiffer\x1b[0m", why)
+            }
+            DiffClass::Same => ("\x1b[2msame\x1b[0m  ", String::new()),
+        };
+        let hash_note = if e.hash_error.is_some() {
+            dim("  [hash unavailable]")
+        } else {
+            String::new()
+        };
+        if detail.is_empty() {
+            println!("{marker}  {}{hash_note}", e.relative);
+        } else {
+            println!("{marker}  {}  {}{hash_note}", e.relative, dim(&detail));
+        }
+        shown += 1;
+    }
+
+    if shown == 0 {
+        eprintln!("Trees are identical.");
+    }
+
+    let s = &result.summary;
+    eprintln!(
+        "\n{}",
+        dim(&format!(
+            "{} only in A · {} only in B · {} differ · {} same{}",
+            s.only_in_a,
+            s.only_in_b,
+            s.different,
+            s.same,
+            if result.hashed { " (hashed)" } else { "" }
+        ))
+    );
 }
 
 async fn cmd_profiles_list(store: &ProfileStore) -> Result<()> {
