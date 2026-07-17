@@ -21,6 +21,7 @@ pub mod oauth;
 pub mod profiles;
 pub mod remotefs;
 pub mod scan;
+pub mod search;
 pub mod session;
 pub mod sync;
 mod terminal;
