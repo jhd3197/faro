@@ -1048,6 +1048,8 @@ async fn route(app: &AppHandle, state: &Arc<BridgeState>, req: &Request) -> (u16
         ("GET", "/sessions") => handle_sessions(app, state).await,
         ("POST", "/exec") => handle_exec(app, state, &req.body).await,
         ("POST", "/exec_script") => handle_exec_script(app, state, &req.body).await,
+        ("POST", "/job") => handle_job(app, state, &req.body).await,
+        ("POST", "/jobs") => handle_jobs(app, state, &req.body).await,
         ("POST", "/write") => handle_write(app, state, &req.body).await,
         ("POST", "/list") => handle_list(app, state, &req.body).await,
         ("POST", "/read") => handle_read(app, state, &req.body).await,
@@ -1110,7 +1112,36 @@ async fn handle_exec(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> 
     }
     let dry_run = parsed.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
     let timeout_ms = parsed.get("timeoutMs").and_then(|v| v.as_u64());
+    // A detached exec returns a job id at once instead of blocking (Plan 10 Phase 4).
+    if parsed.get("detach").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return op_exec_detached(app, state, &session_id, &command, dry_run).await;
+    }
     exec_on(app, state, &session_id, &command, dry_run, timeout_ms).await
+}
+
+async fn handle_job(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    let job_id = body_str(&parsed, "jobId");
+    if session_id.is_empty() || job_id.is_empty() {
+        return (400, json!({"error": "sessionId and jobId are required"}));
+    }
+    op_job(app, state, &session_id, &job_id).await
+}
+
+async fn handle_jobs(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    if session_id.is_empty() {
+        return (400, json!({"error": "sessionId is required"}));
+    }
+    op_jobs(app, state, &session_id).await
 }
 
 /// `/exec_script` — run a whole local script (Plan 10 Phase 1). The body carries
@@ -1794,6 +1825,227 @@ async fn exec_core_agent(
                 .await;
             (500, json!({"error": e.to_string()}))
         }
+    }
+}
+
+// ---- Detached / background jobs (Plan 10 Phase 4, SSH arm) ----
+//
+// A `--detach` exec returns a job id immediately and keeps running server-side,
+// retiring the manual `nohup … & ; tail -f log` loop. SSH-only for now (pure
+// convention, no protocol change): the command runs detached (`setsid`/`nohup`)
+// into a per-job dir `~/.faro/jobs/<id>/{cmd,out,err,exit,pid}`, and `job`/`jobs`
+// read those files. The agent-target arm (ExecStart/Poll/Kill in the protocol)
+// is the documented next step.
+
+/// Root of the per-job spill on the server. `$HOME` is expanded remotely.
+const JOB_DIR: &str = "$HOME/.faro/jobs";
+
+/// Shell to launch `cmd_b64` (base64 of the command) detached into a fresh job
+/// dir. Base64 keeps the command opaque so no quoting can break the wrapper. The
+/// launcher prunes job dirs older than 7 days first (best-effort), then returns
+/// at once — the real work runs in a new session/`nohup` and records its own exit
+/// code. Prints the job id on stdout.
+fn job_launch_script(job_id: &str, cmd_b64: &str) -> String {
+    format!(
+        r#"d="{JOB_DIR}/{job_id}"; mkdir -p "$d" || exit 1
+find "{JOB_DIR}" -maxdepth 1 -mindepth 1 -type d -mtime +7 -exec rm -rf {{}} + 2>/dev/null
+printf %s '{cmd_b64}' | base64 -d > "$d/cmd" || exit 1
+run='sh "$1/cmd" >"$1/out" 2>"$1/err"; printf %s "$?" > "$1/exit"'
+if command -v setsid >/dev/null 2>&1; then
+  setsid sh -c "$run" _ "$d" </dev/null >/dev/null 2>&1 &
+else
+  nohup sh -c "$run" _ "$d" </dev/null >/dev/null 2>&1 &
+fi
+printf %s "$!" > "$d/pid" 2>/dev/null
+echo "{job_id}""#
+    )
+}
+
+/// Shell to poll a job: prints `exit=<code>` (empty while running) and the
+/// base64 of the (capped) out/err streams, so no marker can collide with content.
+fn job_poll_script(job_id: &str) -> String {
+    format!(
+        r#"d="{JOB_DIR}/{job_id}"
+if [ ! -d "$d" ]; then echo "nojob=1"; exit 0; fi
+printf 'exit='; cat "$d/exit" 2>/dev/null; printf '\n'
+printf 'out='; head -c 524288 "$d/out" 2>/dev/null | base64 | tr -d '\n'; printf '\n'
+printf 'err='; head -c 524288 "$d/err" 2>/dev/null | base64 | tr -d '\n'; printf '\n'"#
+    )
+}
+
+/// Shell to list all jobs: one `id<TAB>status<TAB>exitCode` line each.
+fn job_list_script() -> String {
+    format!(
+        r#"jd="{JOB_DIR}"; [ -d "$jd" ] || exit 0
+for d in "$jd"/*/; do
+  [ -d "$d" ] || continue
+  id=$(basename "$d")
+  if [ -f "$d/exit" ]; then printf '%s\t%s\t%s\n' "$id" done "$(cat "$d/exit" 2>/dev/null)"; else printf '%s\t%s\t\n' "$id" running; fi
+done"#
+    )
+}
+
+/// Launch a detached job on an SSH server; returns its job id at once. Gated as
+/// an Exec (the command runs), never auto-approved except by allow-all.
+async fn op_exec_detached(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    command: &str,
+    dry_run: bool,
+) -> (u16, Value) {
+    use base64::Engine as _;
+    let manager = app.state::<AppState>().sessions.clone();
+    if manager.get_agent(session_id).await.is_some() {
+        return (
+            400,
+            json!({"error": "detached jobs aren't supported on Faro Agent targets yet — run without --detach, or use an SSH server."}),
+        );
+    }
+    let Some(ssh) = manager.get_ssh(session_id).await else {
+        return (400, json!({"error": "detached exec needs an SSH/SFTP connection."}));
+    };
+    let session_name = ssh.profile.name.clone();
+    if !state.is_enabled(session_id).await {
+        return (403, json!({
+            "error": format!("connection '{session_name}' has not granted agent access. Ask the user to open Faro → Agent Bridge and toggle 'Allow agent access' for it.")
+        }));
+    }
+    if dry_run {
+        let policy = *state.policy.lock().await;
+        return (200, json!({
+            "wouldRun": command,
+            "detach": true,
+            "needsApproval": !policy.allow_all,
+        }));
+    }
+    if let Err(resp) = gate(
+        app,
+        state,
+        session_id,
+        &session_name,
+        OpClass::Exec,
+        "exec",
+        &format!("run detached (background job): {command}"),
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+    let job_id = Uuid::new_v4().to_string();
+    let script = job_launch_script(&job_id, &base64::engine::general_purpose::STANDARD.encode(command));
+    match ssh.exec_bounded(&script, 64 * 1024, Duration::from_secs(20), None).await {
+        Ok(out) if out.exit_code == Some(0) => {
+            state
+                .log(app, activity("exec", session_id, format!("detached job {job_id}: {command}"), true))
+                .await;
+            (200, json!({ "jobId": job_id, "status": "started" }))
+        }
+        Ok(out) => (
+            500,
+            json!({"error": format!("failed to launch background job: {}", out.stderr.trim())}),
+        ),
+        Err(e) => (500, json!({"error": e.to_string()})),
+    }
+}
+
+/// Parse the `job_poll_script` output into a status object.
+fn parse_job_poll(text: &str) -> Value {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mut nojob = false;
+    let mut exit: Option<i64> = None;
+    let mut running = true;
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("nojob=") {
+            nojob = v.trim() == "1";
+        } else if let Some(v) = line.strip_prefix("exit=") {
+            let v = v.trim();
+            if !v.is_empty() {
+                running = false;
+                exit = v.parse().ok();
+            }
+        } else if let Some(v) = line.strip_prefix("out=") {
+            stdout = b64.decode(v.trim()).ok().map(|b| String::from_utf8_lossy(&b).to_string()).unwrap_or_default();
+        } else if let Some(v) = line.strip_prefix("err=") {
+            stderr = b64.decode(v.trim()).ok().map(|b| String::from_utf8_lossy(&b).to_string()).unwrap_or_default();
+        }
+    }
+    if nojob {
+        return json!({"error": "no such job on that server (it may have been pruned)"});
+    }
+    json!({ "running": running, "exitCode": exit, "stdout": stdout, "stderr": stderr })
+}
+
+/// Poll a detached job's progress/output (SSH only). Read-only.
+async fn op_job(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    job_id: &str,
+) -> (u16, Value) {
+    let manager = app.state::<AppState>().sessions.clone();
+    let Some(ssh) = manager.get_ssh(session_id).await else {
+        return (400, json!({"error": "jobs are SSH-only for now."}));
+    };
+    let name = ssh.profile.name.clone();
+    if let Err(resp) = gate(app, state, session_id, &name, OpClass::Read, "job", &format!("read job {job_id}"), None).await {
+        return resp;
+    }
+    // A job id is a UUID we generated; reject anything else so it can't be used
+    // to smuggle shell into the path.
+    if !job_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return (400, json!({"error": "invalid job id"}));
+    }
+    match ssh.exec_bounded(&job_poll_script(job_id), 1024 * 1024, Duration::from_secs(15), None).await {
+        Ok(out) => {
+            let mut body = parse_job_poll(&out.stdout);
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("jobId".into(), json!(job_id));
+            }
+            let status = if body.get("error").is_some() { 404 } else { 200 };
+            (status, body)
+        }
+        Err(e) => (500, json!({"error": e.to_string()})),
+    }
+}
+
+/// List detached jobs on a server (SSH only). Read-only.
+async fn op_jobs(app: &AppHandle, state: &Arc<BridgeState>, session_id: &str) -> (u16, Value) {
+    let manager = app.state::<AppState>().sessions.clone();
+    let Some(ssh) = manager.get_ssh(session_id).await else {
+        return (400, json!({"error": "jobs are SSH-only for now."}));
+    };
+    let name = ssh.profile.name.clone();
+    if let Err(resp) = gate(app, state, session_id, &name, OpClass::Read, "jobs", "list background jobs", None).await {
+        return resp;
+    }
+    match ssh.exec_bounded(&job_list_script(), 256 * 1024, Duration::from_secs(15), None).await {
+        Ok(out) => {
+            let jobs: Vec<Value> = out
+                .stdout
+                .lines()
+                .filter_map(|line| {
+                    let mut it = line.split('\t');
+                    let id = it.next()?.trim();
+                    if id.is_empty() {
+                        return None;
+                    }
+                    let status = it.next().unwrap_or("").trim();
+                    let code = it.next().unwrap_or("").trim();
+                    Some(json!({
+                        "jobId": id,
+                        "running": status == "running",
+                        "exitCode": code.parse::<i64>().ok(),
+                    }))
+                })
+                .collect();
+            (200, json!({ "jobs": jobs }))
+        }
+        Err(e) => (500, json!({"error": e.to_string()})),
     }
 }
 
@@ -4268,9 +4520,23 @@ async fn mcp_tools_list(state: &Arc<BridgeState>) -> Value {
                         "command": { "type": "string", "description": "The command to run. Keep it non-interactive (no pagers/prompts). Prefer read-only status and diagnostic commands. `sudo` is supported: when the user has enabled it, Faro answers sudo's password prompt with their connection password — so just write `sudo <cmd>` normally; do NOT add `-S`, a password, or `echo <pw> |`." },
                         "dryRun": { "type": "boolean", "description": "If true, return a preview of what would run and whether it would need approval, without executing." },
                         "timeoutMs": { "type": "integer", "description": "Optional timeout in milliseconds for commands that legitimately run long (builds, backups). Default 60000; clamped to [1000, 900000]. The 512 KiB output cap is unchanged." },
+                        "detach": { "type": "boolean", "description": "SSH only. Launch the command as a BACKGROUND job and return a jobId immediately instead of waiting — for multi-minute work (backfills, migrations) that would blow the timeout. Poll it with faro_job. The command keeps running server-side even across bridge restarts." },
                         "session": session_prop
                     },
                     "required": ["command"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "faro_job",
+                "description": "Poll a background job started by faro_exec with detach=true (SSH only). Returns whether it's still running, its exit code once finished, and its captured stdout/stderr (each capped at 512 KiB). Call repeatedly until running is false.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "jobId": { "type": "string", "description": "The jobId returned by a detached faro_exec." },
+                        "session": session_prop
+                    },
+                    "required": ["jobId"],
                     "additionalProperties": false
                 }
             },
@@ -4737,15 +5003,19 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             };
             let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
             let timeout_ms = args.get("timeoutMs").and_then(|v| v.as_u64());
+            let detach = args.get("detach").and_then(|v| v.as_bool()).unwrap_or(false);
             // Exec works on SSH servers and paired Faro Agent machines alike.
             let session_id = match resolve_session(app, state, session_arg, SessionNeed::Exec).await {
                 Ok(id) => id,
                 Err(msg) => return tool_error(&msg),
             };
-            let (status, body) =
-                exec_on(app, state, &session_id, &command, dry_run, timeout_ms).await;
+            let (status, body) = if detach {
+                op_exec_detached(app, state, &session_id, &command, dry_run).await
+            } else {
+                exec_on(app, state, &session_id, &command, dry_run, timeout_ms).await
+            };
             if status == 200 {
-                if dry_run {
+                if dry_run || detach {
                     tool_text(serde_json::to_string_pretty(&body).unwrap_or_default())
                 } else {
                     tool_text(format_exec_result(&body))
@@ -4753,6 +5023,16 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             } else {
                 tool_error(body.get("error").and_then(|v| v.as_str()).unwrap_or("error"))
             }
+        }
+        "faro_job" => {
+            let Some(job_id) = arg_str(&args, "jobId") else {
+                return tool_error("`jobId` is required");
+            };
+            let session_id = match resolve_session(app, state, session_arg, SessionNeed::SshOnly).await {
+                Ok(id) => id,
+                Err(msg) => return tool_error(&msg),
+            };
+            mcp_wrap(op_job(app, state, &session_id, &job_id).await)
         }
         "faro_exec_script" => {
             let Some(script) = arg_str(&args, "script") else {

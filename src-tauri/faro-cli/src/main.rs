@@ -286,6 +286,10 @@ enum AgentCmd {
         /// Read the program to run from stdin, verbatim.
         #[arg(long)]
         stdin: bool,
+        /// SSH only. Launch as a background job and return a job id immediately
+        /// (poll with `agent job`). For multi-minute work that would time out.
+        #[arg(long)]
+        detach: bool,
         /// The command to run. Quote it, or pass it as trailing arguments. Omit
         /// when using --file / --stdin.
         #[arg(trailing_var_arg = true)]
@@ -307,6 +311,18 @@ enum AgentCmd {
         /// Timeout in milliseconds (default 60000; clamped to 1000–900000).
         #[arg(long)]
         timeout_ms: Option<u64>,
+    },
+    /// Poll a background job started with `agent exec --detach` (SSH only).
+    Job {
+        /// Saved server name (as shown in Faro) or its session id.
+        server: String,
+        /// The job id returned by `agent exec --detach`.
+        job_id: String,
+    },
+    /// List background jobs on a server (SSH only).
+    Jobs {
+        /// Saved server name (as shown in Faro) or its session id.
+        server: String,
     },
     /// List a remote directory.
     Ls {
@@ -1847,7 +1863,7 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             }
             Ok(())
         }
-        AgentCmd::Exec { server, dry_run, timeout_ms, file, stdin, command } => {
+        AgentCmd::Exec { server, dry_run, timeout_ms, file, stdin, detach, command } => {
             let id = resolve_server(&ep, &server)?;
             // --file / --stdin ship a script verbatim; otherwise run the joined
             // command line. Exactly one source must be given.
@@ -1855,19 +1871,69 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
                 if !command.is_empty() {
                     bail!("pass a command OR --file/--stdin, not both");
                 }
+                if detach {
+                    bail!("--detach can't be combined with --file/--stdin yet");
+                }
                 let (bytes, label) = read_script_source(file.as_deref(), stdin)?;
                 return run_agent_script(&ep, &id, &bytes, &label, dry_run, timeout_ms);
             }
             if command.is_empty() {
                 bail!("nothing to run — give a command, or use --file <path> / --stdin");
             }
-            let mut req =
-                serde_json::json!({ "sessionId": id, "command": command.join(" "), "dryRun": dry_run });
+            let mut req = serde_json::json!({
+                "sessionId": id,
+                "command": command.join(" "),
+                "dryRun": dry_run,
+                "detach": detach,
+            });
             if let Some(t) = timeout_ms {
                 req["timeoutMs"] = serde_json::json!(t);
             }
             let body = http_post(&ep, "/exec", req)?;
+            if detach && !dry_run {
+                let job = body.get("jobId").and_then(|v| v.as_str()).unwrap_or("?");
+                println!("started background job: {job}");
+                println!("poll with: faro-cli agent job {server} {job}");
+                return Ok(());
+            }
+            if dry_run {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                return Ok(());
+            }
             print_exec_output_and_exit(&body)
+        }
+        AgentCmd::Job { server, job_id } => {
+            let id = resolve_server(&ep, &server)?;
+            let body = http_post(&ep, "/job", serde_json::json!({ "sessionId": id, "jobId": job_id }))?;
+            print_job(&body);
+            let running = body.get("running").and_then(|v| v.as_bool()).unwrap_or(false);
+            // Mirror the job's exit code once it's finished, like a foreground exec.
+            if !running {
+                if let Some(code) = body.get("exitCode").and_then(|v| v.as_i64()) {
+                    std::process::exit(code as i32);
+                }
+            }
+            Ok(())
+        }
+        AgentCmd::Jobs { server } => {
+            let id = resolve_server(&ep, &server)?;
+            let body = http_post(&ep, "/jobs", serde_json::json!({ "sessionId": id }))?;
+            let jobs = body.get("jobs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            if jobs.is_empty() {
+                eprintln!("No background jobs on {server}.");
+            }
+            for j in &jobs {
+                let jid = j.get("jobId").and_then(|v| v.as_str()).unwrap_or("?");
+                let running = j.get("running").and_then(|v| v.as_bool()).unwrap_or(false);
+                let code = j.get("exitCode").and_then(|v| v.as_i64());
+                let state = if running {
+                    "running".to_string()
+                } else {
+                    format!("done (exit {})", code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()))
+                };
+                println!("{jid}  {state}");
+            }
+            Ok(())
         }
         AgentCmd::Script { server, file, dry_run, timeout_ms } => {
             let id = resolve_server(&ep, &server)?;
@@ -2518,6 +2584,37 @@ fn print_agent_diff(body: &serde_json::Value) {
     }
     if body.get("listTruncated").and_then(|v| v.as_bool()).unwrap_or(false) {
         eprintln!("{}", warn("entry list truncated — use --json for the full result"));
+    }
+}
+
+/// Render a `/job` poll: stream out/err, then a status line.
+fn print_job(body: &serde_json::Value) {
+    if let Some(err) = body.get("error").and_then(|v| v.as_str()) {
+        eprintln!("{}", warn(err));
+        return;
+    }
+    if let Some(out) = body.get("stdout").and_then(|v| v.as_str()) {
+        let mut so = io::stdout();
+        so.write_all(out.as_bytes()).ok();
+        so.flush().ok();
+    }
+    if let Some(e) = body.get("stderr").and_then(|v| v.as_str()) {
+        if !e.is_empty() {
+            let mut se = io::stderr();
+            se.write_all(e.as_bytes()).ok();
+            se.flush().ok();
+        }
+    }
+    let running = body.get("running").and_then(|v| v.as_bool()).unwrap_or(false);
+    if running {
+        eprintln!("\n{}", dim("job still running — poll again"));
+    } else {
+        let code = body
+            .get("exitCode")
+            .and_then(|v| v.as_i64())
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "?".into());
+        eprintln!("\n{}", dim(&format!("job finished (exit {code})")));
     }
 }
 

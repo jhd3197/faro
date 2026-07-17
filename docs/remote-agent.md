@@ -107,6 +107,19 @@ AI agent reaches it through the same bridge tools it uses for SSH servers
   `sh` elsewhere). Takes an optional `timeoutMs` (default 60 000 ms, clamped to
   1 s – 15 min; `faro-cli agent exec --timeout-ms …`); output is capped at
   512 KiB.
+- **Background jobs (`--detach`, SSH-only)** — for work that runs longer than a
+  timeout is comfortable (backfills, migrations), `faro_exec` with `detach=true`
+  (`faro-cli agent exec <server> --detach "<cmd>"`) launches the command
+  server-side and returns a `jobId` **immediately** instead of blocking. The
+  command keeps running under `setsid`/`nohup` in a per-job dir
+  (`~/.faro/jobs/<id>/{cmd,out,err,exit,pid}`), surviving even a bridge restart.
+  Poll it with **`faro_job`** (`faro-cli agent job <server> <id>`), which streams
+  the captured stdout/stderr (each capped at 512 KiB) and reports the exit code
+  once finished; `faro-cli agent jobs <server>` lists running/finished jobs. Job
+  dirs older than 7 days are pruned on the next launch. This retires the manual
+  `nohup … & ; tail -f log` loop. Gated as an Exec (never auto-approved except by
+  allow-all); polling is a Read. Detached exec on a **paired Faro Agent** target
+  is not supported yet — run without `--detach`, or use an SSH server.
 - **`faro_exec_script`** — runs a whole **multi-line script verbatim**
   (`/exec_script`, `faro-cli agent script <server> <file>` or `agent exec
   --file/--stdin`). The script bytes are read locally and shipped as an opaque
