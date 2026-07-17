@@ -558,6 +558,24 @@ struct Build {
     children: HashMap<String, Build>,
 }
 
+/// The scan root as a uniformly forward-slashed path. Child segments are already
+/// POSIX-normalised (`scan::relative_of` replaces `\`), so normalising the root
+/// prefix here makes *every* DuNode path below it fully `/`-separated instead of
+/// the mixed `C:\Users\x/GitHub` the raw local path would produce. A trailing
+/// separator is trimmed except on a bare root — POSIX `/` or a Windows drive root
+/// `C:/` — which must keep it (a bare `C:` is the drive's CWD, not its root).
+fn normalize_root(root: &str) -> String {
+    let trimmed = root.replace('\\', "/");
+    let trimmed = trimmed.trim_end_matches('/');
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else if trimmed.ends_with(':') {
+        format!("{trimmed}/")
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Fold the flat file list into a nested, size-aggregated tree.
 fn build_tree(root: &str, tree: &scan::ScanTree) -> DuNode {
     let mut builder = Build { is_dir: true, ..Default::default() };
@@ -569,9 +587,7 @@ fn build_tree(root: &str, tree: &scan::ScanTree) -> DuNode {
         builder.size += entry.size;
         insert_path(&mut builder, &segments, entry.size);
     }
-    let root_path = root.trim_end_matches('/');
-    let root_path = if root_path.is_empty() { "/" } else { root_path };
-    convert(basename(root), root_path.to_string(), FileKind::Directory, builder)
+    convert(basename(root), normalize_root(root), FileKind::Directory, builder)
 }
 
 fn insert_path(node: &mut Build, segments: &[&str], size: u64) {
@@ -591,8 +607,10 @@ fn convert(name: String, path: String, kind: FileKind, build: Build) -> DuNode {
         .children
         .into_iter()
         .map(|(seg, child)| {
-            let child_path = if path == "/" {
-                format!("/{seg}")
+            // Roots already end in their separator (POSIX `/`, drive root `C:/`);
+            // everything else needs one inserted before the segment.
+            let child_path = if path.ends_with('/') {
+                format!("{path}{seg}")
             } else {
                 format!("{path}/{seg}")
             };
@@ -728,6 +746,32 @@ mod tests {
         assert_eq!(root.path, "/");
         assert_eq!(root.children[0].path, "/etc");
         assert_eq!(root.children[0].children[0].path, "/etc/hosts");
+    }
+
+    #[test]
+    fn normalizes_windows_root_prefix_to_forward_slashes() {
+        let mut tree = ScanTree::default();
+        // `scan::relative_of` already hands us `/`-separated relatives; only the
+        // root prefix (as the local Windows backend reports it) has backslashes.
+        tree.files.insert("GitHub/Faro/x.txt".into(), entry(3));
+        let root = build_tree("C:\\Users\\Juan\\Documents", &tree);
+        assert_eq!(root.path, "C:/Users/Juan/Documents");
+        assert_eq!(root.children[0].path, "C:/Users/Juan/Documents/GitHub");
+        assert_eq!(
+            root.children[0].children[0].children[0].path,
+            "C:/Users/Juan/Documents/GitHub/Faro/x.txt"
+        );
+    }
+
+    #[test]
+    fn windows_drive_root_stays_listable() {
+        let mut tree = ScanTree::default();
+        tree.files.insert("Windows/notepad.exe".into(), entry(1));
+        // A bare `C:` is the drive's working dir, not its root — keep the slash.
+        let root = build_tree("C:\\", &tree);
+        assert_eq!(root.path, "C:/");
+        assert_eq!(root.children[0].path, "C:/Windows");
+        assert_eq!(root.children[0].children[0].path, "C:/Windows/notepad.exe");
     }
 
     #[test]
