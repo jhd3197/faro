@@ -201,16 +201,17 @@ pub struct SearchResult {
 
 /// A cap-and-stream target for hits. Strategies push into it; it enforces
 /// `max_results` and remembers whether it truncated. The callback lets the GUI
-/// stream hits live while the CLI/bridge just collect them into a `Vec`.
+/// stream hits live while the CLI/bridge just collect them into a `Vec`. The
+/// callback is `Send` so a search can run inside a spawned task (the bridge).
 pub struct HitSink<'a> {
-    on_hit: &'a mut dyn FnMut(SearchHit),
+    on_hit: &'a mut (dyn FnMut(SearchHit) + Send),
     count: usize,
     max: usize,
     truncated: bool,
 }
 
 impl<'a> HitSink<'a> {
-    pub fn new(max: usize, on_hit: &'a mut dyn FnMut(SearchHit)) -> Self {
+    pub fn new(max: usize, on_hit: &'a mut (dyn FnMut(SearchHit) + Send)) -> Self {
         Self { on_hit, count: 0, max: max.max(1), truncated: false }
     }
 
@@ -1105,6 +1106,349 @@ async fn read_ftp(ftp: &FtpSession, path: &str, max: u64) -> Result<Vec<u8>> {
         Ok(sink.buf)
     })
     .await
+}
+
+// ---------- GUI search runner (Plan 7 Phase 3) ----------
+//
+// The GUI search panel drives its own cancellable run — streaming hits in
+// batches + live progress, stop mid-search — and reuses the pure engine above.
+// Shaped exactly like `diff::DiffManager` / `diskscan::ScanManager`: an
+// `Arc<SearchManager>` in `AppState`, one run per `Mutex<HashMap<id, …>>`,
+// progress over `search://…` events, cancel via a shared [`CancelToken`], hits
+// streamed as `search://hit` batches, the full list fetched once on completion.
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use tauri::{AppHandle, Emitter, State};
+use tokio::sync::Mutex;
+use uuid::Uuid;
+
+use crate::AppState;
+
+/// Hits per streamed `search://hit` batch (also flushed on a ~120 ms timer).
+const HIT_BATCH: usize = 50;
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SearchRunState {
+    Searching,
+    Done,
+    Error,
+    Canceled,
+}
+
+/// A snapshot of a search for the frontend: live counts while `Searching`, the
+/// full hit list once `Done` (fetched via `search_result`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchSnapshot {
+    pub id: String,
+    pub session_id: String,
+    pub root: String,
+    pub kind: SearchKind,
+    pub state: SearchRunState,
+    pub strategy: SearchStrategy,
+    pub files_scanned: usize,
+    pub hit_count: usize,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hits: Option<Vec<SearchHit>>,
+    pub started_at: i64,
+}
+
+/// The lightweight body streamed over `search://progress`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchProgressEvent {
+    id: String,
+    strategy: SearchStrategy,
+    files_scanned: usize,
+    hit_count: usize,
+}
+
+/// A batch of newly-found hits streamed over `search://hit`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchHitEvent {
+    id: String,
+    hits: Vec<SearchHit>,
+}
+
+enum SearchOutcome {
+    Running,
+    Done,
+    Error(String),
+    Canceled,
+}
+
+struct SearchRun {
+    id: String,
+    session_id: String,
+    root: String,
+    kind: SearchKind,
+    strategy: StdMutex<SearchStrategy>,
+    note: StdMutex<Option<String>>,
+    files_scanned: AtomicUsize,
+    hit_count: AtomicUsize,
+    truncated: AtomicBool,
+    cancel: CancelToken,
+    started_at: i64,
+    outcome: StdMutex<SearchOutcome>,
+    /// The full accumulated hit list, cloned into a snapshot on completion.
+    hits: StdMutex<Vec<SearchHit>>,
+}
+
+impl SearchRun {
+    fn snapshot(&self, with_hits: bool) -> SearchSnapshot {
+        let (state, error) = match &*self.outcome.lock().unwrap() {
+            SearchOutcome::Running => (SearchRunState::Searching, None),
+            SearchOutcome::Done => (SearchRunState::Done, None),
+            SearchOutcome::Error(e) => (SearchRunState::Error, Some(e.clone())),
+            SearchOutcome::Canceled => (SearchRunState::Canceled, None),
+        };
+        let hits = (with_hits && state == SearchRunState::Done).then(|| self.hits.lock().unwrap().clone());
+        SearchSnapshot {
+            id: self.id.clone(),
+            session_id: self.session_id.clone(),
+            root: self.root.clone(),
+            kind: self.kind,
+            state,
+            strategy: *self.strategy.lock().unwrap(),
+            files_scanned: self.files_scanned.load(Ordering::Relaxed),
+            hit_count: self.hit_count.load(Ordering::Relaxed),
+            truncated: self.truncated.load(Ordering::Relaxed),
+            note: self.note.lock().unwrap().clone(),
+            error,
+            hits,
+            started_at: self.started_at,
+        }
+    }
+}
+
+struct SearchHandle {
+    info: Arc<SearchRun>,
+    task: tauri::async_runtime::JoinHandle<()>,
+}
+
+pub struct SearchManager {
+    runs: Mutex<HashMap<String, SearchHandle>>,
+}
+
+impl Default for SearchManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn now_ts() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
+
+impl SearchManager {
+    pub fn new() -> Self {
+        Self { runs: Mutex::new(HashMap::new()) }
+    }
+
+    /// Kick off a search of `root` on `fs`. `session` (absent for the local FS)
+    /// unlocks the exec fast paths. Returns the run id immediately; the work
+    /// streams `search://progress` + `search://hit` and settles on one of
+    /// `search://done` / `search://error` / `search://canceled`.
+    pub async fn start(
+        self: &Arc<Self>,
+        session_id: String,
+        root: String,
+        query: SearchQuery,
+        fs: Box<dyn RemoteFs>,
+        session: Option<Arc<Session>>,
+        app: AppHandle,
+    ) -> String {
+        let id = Uuid::new_v4().to_string();
+        let info = Arc::new(SearchRun {
+            id: id.clone(),
+            session_id,
+            root,
+            kind: query.kind,
+            strategy: StdMutex::new(SearchStrategy::Generic),
+            note: StdMutex::new(None),
+            files_scanned: AtomicUsize::new(0),
+            hit_count: AtomicUsize::new(0),
+            truncated: AtomicBool::new(false),
+            cancel: CancelToken::new(),
+            started_at: now_ts(),
+            outcome: StdMutex::new(SearchOutcome::Running),
+            hits: StdMutex::new(Vec::new()),
+        });
+
+        let task_info = Arc::clone(&info);
+        let task = tauri::async_runtime::spawn(async move {
+            run_search_task(task_info, query, fs, session, app).await;
+        });
+
+        self.runs.lock().await.insert(id.clone(), SearchHandle { info, task });
+        id
+    }
+
+    pub async fn snapshot(&self, id: &str, with_hits: bool) -> Option<SearchSnapshot> {
+        self.runs.lock().await.get(id).map(|h| h.info.snapshot(with_hits))
+    }
+
+    pub async fn cancel(&self, id: &str) {
+        if let Some(h) = self.runs.lock().await.get(id) {
+            h.info.cancel.cancel();
+        }
+    }
+
+    /// Drop a finished (or abandoned) run — the panel was closed.
+    pub async fn forget(&self, id: &str) {
+        if let Some(h) = self.runs.lock().await.remove(id) {
+            h.info.cancel.cancel();
+            h.task.abort();
+        }
+    }
+}
+
+fn emit_search_progress(info: &SearchRun, app: &AppHandle) {
+    let _ = app.emit(
+        "search://progress",
+        SearchProgressEvent {
+            id: info.id.clone(),
+            strategy: *info.strategy.lock().unwrap(),
+            files_scanned: info.files_scanned.load(Ordering::Relaxed),
+            hit_count: info.hit_count.load(Ordering::Relaxed),
+        },
+    );
+}
+
+async fn run_search_task(
+    info: Arc<SearchRun>,
+    query: SearchQuery,
+    fs: Box<dyn RemoteFs>,
+    session: Option<Arc<Session>>,
+    app: AppHandle,
+) {
+    // Stream hits in throttled batches while accumulating the full list on `info`.
+    let pending: Arc<StdMutex<Vec<SearchHit>>> = Arc::new(StdMutex::new(Vec::new()));
+    let last_emit = Arc::new(StdMutex::new(Instant::now()));
+
+    let result = {
+        let mut on_hit = {
+            let info = Arc::clone(&info);
+            let pending = Arc::clone(&pending);
+            let last = Arc::clone(&last_emit);
+            let app = app.clone();
+            let id = info.id.clone();
+            move |h: SearchHit| {
+                info.hits.lock().unwrap().push(h.clone());
+                info.hit_count.fetch_add(1, Ordering::Relaxed);
+                let mut p = pending.lock().unwrap();
+                p.push(h);
+                let due = p.len() >= HIT_BATCH || last.lock().unwrap().elapsed() >= Duration::from_millis(120);
+                if due {
+                    let batch = std::mem::take(&mut *p);
+                    *last.lock().unwrap() = Instant::now();
+                    drop(p);
+                    let _ = app.emit("search://hit", SearchHitEvent { id: id.clone(), hits: batch });
+                    emit_search_progress(&info, &app);
+                }
+            }
+        };
+        let mut sink = HitSink::new(query.max_results, &mut on_hit);
+        run_search(fs.as_ref(), session.as_deref(), &info.root, &query, &info.cancel, &mut sink).await
+    };
+
+    // Flush any hits left in the last (sub-threshold) batch.
+    let leftover = std::mem::take(&mut *pending.lock().unwrap());
+    if !leftover.is_empty() {
+        let _ = app.emit("search://hit", SearchHitEvent { id: info.id.clone(), hits: leftover });
+    }
+
+    // Cancellation wins even if a strategy returned a partial Ok.
+    if info.cancel.is_cancelled() {
+        *info.outcome.lock().unwrap() = SearchOutcome::Canceled;
+        let _ = app.emit("search://canceled", info.snapshot(false));
+        return;
+    }
+
+    match result {
+        Ok(s) => {
+            *info.strategy.lock().unwrap() = s.strategy;
+            *info.note.lock().unwrap() = s.note;
+            info.truncated.store(s.truncated, Ordering::Relaxed);
+            info.files_scanned.store(s.scanned, Ordering::Relaxed);
+            *info.outcome.lock().unwrap() = SearchOutcome::Done;
+            let _ = app.emit("search://done", info.snapshot(false));
+        }
+        Err(e) => {
+            *info.outcome.lock().unwrap() = SearchOutcome::Error(format!("{e:#}"));
+            let _ = app.emit("search://error", info.snapshot(false));
+        }
+    }
+}
+
+// ---------- Tauri commands ----------
+
+/// Start a search of `path` on `session_id`. Returns the run id; the frontend
+/// then listens for `search://…` and fetches the hits on `done`.
+#[tauri::command]
+pub async fn search_start(
+    session_id: String,
+    path: String,
+    query: SearchQuery,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let session = if session_id == crate::commands::LOCAL_SESSION {
+        None
+    } else {
+        Some(
+            state
+                .sessions
+                .get(&session_id)
+                .await
+                .ok_or_else(|| format!("session {session_id} not found"))?,
+        )
+    };
+    let fs = crate::commands::fs_for_public(&session_id, &state).await?;
+    let mgr = Arc::clone(&state.search);
+    Ok(mgr.start(session_id, path, query, fs, session, app).await)
+}
+
+#[tauri::command]
+pub async fn search_status(search_id: String, state: State<'_, AppState>) -> Result<SearchSnapshot, String> {
+    state
+        .search
+        .snapshot(&search_id, false)
+        .await
+        .ok_or_else(|| format!("search {search_id} not found"))
+}
+
+/// Full snapshot including the `hits` (present once the search is done).
+#[tauri::command]
+pub async fn search_result(search_id: String, state: State<'_, AppState>) -> Result<SearchSnapshot, String> {
+    state
+        .search
+        .snapshot(&search_id, true)
+        .await
+        .ok_or_else(|| format!("search {search_id} not found"))
+}
+
+#[tauri::command]
+pub async fn search_cancel(search_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.search.cancel(&search_id).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn search_forget(search_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    state.search.forget(&search_id).await;
+    Ok(())
 }
 
 #[cfg(test)]

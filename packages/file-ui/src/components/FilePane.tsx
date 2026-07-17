@@ -597,6 +597,19 @@ export function FilePane({
               .catch((e) => setError(String(e))),
         });
       }
+      // Search this folder by name or content (Spotlight/grep over the backend).
+      // Works on every backend; content grep uses a server-side fast path on SSH.
+      if (single.kind === "directory" && fs.searchDirectory) {
+        items.push({
+          label: "Search here…",
+          icon: <Search size={12} />,
+          onClick: () =>
+            sessionId &&
+            fs
+              .searchDirectory!(sessionId, single.path)
+              .catch((e) => setError(String(e))),
+        });
+      }
       // Duplicate needs a server-side copy (cp over SSH) or local fs copy; object
       // stores / FTP can't, so hide it there.
       if (fs.duplicate && (sessionId === LOCAL_SESSION || caps?.hasShell)) {
@@ -856,6 +869,21 @@ export function FilePane({
             title="Analyze disk usage in this folder"
           >
             <PieChart size={13} />
+          </button>
+        )}
+        {fs.searchDirectory && (
+          <button
+            onClick={() =>
+              sessionId &&
+              fs
+                .searchDirectory!(sessionId, path)
+                .catch((e) => setError(String(e)))
+            }
+            disabled={!sessionId}
+            className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"
+            title="Search this folder by name or content"
+          >
+            <Search size={13} />
           </button>
         )}
         {caps?.hasDirectories !== false && (

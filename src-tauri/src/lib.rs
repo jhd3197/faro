@@ -40,6 +40,8 @@ pub struct AppState {
     pub diskscan: Arc<diskscan::ScanManager>,
     /// Running directory diffs (Plan 6). Ephemeral — not persisted.
     pub diff: Arc<diff::DiffManager>,
+    /// Running fleet searches (Plan 7). Ephemeral — not persisted.
+    pub search: Arc<search::SearchManager>,
     /// Shared `faro.db` — the per-connection index (sync_state today; scan/search
     /// caches later). See `db.rs`.
     pub db: Arc<db::Db>,
@@ -101,6 +103,7 @@ pub fn run() {
                 ),
                 diskscan: Arc::new(diskscan::ScanManager::new()),
                 diff: Arc::new(diff::DiffManager::new()),
+                search: Arc::new(search::SearchManager::new()),
                 db,
             };
             app.manage(state);
@@ -185,6 +188,11 @@ pub fn run() {
             diff::diff_result,
             diff::diff_cancel,
             diff::diff_forget,
+            search::search_start,
+            search::search_status,
+            search::search_result,
+            search::search_cancel,
+            search::search_forget,
             commands::list_agent_jobs,
             commands::kill_agent_job,
             commands::respond_to_host_prompt,

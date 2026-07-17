@@ -348,6 +348,71 @@ export interface DiffProgress {
   filesB: number;
 }
 
+// ---- Fleet Search (mirrors src-tauri/src/search.rs) ----
+
+export type SearchKind = "name" | "content";
+export type SearchRunState = "searching" | "done" | "error" | "canceled";
+/** Which strategy ran: "generic" walk, "shell" (server-side rg/grep/find), or
+ *  "objectFlat" (a bucket key listing, name search only). */
+export type SearchStrategy = "generic" | "shell" | "objectFlat";
+
+/** A search request sent to `search_start` (camelCase mirrors SearchQuery). */
+export interface SearchQuery {
+  pattern: string;
+  kind: SearchKind;
+  /** Content: treat the pattern as a regex. Ignored for name search. */
+  regex: boolean;
+  caseSensitive: boolean;
+  includeGlobs: string[];
+  excludeGlobs: string[];
+  /** Allow content search to download files on grep-less backends. */
+  contentRemote: boolean;
+  maxResults: number;
+  maxFileBytes: number;
+}
+
+/** One search hit. Name hits carry the entry; content hits add line/column/preview. */
+export interface SearchHit {
+  path: string;
+  relative: string;
+  isDir: boolean;
+  size: number;
+  line?: number;
+  column?: number;
+  preview?: string;
+}
+
+/** A search snapshot: live counts while searching, the `hits` once done. */
+export interface SearchSnapshot {
+  id: string;
+  sessionId: string;
+  root: string;
+  kind: SearchKind;
+  state: SearchRunState;
+  strategy: SearchStrategy;
+  filesScanned: number;
+  hitCount: number;
+  truncated: boolean;
+  note?: string;
+  error?: string;
+  hits?: SearchHit[];
+  startedAt: number;
+}
+
+/** The lightweight `search://progress` event body. */
+export interface SearchProgress {
+  id: string;
+  strategy: SearchStrategy;
+  filesScanned: number;
+  hitCount: number;
+}
+
+/** A batch of newly-found hits streamed over `search://hit`. */
+export interface SearchHitBatch {
+  id: string;
+  hits: SearchHit[];
+}
+
 // ---- Edit-in-place ----
 
 export interface EditStartedEvent {

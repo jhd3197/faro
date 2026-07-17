@@ -39,6 +39,10 @@ import type {
   DiskScanProgress,
   DiffSnapshot,
   DiffProgress,
+  SearchQuery,
+  SearchSnapshot,
+  SearchProgress,
+  SearchHitBatch,
 } from "./types";
 
 // Typed wrappers around the Tauri command surface. The string names must match
@@ -352,6 +356,21 @@ export const ipc = {
   diffCancel: (diffId: string) => invoke<void>("diff_cancel", { diffId }),
   /** Drop a finished diff from the backend (view closed). */
   diffForget: (diffId: string) => invoke<void>("diff_forget", { diffId }),
+
+  /** Start a fleet search under `path` on a session; returns a search id. */
+  searchStart: (sessionId: SessionId, path: string, query: SearchQuery) =>
+    invoke<string>("search_start", { sessionId, path, query }),
+  /** Lightweight status (live counts while searching). */
+  searchStatus: (searchId: string) =>
+    invoke<SearchSnapshot>("search_status", { searchId }),
+  /** Full snapshot including the hit list (present once done). */
+  searchResult: (searchId: string) =>
+    invoke<SearchSnapshot>("search_result", { searchId }),
+  searchCancel: (searchId: string) =>
+    invoke<void>("search_cancel", { searchId }),
+  /** Drop a finished search from the backend (panel closed). */
+  searchForget: (searchId: string) =>
+    invoke<void>("search_forget", { searchId }),
 };
 
 export async function onEditSaved(
@@ -480,6 +499,27 @@ export async function onDiffEvent(
     listen<DiffSnapshot>("diff://done", (e) => cb("done", e.payload)),
     listen<DiffSnapshot>("diff://error", (e) => cb("error", e.payload)),
     listen<DiffSnapshot>("diff://canceled", (e) => cb("canceled", e.payload)),
+  ]);
+  return () => {
+    unsubs.forEach((u) => u());
+  };
+}
+
+/** Fleet-search lifecycle. `progress` carries live counts + strategy, `hit`
+ *  streams batches of new hits, and the terminal events (`done`/`error`/
+ *  `canceled`) carry a full SearchSnapshot (fetch the hit list on `done`). */
+export async function onSearchEvent(
+  cb: (
+    kind: "progress" | "hit" | "done" | "error" | "canceled",
+    payload: SearchProgress | SearchHitBatch | SearchSnapshot
+  ) => void
+): Promise<UnlistenFn> {
+  const unsubs = await Promise.all([
+    listen<SearchProgress>("search://progress", (e) => cb("progress", e.payload)),
+    listen<SearchHitBatch>("search://hit", (e) => cb("hit", e.payload)),
+    listen<SearchSnapshot>("search://done", (e) => cb("done", e.payload)),
+    listen<SearchSnapshot>("search://error", (e) => cb("error", e.payload)),
+    listen<SearchSnapshot>("search://canceled", (e) => cb("canceled", e.payload)),
   ]);
   return () => {
     unsubs.forEach((u) => u());
