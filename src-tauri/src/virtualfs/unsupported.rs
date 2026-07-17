@@ -24,6 +24,7 @@ pub struct Provider;
 
 impl Provider {
     pub async fn start(
+        _pair_id: String,
         _local_root: std::path::PathBuf,
         _remote_root: String,
         _hydrator: Arc<dyn Hydrator>,
@@ -40,6 +41,6 @@ impl Provider {
 }
 
 /// Nothing was ever registered with the OS, so unregister is a no-op.
-pub fn unregister_root(_local_root: &Path) -> Result<()> {
+pub fn unregister_root(_pair_id: &str, _local_root: Option<&Path>) -> Result<()> {
     Ok(())
 }

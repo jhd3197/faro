@@ -187,10 +187,8 @@ impl VirtualFs {
             p.stop();
         }
         self.errors.lock().await.remove(pair_id);
-        if let Some(root) = local_root {
-            if let Err(e) = platform::unregister_root(root) {
-                tracing::warn!("virtualfs: unregister {}: {e:#}", root.display());
-            }
+        if let Err(e) = platform::unregister_root(pair_id, local_root) {
+            tracing::warn!("virtualfs: unregister '{pair_id}': {e:#}");
         }
     }
 
@@ -210,6 +208,7 @@ impl VirtualFs {
         let hydrator: Arc<dyn Hydrator> =
             Arc::new(SessionHydrator::new(app.clone(), pair.profile_id.clone()));
         let provider = platform::Provider::start(
+            pair.id.clone(),
             local_root,
             pair.remote_root.clone(),
             hydrator,
