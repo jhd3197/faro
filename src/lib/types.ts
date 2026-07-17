@@ -144,6 +144,23 @@ export interface AgentHostStatus {
   pairing: AgentHostPairing | null;
 }
 
+/** How to handle a stale `faro-cli` (Plan 10 Phase 0c/0d). Mirrors Rust's
+ *  CliUpdateMode. `ask` prompts, `auto` updates silently, `off` never checks. */
+export type CliUpdateMode = "ask" | "auto" | "off";
+
+/** CLI version-drift status (mirrors Rust's CliStatus). */
+export interface CliStatus {
+  mode: CliUpdateMode;
+  installed: boolean;
+  cliPath: string | null;
+  cliVersion: string | null;
+  appVersion: string;
+  /** installed && cliVersion < appVersion — the CLI lags the app. */
+  stale: boolean;
+  /** One-line result of the last update/install action, if any. */
+  message: string | null;
+}
+
 /** A parsed faro:// deep link forwarded from Rust (mirrors DeepLink there).
  *  Every field optional; never carries a password. */
 export interface DeepLink {

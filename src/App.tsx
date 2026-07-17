@@ -5,6 +5,7 @@ import { FileBrowser } from "./components/FileBrowser";
 import { FileUiBridge } from "./components/FileUiBridge";
 import { TerminalDock } from "./components/Terminal";
 import { TransferQueue } from "./components/TransferQueue";
+import { CliUpdatePrompt } from "./components/CliUpdatePrompt";
 import { Settings } from "./components/Settings";
 import { HostKeyModal } from "./components/HostKeyModal";
 import { AuthPromptModal } from "./components/AuthPromptModal";
@@ -160,6 +161,7 @@ export default function App() {
             />
           </div>
           <TransferQueue />
+          <CliUpdatePrompt />
           <StatusBar
             terminalOpen={terminalOpen && supportsTerminal}
             onToggleTerminal={toggleTerminal}

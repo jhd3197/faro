@@ -9,6 +9,7 @@ pub mod bridge;
 pub mod commands;
 pub mod agent;
 mod agent_host;
+mod cli_updater;
 pub mod db;
 mod deeplink;
 pub mod diff;
@@ -36,6 +37,9 @@ pub struct AppState {
     pub editors: Arc<editor::EditManager>,
     pub bridge: Arc<bridge::BridgeState>,
     pub agent_host: Arc<agent_host::AgentHost>,
+    /// CLI version-drift watcher (Plan 10 Phase 0c/0d) — keeps `faro-cli` in step
+    /// with the app per the user's `cliUpdate` preference.
+    pub cli_updater: Arc<cli_updater::CliUpdater>,
     pub foldersync: Arc<foldersync::FolderSync>,
     /// On-demand virtual folders (Plan 9) — OneDrive-style placeholders. Owns
     /// the OS sync-root registrations; inert on non-Windows / non-`virtualfs`
@@ -102,6 +106,10 @@ pub fn run() {
                     agent_host::AgentHost::load(&handle)
                         .expect("failed to initialise agent host settings"),
                 ),
+                cli_updater: Arc::new(
+                    cli_updater::CliUpdater::load(&handle)
+                        .expect("failed to initialise CLI updater settings"),
+                ),
                 foldersync: Arc::new(
                     foldersync::FolderSync::load(&handle)
                         .expect("failed to initialise folder sync settings"),
@@ -131,6 +139,15 @@ pub fn run() {
             let host_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 host.auto_start_if_enabled(host_handle).await;
+            });
+
+            // Check whether the installed faro-cli lags the app (Plan 10 0c/0d);
+            // updates silently when the user chose `auto`, else emits status so
+            // the status-bar pill can prompt.
+            let cli_updater = app.state::<AppState>().cli_updater.clone();
+            let cli_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                cli_updater.auto_start_if_enabled(cli_handle).await;
             });
 
             // Restart any folder-sync pairs the user left enabled.
@@ -182,6 +199,10 @@ pub fn run() {
             agent_host::agent_host_close_pairing,
             agent_host::agent_host_set_policy,
             agent_host::agent_host_revoke_peer,
+            cli_updater::cli_updater_status,
+            cli_updater::cli_updater_check,
+            cli_updater::cli_updater_update,
+            cli_updater::cli_updater_set_mode,
             foldersync::foldersync_list,
             foldersync::foldersync_upsert,
             foldersync::foldersync_remove,
