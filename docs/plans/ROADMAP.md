@@ -45,7 +45,7 @@ thematic detail.
 | 7 | `7_fleet-search` | ✅ built (live-backend GUI click-through left) | Reuses #3's scan engine; later a `faro.db` filename index. |
 | 8 | `8_fleet-skills` | ✅ built (live multi-server fan-out run left) | AI-authored fleet automations over the bridge. Independent. |
 | 9 | `9_on-demand-virtual-folders` | 🔄 Windows provider built (feature-flagged); Explorer verify left | OneDrive-style placeholders (Plan 2 Phase 3). Large, per-OS, Windows-first. |
-| 10 | `10_faro-cli-agent-dx` | ⬜ | faro-cli/Agent-Bridge remote exec/write DX. **Phase 0 (CLI version-drift check + update) is a live pain point — do before the polish plans.** Independent of the scan foundation. |
+| 10 | `10_faro-cli-agent-dx` | ✅ built (live SSH-box + phone-agent smoke tests left) | faro-cli/Agent-Bridge remote exec/write DX. All six phases in: CLI version-drift + self-update, `agent script`/`--stdin`, `agent write`, MSYS path guard, background/detached jobs (SSH + agent arms), authenticated `fetch`. Independent of the scan foundation. |
 | 11 | `11_iconify-brand-icons` | ⬜ | Additive brand/protocol logos. Independent polish; do whenever. |
 | 12 | `12_scoped-connection-sharing` | 🅿️ deferred | Blocked on a login/auth foundation. |
 
@@ -260,7 +260,12 @@ a Git-Bash path-mangling guard, background/detached exec with a pollable job id
 (retires the `nohup`+poll loop), and an authenticated `fetch` for pages behind
 HTTP Basic Auth (reuses Plan 5's `HttpFs`). Touches `faro-cli`, `bridge.rs`,
 `faro-agentd`, and the app's settings/status surfaces; **Phase 0 (version drift)
-is the priority — a live pain point, do before the polish plans.** ⬜
+is the priority — a live pain point, do before the polish plans.** ✅ **All six
+phases built.** Phase 4 background jobs land on both arms — SSH (per-job
+`~/.faro/jobs/<id>` dir) and paired agents (daemon `ExecStart/Poll/Kill`, an
+additive protocol op so older daemons keep working). Verified by unit +
+end-to-end tests; live smoke tests against a real SSH box and the paired phone
+agent are the maintainer's step (single-instance lock + Android daemon redeploy).
 
 ## Track J — Scoped connection sharing (Plan 12) — DEFERRED
 Share a box read-only / path-jailed / time-boxed. **Parked until a login/auth
