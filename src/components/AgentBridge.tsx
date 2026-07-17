@@ -17,10 +17,13 @@ import {
   Trash2,
   RefreshCw,
   Play,
+  Wand2,
+  ChevronRight,
 } from "lucide-react";
 import { useBridge } from "@/stores/bridgeStore";
 import { useConnections } from "@/stores/connectionsStore";
 import { useLayout } from "@/stores/layoutStore";
+import { useSkills } from "@/stores/skillsStore";
 import { useDialog } from "@/hooks/useDialog";
 import { ipc } from "@/lib/ipc";
 import { toast } from "@/stores/toastStore";
@@ -837,6 +840,27 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
             onSave={saveCommand}
             onDelete={deleteCommand}
           />
+
+          {/* Skills — multi-step, fleet-targetable automations (Plan 8). */}
+          <Card title="Fleet Skills">
+            <div className="flex items-start gap-2">
+              <div className="min-w-0 flex-1 text-[11px] leading-snug text-text-dim">
+                Named, parameterized, multi-step workflows the AI can compose and
+                run across many servers. Approve AI proposals, author your own,
+                dry-run, then run — with a per-target result summary.
+              </div>
+              <button
+                onClick={() => {
+                  onClose();
+                  useSkills.getState().openPanel();
+                }}
+                className="flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] hover:bg-bg-hover"
+              >
+                <Wand2 size={12} /> Open Skills
+                <ChevronRight size={12} />
+              </button>
+            </div>
+          </Card>
 
           {/* History — what the agent has done (in-memory, last 200). */}
           <HistoryCard

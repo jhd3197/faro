@@ -740,6 +740,93 @@ export interface SavedCommand {
   description: string;
 }
 
+// ---- Skills (Plan 8): parameterized, fleet-targetable, AI-authorable) ----
+
+export type SkillStatus = "approved" | "proposed";
+
+/** One named input a Skill's steps interpolate via `${name}`. */
+export interface SkillParam {
+  name: string;
+  description: string;
+  required: boolean;
+  default: string | null;
+}
+
+/** One linear step of a Skill: a shell command template (`${param}` allowed). */
+export interface SkillStep {
+  name: string;
+  command: string;
+}
+
+/** Which connected servers a Skill runs on by default. */
+export interface TargetSelector {
+  all: boolean;
+  sessions: string[];
+}
+
+/** A saved, AI-authorable Skill: a named, parameterized, multi-step workflow the
+ *  agent (or the user) can run across one or many connected servers. Proposed
+ *  skills are AI-authored and need one human approval before they can run. */
+export interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  params: SkillParam[];
+  steps: SkillStep[];
+  targets: TargetSelector;
+  status: SkillStatus;
+  createdBy: string; // "user" | "ai"
+  stopOnError: boolean;
+}
+
+/** Result of one step on one target in a skill run. */
+export interface SkillStepResult {
+  step: number;
+  name: string;
+  command: string;
+  ok: boolean;
+  exitCode?: number | null;
+  stdout?: string;
+  stderr?: string;
+  truncated?: boolean;
+  timedOut?: boolean;
+  error?: string;
+}
+
+export interface SkillTargetResult {
+  sessionId: string;
+  sessionName: string;
+  ok: boolean;
+  steps: SkillStepResult[];
+}
+
+export interface SkillSkipped {
+  target: string;
+  reason: string;
+}
+
+/** Aggregated result of running a skill (real run). */
+export interface SkillRunResult {
+  skill: string;
+  status: string;
+  targetCount: number;
+  succeeded: number;
+  failed: number;
+  results: SkillTargetResult[];
+  skipped: SkillSkipped[];
+}
+
+/** Result of a dry-run: resolved commands per target, nothing executed. */
+export interface SkillDryRunResult {
+  dryRun: true;
+  skill: string;
+  proposal: boolean;
+  stepCount: number;
+  targets: { sessionId: string; sessionName: string; commands: string[] }[];
+  skipped: SkillSkipped[];
+  needsApproval: boolean;
+}
+
 // Live agent console (streamed exec output + op feed).
 export interface AgentExecStart {
   opId: string;

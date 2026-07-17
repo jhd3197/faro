@@ -29,6 +29,9 @@ import type {
   AgentExecStart,
   AgentOutput,
   SavedCommand,
+  Skill,
+  SkillRunResult,
+  SkillDryRunResult,
   DiscoveredAgent,
   AgentPairResult,
   AgentHostStatus,
@@ -305,6 +308,24 @@ export const ipc = {
     invoke<SavedCommand[]>("bridge_save_command", { command }),
   bridgeDeleteCommand: (id: string) =>
     invoke<SavedCommand[]>("bridge_delete_command", { id }),
+  // Skills (Plan 8): fleet automations. Hand-authored skills are born approved;
+  // AI proposals are approved via bridgeApproveSkill before they can run.
+  bridgeListSkills: () => invoke<Skill[]>("bridge_list_skills"),
+  bridgeSaveSkill: (skill: Skill) => invoke<Skill[]>("bridge_save_skill", { skill }),
+  bridgeDeleteSkill: (id: string) => invoke<Skill[]>("bridge_delete_skill", { id }),
+  bridgeApproveSkill: (id: string) => invoke<Skill[]>("bridge_approve_skill", { id }),
+  bridgeRunSkill: (
+    name: string,
+    params: Record<string, string>,
+    targets: string[] | null,
+    dryRun: boolean,
+  ) =>
+    invoke<SkillRunResult | SkillDryRunResult>("bridge_run_skill", {
+      name,
+      params,
+      targets,
+      dryRun,
+    }),
   // Write the agent console text to disk (Downloads) and return the saved path.
   exportAgentLog: (content: string, name: string) =>
     invoke<string>("export_agent_log", { content, name }),
@@ -431,6 +452,13 @@ export async function onAgentExecStart(
   cb: (event: AgentExecStart) => void
 ): Promise<UnlistenFn> {
   return listen<AgentExecStart>("agent://exec-start", (e) => cb(e.payload));
+}
+
+/** The AI proposed a new Skill over the bridge (awaiting human approval). */
+export async function onBridgeSkillProposed(
+  cb: (skill: Skill) => void
+): Promise<UnlistenFn> {
+  return listen<Skill>("bridge://skill-proposed", (e) => cb(e.payload));
 }
 
 export async function onAgentOutput(

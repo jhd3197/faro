@@ -52,6 +52,7 @@ import { AgentChatDock } from "./components/AgentChat";
 import { DiskUsageHost } from "./components/DiskUsage";
 import { DirectoryDiffHost } from "./components/DirectoryDiff";
 import { FleetSearchHost } from "./components/FleetSearch";
+import { SkillsHost } from "./components/SkillsPanel";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { relTime } from "./lib/format";
 import { cn } from "./lib/cn";
@@ -124,6 +125,7 @@ export default function App() {
       <DiskUsageHost />
       <DirectoryDiffHost />
       <FleetSearchHost />
+      <SkillsHost />
       <CommandPalette />
       <KeyboardShortcutsDialog />
       <div className="flex flex-1 overflow-hidden">
