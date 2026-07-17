@@ -45,8 +45,9 @@ thematic detail.
 | 7 | `7_fleet-search` | ⬜ | Reuses #3's scan engine; later a `faro.db` filename index. |
 | 8 | `8_fleet-skills` | ⬜ | AI-authored fleet automations over the bridge. Independent. |
 | 9 | `9_on-demand-virtual-folders` | ⬜ | OneDrive-style placeholders (Plan 2 Phase 3). Large, per-OS, Windows-first. |
-| 10 | `10_iconify-brand-icons` | ⬜ | Additive brand/protocol logos. Independent polish; do whenever. |
-| 11 | `11_scoped-connection-sharing` | 🅿️ deferred | Blocked on a login/auth foundation. |
+| 10 | `10_faro-cli-agent-dx` | ⬜ | faro-cli/Agent-Bridge remote exec/write DX. **Phase 0 (CLI version-drift check + update) is a live pain point — do before the polish plans.** Independent of the scan foundation. |
+| 11 | `11_iconify-brand-icons` | ⬜ | Additive brand/protocol logos. Independent polish; do whenever. |
+| 12 | `12_scoped-connection-sharing` | 🅿️ deferred | Blocked on a login/auth foundation. |
 
 Cross-project **Track D** (ServerKit ↔ Faro) has no plan file — it's a
 convergence effort tracked only in the Track section below.
@@ -159,7 +160,7 @@ surface for those agents).
 
 ---
 
-## Track E — Brand & protocol logos (Plan 10)
+## Track E — Brand & protocol logos (Plan 11)
 
 Additive icon layer for recognizable brand marks (S3/Azure/SSH/WordPress) via
 Iconify, bundled offline. Deliberately does **not** touch the file-type icons
@@ -212,7 +213,19 @@ Reusable, parameterized, **AI-authorable** automations over the fleet, MCP-nativ
 (the AI composes/saves Skills, then runs them across servers). Builds on the
 bridge's existing saved-commands + `faro_exec` + approvals. Safety-gated. ⬜
 
-## Track J — Scoped connection sharing (Plan 11) — DEFERRED
+## Track K — faro-cli & Agent Bridge remote-exec DX (Plan 10)
+Sharpens the daily `faro-cli agent …` / MCP remote-exec surface from real
+usage-session feedback: a **CLI version-drift check + in-app update prompt/
+auto-update** (the app and `faro-cli` ship separately, so the CLI silently lags
+after an app update), `agent script`/`--stdin` (run a local script verbatim — no
+base64/heredoc gymnastics), `agent write` (drop text to a remote file directly),
+a Git-Bash path-mangling guard, background/detached exec with a pollable job id
+(retires the `nohup`+poll loop), and an authenticated `fetch` for pages behind
+HTTP Basic Auth (reuses Plan 5's `HttpFs`). Touches `faro-cli`, `bridge.rs`,
+`faro-agentd`, and the app's settings/status surfaces; **Phase 0 (version drift)
+is the priority — a live pain point, do before the polish plans.** ⬜
+
+## Track J — Scoped connection sharing (Plan 12) — DEFERRED
 Share a box read-only / path-jailed / time-boxed. **Parked until a login/auth
 foundation exists** — the real use case (remote employee, link-based) needs auth
 regardless, so we hold the whole track rather than ship the LAN-only half. The
@@ -253,10 +266,14 @@ mirror.
    no OAuth, all fit the trait. Independent of the DB — can interleave anywhere.
 6. **Tracks G + H — Diff + Search.** Same scan engine, new surfaces (GUI + CLI +
    MCP `faro_diff` / `faro_search`).
-7. **Track D option (b)** — ServerKit installs `faro-agentd` as a managed
+7. **Track K — faro-cli remote-exec DX (Plan 10).** Independent of the scan
+   foundation, so it can slot in here — and its **Phase 0 (CLI version-drift
+   check + update, exec-ceiling fix) is a live pain point that can be pulled
+   forward at any time.** Ships before the polish/deferred plans (iconify #11,
+   scoped sharing #12).
+8. **Track D option (b)** — ServerKit installs `faro-agentd` as a managed
    service; every server becomes syncable via Track A.
-8. **Track C Windows on-demand** and **Track B Phase 4 OAuth clouds** — the two
-   large, later efforts.
+9. **Track C Windows on-demand** — the large, later effort.
 
 To execute any of these tracks end-to-end in a fresh session, use the local
 `docs/plans/prompt.md` runbook — set its one plan-filename knob and paste it.
