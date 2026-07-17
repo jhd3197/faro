@@ -38,6 +38,7 @@ import type {
   DeepLink,
   SyncPair,
   PairView,
+  VirtualFsRootStatus,
   ScanSnapshot,
   DiskScanProgress,
   DiffSnapshot,
@@ -341,6 +342,16 @@ export const ipc = {
     invoke<PairView[]>("foldersync_set_enabled", { id, enabled }),
   folderSyncSyncNow: (id: string) =>
     invoke<PairView[]>("foldersync_sync_now", { id }),
+
+  // ---- On-demand virtual folders (Plan 9) ----
+  /** Whether on-demand placeholders are available (Windows + `virtualfs` build). */
+  virtualFsSupported: () => invoke<boolean>("virtualfs_supported"),
+  /** Live status of every registered on-demand sync root. */
+  virtualFsStatus: () => invoke<VirtualFsRootStatus[]>("virtualfs_status"),
+  /** Explorer-style "free up space": dehydrate a pair's hydrated files back to
+   *  placeholders. Returns the count dehydrated. */
+  virtualFsFreeUpSpace: (pairId: string) =>
+    invoke<number>("virtualfs_free_up_space", { pairId }),
 
   // ---- Disk Usage Explorer ----
   /** Kick off a recursive size scan of `path` on a session; returns a scan id. */

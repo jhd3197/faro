@@ -187,6 +187,10 @@ export interface ImporterPaths {
 export type SyncDirection = "localToRemote" | "remoteToLocal";
 export type SyncStrategy = "additive" | "mirror";
 export type SyncReason = "missing" | "newer" | "sizeChanged" | "edited";
+/** How a pair materializes files locally. `mirror` moves whole files eagerly;
+ *  `onDemand` registers OneDrive-style placeholders that hydrate on open
+ *  (Plan 9 — Windows-only, inert elsewhere). */
+export type SyncMode = "mirror" | "onDemand";
 
 export interface SyncFile {
   relative: string;
@@ -226,6 +230,7 @@ export interface SyncPair {
   remoteRoot: string;
   direction: SyncDirection;
   strategy: SyncStrategy;
+  mode: SyncMode; // default "mirror"
   enabled: boolean;
   pollIntervalSecs: number; // default 60
   exclude: string[]; // gitignore-style patterns; never pushed nor mirror-deleted
@@ -238,6 +243,16 @@ export interface PairView extends SyncPair {
   state: PairState;
   inFlight: number;
   lastSynced: number | null; // ms epoch
+  lastError: string | null;
+}
+
+// ---- On-demand virtual folders (Plan 9; mirrors src-tauri/src/virtualfs) ----
+
+/** Live status of one on-demand sync root (placeholders that hydrate on open). */
+export interface VirtualFsRootStatus {
+  pairId: string;
+  localRoot: string;
+  running: boolean; // a provider is connected and serving hydration callbacks
   lastError: string | null;
 }
 
