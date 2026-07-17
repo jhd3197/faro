@@ -180,6 +180,17 @@ enum Cmd {
         #[command(subcommand)]
         action: AgentCmd,
     },
+
+    /// Run saved Skills (fleet automations) through Faro's Agent Bridge.
+    ///
+    /// A Skill is a named, parameterized, multi-step workflow that fans shell
+    /// commands across one or many connected servers. Like `agent`, this talks
+    /// to the Bridge open in the Faro app, so a run goes through Faro's approval
+    /// and shows up in its live console.
+    Skill {
+        #[command(subcommand)]
+        action: SkillCmd,
+    },
 }
 
 #[derive(Subcommand)]
@@ -188,6 +199,34 @@ enum ProfileCmd {
     List,
     /// Show details for one profile by name or id.
     Show { name: String },
+}
+
+#[derive(Subcommand)]
+enum SkillCmd {
+    /// List the saved Skills (name, status, params, step count, default targets).
+    List {
+        /// Emit the raw JSON result.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a Skill across its targets.
+    Run {
+        /// The Skill's name (as shown by `skill list`).
+        name: String,
+        /// Server(s) to run on (name or id). Repeatable. Pass `all` for every
+        /// exec-capable connection. Omit to use the Skill's default targets.
+        #[arg(long)]
+        target: Vec<String>,
+        /// Parameter value as `key=value`. Repeatable.
+        #[arg(long)]
+        param: Vec<String>,
+        /// Show the resolved commands per target without running anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit the raw JSON result.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -421,6 +460,8 @@ async fn run(cli: Cli) -> Result<()> {
         // The agent subcommands talk to the running bridge over HTTP (blocking
         // ureq); they need no profile store and don't await.
         Cmd::Agent { action } => cmd_agent(action),
+        // Skills likewise run through the bridge.
+        Cmd::Skill { action } => cmd_skill(action),
     }
 }
 
@@ -1665,6 +1706,186 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn cmd_skill(action: SkillCmd) -> Result<()> {
+    let ep = read_endpoint()?;
+    match action {
+        SkillCmd::List { json } => {
+            let body = http_get(&ep, "/skills")?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                return Ok(());
+            }
+            let skills = body
+                .get("skills")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if skills.is_empty() {
+                eprintln!(
+                    "No skills yet. Create one in Faro's Skills panel, or have the AI propose one."
+                );
+                return Ok(());
+            }
+            for s in &skills {
+                let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                let desc = s.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let steps = s.get("steps").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+                let params = s
+                    .get("params")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|p| p.get("name").and_then(|n| n.as_str()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                let params_note = if params.is_empty() {
+                    String::new()
+                } else {
+                    format!("  params: {params}")
+                };
+                println!(
+                    "{name:<20} {steps} step{}  → {}{params_note}",
+                    if steps == 1 { "" } else { "s" },
+                    describe_skill_targets(s),
+                );
+                if !desc.is_empty() {
+                    println!("{:<20} {}", "", dim(desc));
+                }
+                if skill_status(s) == "proposed" {
+                    println!("{:<20} {}", "", warn("proposal — approve in Faro before running"));
+                }
+            }
+            Ok(())
+        }
+        SkillCmd::Run { name, target, param, dry_run, json } => {
+            let mut params = serde_json::Map::new();
+            for p in &param {
+                let Some((k, v)) = p.split_once('=') else {
+                    bail!("--param must be key=value (got '{p}')");
+                };
+                params.insert(k.trim().to_string(), serde_json::Value::String(v.to_string()));
+            }
+            let mut req = serde_json::json!({
+                "name": name,
+                "params": serde_json::Value::Object(params),
+                "dryRun": dry_run,
+            });
+            if !target.is_empty() {
+                req["targets"] = serde_json::json!(target);
+            }
+            let body = http_post(&ep, "/skill_run", req)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                return Ok(());
+            }
+            if dry_run {
+                print_skill_dry_run(&body);
+                return Ok(());
+            }
+            let failed = print_skill_run(&body);
+            if failed > 0 {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn skill_status(s: &serde_json::Value) -> &str {
+    s.get("status").and_then(|v| v.as_str()).unwrap_or("approved")
+}
+
+/// One-line summary of a skill's default target selector for `skill list`.
+fn describe_skill_targets(s: &serde_json::Value) -> String {
+    let t = s.get("targets");
+    if t.and_then(|v| v.get("all")).and_then(|v| v.as_bool()).unwrap_or(false) {
+        return "all servers".to_string();
+    }
+    let sessions = t
+        .and_then(|v| v.get("sessions"))
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", "))
+        .unwrap_or_default();
+    if sessions.is_empty() {
+        "no default targets".to_string()
+    } else {
+        sessions
+    }
+}
+
+/// Print any targets the bridge couldn't run (never silently dropped).
+fn print_skill_skipped(body: &serde_json::Value) {
+    let skipped = body.get("skipped").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    for s in &skipped {
+        let t = s.get("target").and_then(|v| v.as_str()).unwrap_or("?");
+        let reason = s.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+        eprintln!("{}", warn(&format!("skipped {t}: {reason}")));
+    }
+}
+
+fn print_skill_dry_run(body: &serde_json::Value) {
+    let name = body.get("skill").and_then(|v| v.as_str()).unwrap_or("");
+    println!("Dry run — skill \x1b[1m{name}\x1b[0m:");
+    let targets = body.get("targets").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    if targets.is_empty() {
+        println!("  {}", warn("no runnable targets"));
+    }
+    for t in &targets {
+        let tn = t.get("sessionName").and_then(|v| v.as_str()).unwrap_or("?");
+        println!("\n  ▸ \x1b[1m{tn}\x1b[0m");
+        let cmds = t.get("commands").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        for (i, c) in cmds.iter().enumerate() {
+            println!("    {}. {}", i + 1, c.as_str().unwrap_or(""));
+        }
+    }
+    print_skill_skipped(body);
+    if body.get("needsApproval").and_then(|v| v.as_bool()).unwrap_or(false) {
+        println!("\n{}", dim("A real run will ask for approval in Faro."));
+    }
+}
+
+/// Render a completed skill run; returns the number of failed targets.
+fn print_skill_run(body: &serde_json::Value) -> u64 {
+    let succeeded = body.get("succeeded").and_then(|v| v.as_u64()).unwrap_or(0);
+    let failed = body.get("failed").and_then(|v| v.as_u64()).unwrap_or(0);
+    let results = body.get("results").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    for r in &results {
+        let tn = r.get("sessionName").and_then(|v| v.as_str()).unwrap_or("?");
+        let ok = r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+        let marker = if ok { "\x1b[32m✓\x1b[0m" } else { "\x1b[31m✗\x1b[0m" };
+        println!("{marker} \x1b[1m{tn}\x1b[0m");
+        let steps = r.get("steps").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        for st in &steps {
+            let sok = st.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+            let n = st.get("step").and_then(|v| v.as_u64()).unwrap_or(0);
+            let label = st.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(e) = st.get("error").and_then(|v| v.as_str()) {
+                println!("  {} step {n}: {}", if sok { "·" } else { "✗" }, warn(e));
+                continue;
+            }
+            let code = st
+                .get("exitCode")
+                .and_then(|v| v.as_i64())
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            let dot = if sok { "\x1b[32m·\x1b[0m" } else { "\x1b[31m✗\x1b[0m" };
+            println!("  {dot} step {n} (exit {code}) {}", dim(label));
+            if !sok {
+                if let Some(se) = st.get("stderr").and_then(|v| v.as_str()) {
+                    for line in se.lines().take(10) {
+                        println!("      {line}");
+                    }
+                }
+            }
+        }
+    }
+    print_skill_skipped(body);
+    println!("\n{succeeded} ok, {failed} failed");
+    failed
 }
 
 fn print_agent_entries(body: &serde_json::Value) {
