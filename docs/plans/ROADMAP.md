@@ -43,7 +43,7 @@ thematic detail.
 | 5 | `5_additional-backends` | 🔄 Phases 0–2, 4, 5 shipped (S3/GCS/WebDAV/HTTP + all 4 OAuth clouds) | Only SMB (Phase 3) remains — blocked on MSVC/libsmbclient. |
 | 6 | `6_directory-diff` | ⬜ | Reuses #3's scan engine (two trees) + `change_signal`/`etag`. |
 | 7 | `7_fleet-search` | ✅ built (live-backend GUI click-through left) | Reuses #3's scan engine; later a `faro.db` filename index. |
-| 8 | `8_fleet-skills` | ⬜ | AI-authored fleet automations over the bridge. Independent. |
+| 8 | `8_fleet-skills` | ✅ built (live multi-server fan-out run left) | AI-authored fleet automations over the bridge. Independent. |
 | 9 | `9_on-demand-virtual-folders` | ⬜ | OneDrive-style placeholders (Plan 2 Phase 3). Large, per-OS, Windows-first. |
 | 10 | `10_faro-cli-agent-dx` | ⬜ | faro-cli/Agent-Bridge remote exec/write DX. **Phase 0 (CLI version-drift check + update) is a live pain point — do before the polish plans.** Independent of the scan foundation. |
 | 11 | `11_iconify-brand-icons` | ⬜ | Additive brand/protocol logos. Independent polish; do whenever. |
@@ -223,7 +223,26 @@ on SSH/agent, object-flat name listing on buckets, walk fallback. Reuses the
 ## Track I — Fleet Skills (Plan 8)
 Reusable, parameterized, **AI-authorable** automations over the fleet, MCP-native
 (the AI composes/saves Skills, then runs them across servers). Builds on the
-bridge's existing saved-commands + `faro_exec` + approvals. Safety-gated. ⬜
+bridge's existing saved-commands + `faro_exec` + approvals. Safety-gated.
+
+- ✅ **Phases 1–3** — Skills store + fleet runner in `bridge.rs`: `Skill`
+  model (params/steps/targets/status) persisted in `bridge.json`, existing
+  saved commands seeded once into single-step Skills; `op_run_skill` resolves
+  targets (all / explicit, run-time override), substitutes `${params}`,
+  dry-runs, gates the whole fleet run once (only allow-all auto-approves), fans
+  out with bounded concurrency reusing `exec_core`, and aggregates per-target
+  success/fail + audit. MCP: `faro_list_skills` / `faro_run_skill` /
+  `faro_save_skill` (AI saves land as **proposals** needing one human approval)
+  plus a dynamic `skill_<name>` tool per approved skill. REST `/skills` +
+  `/skill_run`.
+- ✅ **Phase 4** — `faro-cli skill list|run` (dry-run + per-target summary) and
+  a GUI **Fleet Skills** panel (browse/author/approve, pick targets, dry-run,
+  run, watch aggregated output), opened from the command palette + the Agent
+  Bridge panel.
+- ⬜ Remaining: a live multi-server fan-out **run** (unit-verified: 15 tests
+  incl. the propose→approve safety flow; backend/CLI/frontend compile clean; a
+  live run needs the app rebuilt over the running instance + connected exec
+  targets — the maintainer's environment).
 
 ## Track K — faro-cli & Agent Bridge remote-exec DX (Plan 10)
 Sharpens the daily `faro-cli agent …` / MCP remote-exec surface from real
