@@ -44,7 +44,7 @@ thematic detail.
 | 6 | `6_directory-diff` | ⬜ | Reuses #3's scan engine (two trees) + `change_signal`/`etag`. |
 | 7 | `7_fleet-search` | ✅ built (live-backend GUI click-through left) | Reuses #3's scan engine; later a `faro.db` filename index. |
 | 8 | `8_fleet-skills` | ✅ built (live multi-server fan-out run left) | AI-authored fleet automations over the bridge. Independent. |
-| 9 | `9_on-demand-virtual-folders` | ⬜ | OneDrive-style placeholders (Plan 2 Phase 3). Large, per-OS, Windows-first. |
+| 9 | `9_on-demand-virtual-folders` | 🔄 Windows provider built (feature-flagged); Explorer verify left | OneDrive-style placeholders (Plan 2 Phase 3). Large, per-OS, Windows-first. |
 | 10 | `10_faro-cli-agent-dx` | ⬜ | faro-cli/Agent-Bridge remote exec/write DX. **Phase 0 (CLI version-drift check + update) is a live pain point — do before the polish plans.** Independent of the scan foundation. |
 | 11 | `11_iconify-brand-icons` | ⬜ | Additive brand/protocol logos. Independent polish; do whenever. |
 | 12 | `12_scoped-connection-sharing` | 🅿️ deferred | Blocked on a login/auth foundation. |
@@ -130,8 +130,14 @@ transfer / sync for free.
 OneDrive-style placeholders: files show in the folder, download on open, free-up-
 space to evict. Native, per-OS, **Windows-first** (Cloud Filter API).
 
-- ⬜ Windows provider (Cloud Filter API via the `windows` crate) — its own
-  feature-flagged effort; reuses the Track A engine for listing + hydration.
+- ✅ **Windows provider built** behind the off-by-default `virtualfs` feature
+  (`src-tauri/src/virtualfs/`): orphan-safe sync-root registration via the Win32
+  `CfRegisterSyncRoot` (the WinRT wrapper path needs package identity unpackaged
+  Faro lacks — a runtime test caught it), hydration on open through the shared
+  `TransferManager` download path via the `cloud-filter` callback machinery, a
+  `SyncPair.mode` toggle + Free-up-space UI. Register→unregister round-trip
+  verified on real `cldapi`. ⬜ Remaining: manual Explorer verification (hydrate
+  on open, free-up-space, badges) — build `--features virtualfs`.
 - ⬜ macOS File Provider extension, ⬜ Linux FUSE, or the WinFsp/FUSE virtual-mount
   fallback. *Designed in Plan 9; not built.*
 
