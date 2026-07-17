@@ -26,6 +26,7 @@ pub mod session;
 pub mod sync;
 mod terminal;
 mod transfer;
+mod virtualfs;
 
 pub struct AppState {
     pub sessions: Arc<session::SessionManager>,
@@ -36,6 +37,10 @@ pub struct AppState {
     pub bridge: Arc<bridge::BridgeState>,
     pub agent_host: Arc<agent_host::AgentHost>,
     pub foldersync: Arc<foldersync::FolderSync>,
+    /// On-demand virtual folders (Plan 9) — OneDrive-style placeholders. Owns
+    /// the OS sync-root registrations; inert on non-Windows / non-`virtualfs`
+    /// builds.
+    pub virtualfs: Arc<virtualfs::VirtualFs>,
     /// Running disk-usage scans (Plan 4). Ephemeral — not persisted.
     pub diskscan: Arc<diskscan::ScanManager>,
     /// Running directory diffs (Plan 6). Ephemeral — not persisted.
@@ -100,6 +105,10 @@ pub fn run() {
                 foldersync: Arc::new(
                     foldersync::FolderSync::load(&handle)
                         .expect("failed to initialise folder sync settings"),
+                ),
+                virtualfs: Arc::new(
+                    virtualfs::VirtualFs::load(&handle)
+                        .expect("failed to initialise virtualfs settings"),
                 ),
                 diskscan: Arc::new(diskscan::ScanManager::new()),
                 diff: Arc::new(diff::DiffManager::new()),
@@ -178,6 +187,9 @@ pub fn run() {
             foldersync::foldersync_remove,
             foldersync::foldersync_set_enabled,
             foldersync::foldersync_sync_now,
+            virtualfs::virtualfs_supported,
+            virtualfs::virtualfs_status,
+            virtualfs::virtualfs_free_up_space,
             diskscan::diskscan_start,
             diskscan::diskscan_status,
             diskscan::diskscan_tree,

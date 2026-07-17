@@ -100,13 +100,30 @@ notify = "6"
 # no dbus/secret-service build dependency.
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 
-# Windows-only: registry access for the PuTTY sessions importer.
+# Windows-only: registry access for the PuTTY sessions importer, plus the
+# Cloud Filter API (`cldapi.dll`) bindings that power on-demand virtual folders
+# (Plan 9). The `windows` crate is optional — only pulled when the `virtualfs`
+# feature is on — so the default build never compiles the native provider FFI.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+windows = { version = "0.58", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_CloudFilters",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_IO",
+    "Win32_Security",
+] }
 
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# On-demand virtual folders (Plan 9): the Windows Cloud Filter provider —
+# OneDrive-style placeholders that hydrate on open and free-up-space to evict.
+# OFF by default: it compiles native `cldapi` FFI and registers OS sync roots on
+# the user's disk, which must be verified manually in Explorer (hydrate on open,
+# free-up-space, badge states) before shipping. Enable with `--features virtualfs`.
+virtualfs = ["dep:windows"]
 
 [profile.dev]
 incremental = true
