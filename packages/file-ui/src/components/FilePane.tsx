@@ -15,6 +15,7 @@ import {
   FileArchive,
   TerminalSquare,
   PieChart,
+  GitCompareArrows,
   Info,
   Search,
   X,
@@ -583,6 +584,32 @@ export function FilePane({
               .catch((e) => setError(String(e))),
         });
       }
+      // Compare this folder against another tree (Meld-style side-by-side diff).
+      // Works on every backend, including remote↔remote.
+      if (single.kind === "directory" && fs.compareDirectory) {
+        items.push({
+          label: "Compare with…",
+          icon: <GitCompareArrows size={12} />,
+          onClick: () =>
+            sessionId &&
+            fs
+              .compareDirectory!(sessionId, single.path)
+              .catch((e) => setError(String(e))),
+        });
+      }
+      // Search this folder by name or content (Spotlight/grep over the backend).
+      // Works on every backend; content grep uses a server-side fast path on SSH.
+      if (single.kind === "directory" && fs.searchDirectory) {
+        items.push({
+          label: "Search here…",
+          icon: <Search size={12} />,
+          onClick: () =>
+            sessionId &&
+            fs
+              .searchDirectory!(sessionId, single.path)
+              .catch((e) => setError(String(e))),
+        });
+      }
       // Duplicate needs a server-side copy (cp over SSH) or local fs copy; object
       // stores / FTP can't, so hide it there.
       if (fs.duplicate && (sessionId === LOCAL_SESSION || caps?.hasShell)) {
@@ -842,6 +869,21 @@ export function FilePane({
             title="Analyze disk usage in this folder"
           >
             <PieChart size={13} />
+          </button>
+        )}
+        {fs.searchDirectory && (
+          <button
+            onClick={() =>
+              sessionId &&
+              fs
+                .searchDirectory!(sessionId, path)
+                .catch((e) => setError(String(e)))
+            }
+            disabled={!sessionId}
+            className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"
+            title="Search this folder by name or content"
+          >
+            <Search size={13} />
           </button>
         )}
         {caps?.hasDirectories !== false && (

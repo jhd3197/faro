@@ -35,7 +35,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
-use crate::remotefs::FileKind;
 use crate::session::{ExecStream, Session};
 use crate::sync::{SyncDirection, SyncStrategy};
 use crate::transfer::OverwritePolicy;
@@ -49,12 +48,13 @@ const MAX_EXEC_BYTES: usize = 512 * 1024; // cap exec output at 512 KiB
 const EXEC_TIMEOUT: Duration = Duration::from_secs(60); // default; kill a hung/streaming command
 /// Bounds for a caller-supplied exec timeout (`timeoutMs`). The floor keeps a
 /// typo like `1` from insta-killing every command; the ceiling (15 min) keeps
-/// a runaway agent from parking a command forever.
-const EXEC_TIMEOUT_MS_MIN: u64 = 1_000;
-const EXEC_TIMEOUT_MS_MAX: u64 = 900_000;
+/// a runaway agent from parking a command forever. Shared with `faro-agentd` via
+/// the proto crate so the daemon and the bridge clamp to the *same* ceiling
+/// (Plan 10 Phase 0e — a daemon-private 10-min cap used to silently shorten a
+/// bridge-accepted 15-min timeout on paired-agent targets).
+use faro_agent_proto::msg::{EXEC_TIMEOUT_MS_MAX, EXEC_TIMEOUT_MS_MIN};
 const SEARCH_MAX_RESULTS: usize = 200;
 const SEARCH_MAX_DEPTH: usize = 6;
-const SEARCH_MAX_DIRS: usize = 4000; // hard ceiling on directories visited
 
 /// Filename of the endpoint discovery file written next to `bridge.json` while
 /// the bridge is running. `faro-cli agent …` reads the URL + token from it, so
@@ -98,6 +98,86 @@ pub struct SavedCommand {
     pub description: String,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+/// A saved, AI-authorable Skill (Plan 8): a named, parameterized, multi-step
+/// workflow the agent (or the user) can run across one or many connected servers.
+/// It's the next abstraction above a [`SavedCommand`] — where a saved command is
+/// one pre-approved string runnable by name, a Skill is a sequence of shell steps
+/// with `${param}` placeholders, a default target selector, and a proposal gate.
+///
+/// The store is deliberately linear (no branching/looping — see Plan 8 Risks):
+/// each step is a shell command template run on every resolved target, reusing
+/// the bridge's exec + approval machinery. Steps run in order per target; a
+/// failing step halts that target's remaining steps when `stop_on_error` is set.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Skill {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub params: Vec<SkillParam>,
+    pub steps: Vec<SkillStep>,
+    /// Default set of servers to run on; a run call may override it.
+    pub targets: TargetSelector,
+    /// `approved` = runnable; `proposed` = AI-authored, awaiting one human
+    /// approval in Faro's Skills panel before it can run.
+    pub status: SkillStatus,
+    /// Provenance for the UI: `"user"` (hand-authored, born approved) or `"ai"`
+    /// (proposed over the bridge).
+    pub created_by: String,
+    /// Halt a target's remaining steps after the first failing step. Default true.
+    #[serde(default = "default_true")]
+    pub stop_on_error: bool,
+}
+
+/// One named input a Skill's steps interpolate via `${name}`. Missing required
+/// params fail the run before anything executes; optional params fall back to
+/// `default` (or the empty string).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SkillParam {
+    pub name: String,
+    pub description: String,
+    pub required: bool,
+    pub default: Option<String>,
+}
+
+/// One linear step of a Skill: a shell command template. `${param}` placeholders
+/// are substituted at run time before the command reaches the exec path.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SkillStep {
+    /// Optional label shown in the console / audit log; falls back to the command.
+    pub name: String,
+    pub command: String,
+}
+
+/// Which connected servers a Skill runs on. `all` = every enabled, exec-capable
+/// session (SSH or Faro Agent); otherwise the explicit `sessions` list (names or
+/// ids). A run call can override this selector entirely.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TargetSelector {
+    pub all: bool,
+    pub sessions: Vec<String>,
+}
+
+/// A Skill's lifecycle state. AI-authored Skills land as `Proposed` and can't run
+/// until a human approves them in the Skills panel — so the agent can't
+/// self-grant a destructive fleet workflow (Plan 8 Safety).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SkillStatus {
+    /// Runnable. Hand-authored Skills and approved proposals.
+    #[default]
+    Approved,
+    /// AI-authored, awaiting one human approval before it can run.
+    Proposed,
+}
+
 /// On-disk shape of `bridge.json`. Session ids are per-connect UUIDs, so the
 /// allow-list is keyed by *profile* id and re-applied when a session connects.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -111,6 +191,13 @@ struct PersistedConfig {
     /// User-defined pre-approved commands the agent can run by name.
     #[serde(default)]
     saved_commands: Vec<SavedCommand>,
+    /// Saved Skills (Plan 8).
+    #[serde(default)]
+    skills: Vec<Skill>,
+    /// One-time flag: existing saved commands have been seeded as single-step
+    /// Skills. Prevents re-seeding on every launch.
+    #[serde(default)]
+    skills_migrated: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -131,7 +218,7 @@ pub struct BridgeStatus {
 pub struct ActivityEntry {
     pub id: String,
     pub session_id: String,
-    pub kind: String, // "exec" | "read" | "download" | "upload" | "upload_dir" | "sync" | "search" | "denied" | "error"
+    pub kind: String, // "exec" | "read" | "download" | "upload" | "upload_dir" | "sync" | "diff" | "search" | "denied" | "error"
     pub detail: String,
     pub ok: bool,
     pub at: i64, // unix millis
@@ -186,6 +273,10 @@ pub struct BridgeState {
     policy: Mutex<ApprovalPolicy>,
     /// User-defined pre-approved commands (global name -> command list).
     saved_commands: Mutex<Vec<SavedCommand>>,
+    /// Saved Skills (Plan 8): AI-authorable, multi-step, fleet-targetable.
+    skills: Mutex<Vec<Skill>>,
+    /// Whether saved commands have been seeded into Skills (one-time).
+    skills_migrated: Mutex<bool>,
     approvals: Mutex<HashMap<String, oneshot::Sender<ApprovalDecision>>>,
     activity: Mutex<Vec<ActivityEntry>>,
     config_path: Option<PathBuf>,
@@ -334,7 +425,7 @@ impl BridgeState {
             .context("resolving app_data_dir")?;
         std::fs::create_dir_all(&dir).ok();
         let path = dir.join("bridge.json");
-        let cfg: PersistedConfig = if path.exists() {
+        let mut cfg: PersistedConfig = if path.exists() {
             std::fs::read(&path)
                 .ok()
                 .and_then(|b| serde_json::from_slice(&b).ok())
@@ -342,11 +433,26 @@ impl BridgeState {
         } else {
             PersistedConfig::default()
         };
+        // One-time migration: seed each existing saved command as a single-step,
+        // approved Skill so the shipped saved-commands survive into the Skills
+        // store. Non-destructive — the saved commands themselves are left intact
+        // for `faro_run_command`. Guarded so it runs at most once.
+        if !cfg.skills_migrated {
+            for c in &cfg.saved_commands {
+                cfg.skills.push(migrate_command_to_skill(c));
+            }
+            cfg.skills_migrated = true;
+            if let Ok(bytes) = serde_json::to_vec_pretty(&cfg) {
+                let _ = std::fs::write(&path, bytes);
+            }
+        }
         Ok(Self {
             enabled_master: Mutex::new(cfg.enabled),
             enabled_profiles: Mutex::new(cfg.enabled_profiles.into_iter().collect()),
             policy: Mutex::new(cfg.policy),
             saved_commands: Mutex::new(cfg.saved_commands),
+            skills: Mutex::new(cfg.skills),
+            skills_migrated: Mutex::new(cfg.skills_migrated),
             config_path: Some(path),
             ..Default::default()
         })
@@ -361,6 +467,8 @@ impl BridgeState {
             enabled_profiles: self.enabled_profiles.lock().await.iter().cloned().collect(),
             policy: *self.policy.lock().await,
             saved_commands: self.saved_commands.lock().await.clone(),
+            skills: self.skills.lock().await.clone(),
+            skills_migrated: *self.skills_migrated.lock().await,
         };
         if let Ok(bytes) = serde_json::to_vec_pretty(&cfg) {
             let _ = std::fs::write(path, bytes);
@@ -639,6 +747,100 @@ impl BridgeState {
             .find(|c| c.name.trim().to_lowercase() == want)
             .cloned()
     }
+
+    // ---- Skills (Plan 8): parameterized, fleet-targetable, AI-authorable) ----
+
+    pub async fn list_skills(&self) -> Vec<Skill> {
+        self.skills.lock().await.clone()
+    }
+
+    /// Insert or update a Skill (keyed by id; a blank id mints a uuid). Local-UI
+    /// only (a Tauri command) — the bridge path is [`Self::propose_skill`], which
+    /// forces a proposal. A hand-authored Skill is born `Approved`; editing one
+    /// preserves whatever status it already had unless the caller changed it.
+    pub async fn upsert_skill(&self, mut skill: Skill) -> Vec<Skill> {
+        if skill.id.trim().is_empty() {
+            skill.id = Uuid::new_v4().to_string();
+        }
+        if skill.created_by.trim().is_empty() {
+            skill.created_by = "user".into();
+        }
+        {
+            let mut list = self.skills.lock().await;
+            if let Some(existing) = list.iter_mut().find(|s| s.id == skill.id) {
+                *existing = skill;
+            } else {
+                list.push(skill);
+            }
+        }
+        self.persist().await;
+        self.skills.lock().await.clone()
+    }
+
+    pub async fn delete_skill(&self, id: &str) -> Vec<Skill> {
+        self.skills.lock().await.retain(|s| s.id != id);
+        self.persist().await;
+        self.skills.lock().await.clone()
+    }
+
+    /// Approve a proposed Skill (local-UI only) — the one human gate that makes an
+    /// AI-authored Skill runnable.
+    pub async fn approve_skill(&self, id: &str) -> Vec<Skill> {
+        {
+            let mut list = self.skills.lock().await;
+            if let Some(s) = list.iter_mut().find(|s| s.id == id) {
+                s.status = SkillStatus::Approved;
+            }
+        }
+        self.persist().await;
+        self.skills.lock().await.clone()
+    }
+
+    /// Save an AI-authored Skill over the bridge. Always forced to `Proposed` /
+    /// `created_by = "ai"` with a fresh id, so the agent can neither approve its
+    /// own workflow nor overwrite an existing (approved) Skill. Returns the saved
+    /// proposal.
+    pub async fn propose_skill(&self, mut skill: Skill) -> Skill {
+        skill.id = Uuid::new_v4().to_string();
+        skill.status = SkillStatus::Proposed;
+        skill.created_by = "ai".into();
+        self.skills.lock().await.push(skill.clone());
+        self.persist().await;
+        skill
+    }
+
+    /// Find a Skill by id or name (case-insensitive name, first match).
+    async fn find_skill(&self, name_or_id: &str) -> Option<Skill> {
+        let want = name_or_id.trim().to_lowercase();
+        self.skills
+            .lock()
+            .await
+            .iter()
+            .find(|s| s.id == name_or_id || s.name.trim().to_lowercase() == want)
+            .cloned()
+    }
+}
+
+/// Seed a saved command as a single-step, approved Skill (one-time migration).
+fn migrate_command_to_skill(c: &SavedCommand) -> Skill {
+    Skill {
+        id: Uuid::new_v4().to_string(),
+        name: c.name.clone(),
+        description: if c.description.trim().is_empty() {
+            "Migrated from a saved command.".to_string()
+        } else {
+            c.description.clone()
+        },
+        params: Vec::new(),
+        steps: vec![SkillStep {
+            name: String::new(),
+            command: c.command.clone(),
+        }],
+        targets: TargetSelector::default(),
+        status: SkillStatus::Approved,
+        created_by: "user".into(),
+        stop_on_error: true,
+    }
 }
 
 /// Opt-in check → policy/approval gate. On success the caller proceeds; on
@@ -845,12 +1047,17 @@ async fn route(app: &AppHandle, state: &Arc<BridgeState>, req: &Request) -> (u16
         ("GET", "/context") => op_context(app, state).await,
         ("GET", "/sessions") => handle_sessions(app, state).await,
         ("POST", "/exec") => handle_exec(app, state, &req.body).await,
+        ("POST", "/exec_script") => handle_exec_script(app, state, &req.body).await,
+        ("POST", "/job") => handle_job(app, state, &req.body).await,
+        ("POST", "/jobs") => handle_jobs(app, state, &req.body).await,
+        ("POST", "/write") => handle_write(app, state, &req.body).await,
         ("POST", "/list") => handle_list(app, state, &req.body).await,
         ("POST", "/read") => handle_read(app, state, &req.body).await,
         ("POST", "/download") => handle_download(app, state, &req.body).await,
         ("POST", "/upload") => handle_upload(app, state, &req.body).await,
         ("POST", "/upload_dir") => handle_upload_dir(app, state, &req.body).await,
         ("POST", "/sync") => handle_sync(app, state, &req.body).await,
+        ("POST", "/diff") => handle_diff(app, state, &req.body).await,
         ("POST", "/search") => handle_search(app, state, &req.body).await,
         ("POST", "/read_batch") => handle_read_batch(app, state, &req.body).await,
         ("POST", "/glob") => handle_glob(app, state, &req.body).await,
@@ -860,6 +1067,8 @@ async fn route(app: &AppHandle, state: &Arc<BridgeState>, req: &Request) -> (u16
         ("POST", "/history") => handle_history(app, state, &req.body).await,
         ("GET", "/commands") => (200, json!({ "commands": state.list_commands().await })),
         ("POST", "/run") => handle_run(app, state, &req.body).await,
+        ("GET", "/skills") => (200, json!({ "skills": state.list_skills().await })),
+        ("POST", "/skill_run") => handle_skill_run(app, state, &req.body).await,
         _ => (404, json!({"error": "not found"})),
     }
 }
@@ -903,7 +1112,90 @@ async fn handle_exec(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> 
     }
     let dry_run = parsed.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
     let timeout_ms = parsed.get("timeoutMs").and_then(|v| v.as_u64());
+    // A detached exec returns a job id at once instead of blocking (Plan 10 Phase 4).
+    if parsed.get("detach").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return op_exec_detached(app, state, &session_id, &command, dry_run).await;
+    }
     exec_on(app, state, &session_id, &command, dry_run, timeout_ms).await
+}
+
+async fn handle_job(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    let job_id = body_str(&parsed, "jobId");
+    if session_id.is_empty() || job_id.is_empty() {
+        return (400, json!({"error": "sessionId and jobId are required"}));
+    }
+    op_job(app, state, &session_id, &job_id).await
+}
+
+async fn handle_jobs(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    if session_id.is_empty() {
+        return (400, json!({"error": "sessionId is required"}));
+    }
+    op_jobs(app, state, &session_id).await
+}
+
+/// `/exec_script` — run a whole local script (Plan 10 Phase 1). The body carries
+/// the script as base64 (`script`) so any bytes survive the JSON/HTTP hop
+/// untouched; `label` is a friendly name for the console/audit (e.g. the source
+/// filename). Decodes, then runs it verbatim via `exec_script_on`.
+async fn handle_exec_script(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    use base64::Engine as _;
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    let script_b64 = body_str(&parsed, "script");
+    if session_id.is_empty() || script_b64.is_empty() {
+        return (400, json!({"error": "sessionId and script (base64) are required"}));
+    }
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(script_b64.as_bytes()) else {
+        return (400, json!({"error": "script must be valid base64"}));
+    };
+    let Ok(script) = String::from_utf8(bytes) else {
+        return (400, json!({"error": "script bytes are not valid UTF-8"}));
+    };
+    let mut label = body_str(&parsed, "label");
+    if label.is_empty() {
+        label = "a script".to_string();
+    }
+    let dry_run = parsed.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
+    let timeout_ms = parsed.get("timeoutMs").and_then(|v| v.as_u64());
+    exec_script_on(app, state, &session_id, &script, &label, dry_run, timeout_ms).await
+}
+
+/// `/write` — drop text/bytes straight into a remote file (Plan 10 Phase 2). The
+/// body carries the content as base64 (`content`) so any bytes survive the hop;
+/// `overwrite` (default false) controls whether an existing file is replaced.
+/// This is the direct alternative to staging a local file and `upload`-ing it —
+/// no mangling-prone path, one round-trip.
+async fn handle_write(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    use base64::Engine as _;
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    let path = body_str(&parsed, "path");
+    let content_b64 = body_str(&parsed, "content");
+    if session_id.is_empty() || path.is_empty() {
+        return (400, json!({"error": "sessionId and path are required"}));
+    }
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(content_b64.as_bytes()) else {
+        return (400, json!({"error": "content must be valid base64"}));
+    };
+    let overwrite = parsed.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+    op_write(app, state, &session_id, &path, &bytes, overwrite).await
 }
 
 async fn handle_run(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
@@ -919,6 +1211,52 @@ async fn handle_run(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (
     let dry_run = parsed.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
     let timeout_ms = parsed.get("timeoutMs").and_then(|v| v.as_u64());
     op_run_command(app, state, &session_id, &name, dry_run, timeout_ms).await
+}
+
+/// Extract a `{ "k": "v", ... }` object into a String map, coercing scalar values
+/// (number/bool) to their string form. Shared by the `/skill_run` route and the
+/// `faro_run_skill` MCP tool.
+fn params_from_value(v: Option<&Value>) -> HashMap<String, String> {
+    v.and_then(|x| x.as_object())
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, val)| {
+                    let s = match val {
+                        Value::String(s) => s.clone(),
+                        Value::Number(n) => n.to_string(),
+                        Value::Bool(b) => b.to_string(),
+                        _ => return None,
+                    };
+                    Some((k.clone(), s))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Extract a JSON string array (e.g. a `targets` list). `None` means "omitted"
+/// (fall back to the skill's default selector).
+fn str_array(v: Option<&Value>) -> Option<Vec<String>> {
+    v.and_then(|x| x.as_array()).map(|a| {
+        a.iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect()
+    })
+}
+
+async fn handle_skill_run(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let name = body_str(&parsed, "name");
+    if name.is_empty() {
+        return (400, json!({"error": "name is required"}));
+    }
+    let params = params_from_value(parsed.get("params"));
+    let targets = str_array(parsed.get("targets"));
+    let dry_run = parsed.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
+    op_run_skill(app, state, &name, params, targets, dry_run).await
 }
 
 async fn handle_list(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
@@ -1029,20 +1367,38 @@ async fn handle_sync(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> 
     .await
 }
 
+async fn handle_diff(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let path_a = body_str(&parsed, "pathA");
+    let path_b = body_str(&parsed, "pathB");
+    if path_a.is_empty() || path_b.is_empty() {
+        return (400, json!({"error": "pathA and pathB are required"}));
+    }
+    // An omitted / empty session means the local filesystem.
+    let side_a = parsed.get("sessionA").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let side_b = parsed.get("sessionB").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let hash = parsed.get("hash").and_then(|v| v.as_bool()).unwrap_or(false);
+    op_diff(app, state, side_a, &path_a, side_b, &path_b, hash).await
+}
+
 async fn handle_search(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
     let parsed = match parse_body(body) {
         Ok(v) => v,
         Err(e) => return e,
     };
     let session_id = body_str(&parsed, "sessionId");
-    let query = body_str(&parsed, "query");
-    if session_id.is_empty() || query.is_empty() {
+    let pattern = body_str(&parsed, "query");
+    if session_id.is_empty() || pattern.is_empty() {
         return (400, json!({"error": "sessionId and query are required"}));
     }
     let root = match body_str(&parsed, "path") {
         p if p.is_empty() => ".".to_string(),
         p => p,
     };
+    let query = build_search_query(&parsed, pattern);
     op_search(app, state, &session_id, &root, &query).await
 }
 
@@ -1220,7 +1576,8 @@ pub(crate) async fn exec_on(
         let Some(agent) = manager.get_agent(session_id).await else {
             return (400, json!({"error": "session went away"}));
         };
-        exec_core_agent(app, state, &agent, session_id, &session_name, command, timeout).await
+        exec_core_agent(app, state, &agent, session_id, &session_name, command, command, timeout)
+            .await
     } else {
         let Some(ssh) = manager.get_ssh(session_id).await else {
             return (400, json!({"error": "session went away"}));
@@ -1229,11 +1586,125 @@ pub(crate) async fn exec_on(
     }
 }
 
+/// Run a whole local script (read as raw bytes by the caller, so heredocs, nested
+/// quotes, and newlines survive) on an SSH server or a paired agent — the answer
+/// to the base64/heredoc gymnastics a multi-line command otherwise forces
+/// (Plan 10 Phase 1). The script text runs the same way the tracked `exec` path
+/// already runs a command: piped verbatim into the target's shell (`base64 -d |
+/// sh` on SSH, `sh -c`/`powershell -Command` on an agent daemon), never spliced
+/// into a command line. Gated as an Exec, but — like a Write — never auto-approved
+/// by the safe-read-only heuristic (only allow-all), since a script is
+/// multi-statement and can't be classified safe. `label` is the friendly name
+/// shown in the console + audit (the script never dumps there).
+async fn exec_script_on(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    script: &str,
+    label: &str,
+    dry_run: bool,
+    timeout_ms: Option<u64>,
+) -> (u16, Value) {
+    let manager = app.state::<AppState>().sessions.clone();
+    let (session_name, is_agent) = if let Some(ssh) = manager.get_ssh(session_id).await {
+        (ssh.profile.name.clone(), false)
+    } else if let Some(agent) = manager.get_agent(session_id).await {
+        (agent.profile.name.clone(), true)
+    } else {
+        return (
+            400,
+            json!({"error": "the requested connection can't run scripts. Scripts run on SSH/SFTP and Faro Agent connections only."}),
+        );
+    };
+
+    if !state.is_enabled(session_id).await {
+        return (403, json!({
+            "error": format!(
+                "connection '{}' has not granted agent access. Ask the user to open Faro → Agent Bridge and toggle 'Allow agent access' for it.",
+                session_name
+            )
+        }));
+    }
+
+    if dry_run {
+        let policy = *state.policy.lock().await;
+        return (
+            200,
+            json!({
+                "wouldRun": label,
+                "bytes": script.len(),
+                "lines": script.lines().count(),
+                "needsApproval": !policy.allow_all,
+                "reason": if policy.allow_all {
+                    "auto-approve all requests is on"
+                } else {
+                    "a script always prompts for approval in Faro (never auto-approved by the safe-exec heuristic)"
+                },
+            }),
+        );
+    }
+
+    // Gate as an Exec, but pass `None` for the command so the safe-read-only
+    // heuristic can't auto-approve a multi-statement script — only allow-all does.
+    // The approval summary shows a header plus the script body (capped) so the
+    // user reviews exactly what will run.
+    if let Err(resp) = gate(
+        app,
+        state,
+        session_id,
+        &session_name,
+        OpClass::Exec,
+        "script",
+        &script_approval_summary(label, script),
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    let timeout = exec_timeout_from(timeout_ms);
+    if is_agent {
+        let Some(agent) = manager.get_agent(session_id).await else {
+            return (400, json!({"error": "session went away"}));
+        };
+        exec_core_agent(app, state, &agent, session_id, &session_name, script, label, timeout).await
+    } else {
+        let Some(ssh) = manager.get_ssh(session_id).await else {
+            return (400, json!({"error": "session went away"}));
+        };
+        exec_core(app, state, &ssh, session_id, &session_name, script, label, timeout).await
+    }
+}
+
+/// Approval-prompt text for a script run: a one-line header naming the script and
+/// its size, then the body (capped at ~4 KiB so a huge script doesn't overflow
+/// the prompt — the user still sees the head and the total size).
+fn script_approval_summary(label: &str, script: &str) -> String {
+    const CAP: usize = 4096;
+    let header = format!("Run {label} ({} bytes, {} lines):", script.len(), script.lines().count());
+    if script.len() <= CAP {
+        format!("{header}\n{script}")
+    } else {
+        // Cut at the largest char boundary ≤ CAP so we never split a UTF-8 scalar.
+        let mut cut = CAP;
+        while cut > 0 && !script.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!(
+            "{header}\n{}\n… [preview truncated; {} bytes total]",
+            &script[..cut],
+            script.len()
+        )
+    }
+}
+
 /// Exec on a Faro Agent machine. The daemon runs the command natively (and
 /// enforces its own policy), so there's no PTY/pgid/streaming as with SSH — we
 /// emit the same live-console events (`exec-start` → `output` → terminal `job`)
 /// around a single request so the UI renders it identically, then log the audit
 /// line.
+#[allow(clippy::too_many_arguments)]
 async fn exec_core_agent(
     app: &AppHandle,
     state: &Arc<BridgeState>,
@@ -1241,6 +1712,7 @@ async fn exec_core_agent(
     session_id: &str,
     session_name: &str,
     command: &str,
+    label: &str,
     timeout: Duration,
 ) -> (u16, Value) {
     let op_id = Uuid::new_v4().to_string();
@@ -1251,7 +1723,7 @@ async fn exec_core_agent(
             "opId": op_id,
             "sessionId": session_id,
             "sessionName": session_name,
-            "command": command,
+            "command": label,
         }),
     );
 
@@ -1287,14 +1759,14 @@ async fn exec_core_agent(
                 json!({
                     "opId": op_id,
                     "sessionId": session_id,
-                    "label": command,
+                    "label": label,
                     "pgid": Value::Null,
                     "startedAt": started_at,
                     "status": status,
                     "exitCode": out.exit_code,
                 }),
             );
-            let mut detail = command.to_string();
+            let mut detail = label.to_string();
             if out.truncated {
                 detail.push_str("  [output truncated]");
             }
@@ -1331,7 +1803,7 @@ async fn exec_core_agent(
                 json!({
                     "opId": op_id,
                     "sessionId": session_id,
-                    "label": command,
+                    "label": label,
                     "pgid": Value::Null,
                     "startedAt": started_at,
                     "status": "failed",
@@ -1345,7 +1817,7 @@ async fn exec_core_agent(
                         id: op_id,
                         session_id: session_id.to_string(),
                         kind: "error".into(),
-                        detail: format!("{command} — {e}"),
+                        detail: format!("{label} — {e}"),
                         ok: false,
                         at: now_millis(),
                     },
@@ -1353,6 +1825,302 @@ async fn exec_core_agent(
                 .await;
             (500, json!({"error": e.to_string()}))
         }
+    }
+}
+
+// ---- Detached / background jobs (Plan 10 Phase 4, SSH arm) ----
+//
+// A `--detach` exec returns a job id immediately and keeps running server-side,
+// retiring the manual `nohup … & ; tail -f log` loop. SSH-only for now (pure
+// convention, no protocol change): the command runs detached (`setsid`/`nohup`)
+// into a per-job dir `~/.faro/jobs/<id>/{cmd,out,err,exit,pid}`, and `job`/`jobs`
+// read those files. The agent-target arm (ExecStart/Poll/Kill in the protocol)
+// is the documented next step.
+
+/// Root of the per-job spill on the server. `$HOME` is expanded remotely.
+const JOB_DIR: &str = "$HOME/.faro/jobs";
+
+/// Shell to launch `cmd_b64` (base64 of the command) detached into a fresh job
+/// dir. Base64 keeps the command opaque so no quoting can break the wrapper. The
+/// launcher prunes job dirs older than 7 days first (best-effort), then returns
+/// at once — the real work runs in a new session/`nohup` and records its own exit
+/// code. Prints the job id on stdout.
+fn job_launch_script(job_id: &str, cmd_b64: &str) -> String {
+    format!(
+        r#"d="{JOB_DIR}/{job_id}"; mkdir -p "$d" || exit 1
+find "{JOB_DIR}" -maxdepth 1 -mindepth 1 -type d -mtime +7 -exec rm -rf {{}} + 2>/dev/null
+printf %s '{cmd_b64}' | base64 -d > "$d/cmd" || exit 1
+run='sh "$1/cmd" >"$1/out" 2>"$1/err"; printf %s "$?" > "$1/exit"'
+if command -v setsid >/dev/null 2>&1; then
+  setsid sh -c "$run" _ "$d" </dev/null >/dev/null 2>&1 &
+else
+  nohup sh -c "$run" _ "$d" </dev/null >/dev/null 2>&1 &
+fi
+printf %s "$!" > "$d/pid" 2>/dev/null
+echo "{job_id}""#
+    )
+}
+
+/// Shell to poll a job: prints `exit=<code>` (empty while running) and the
+/// base64 of the (capped) out/err streams, so no marker can collide with content.
+fn job_poll_script(job_id: &str) -> String {
+    format!(
+        r#"d="{JOB_DIR}/{job_id}"
+if [ ! -d "$d" ]; then echo "nojob=1"; exit 0; fi
+printf 'exit='; cat "$d/exit" 2>/dev/null; printf '\n'
+printf 'out='; head -c 524288 "$d/out" 2>/dev/null | base64 | tr -d '\n'; printf '\n'
+printf 'err='; head -c 524288 "$d/err" 2>/dev/null | base64 | tr -d '\n'; printf '\n'"#
+    )
+}
+
+/// Shell to list all jobs: one `id<TAB>status<TAB>exitCode` line each.
+fn job_list_script() -> String {
+    format!(
+        r#"jd="{JOB_DIR}"; [ -d "$jd" ] || exit 0
+for d in "$jd"/*/; do
+  [ -d "$d" ] || continue
+  id=$(basename "$d")
+  if [ -f "$d/exit" ]; then printf '%s\t%s\t%s\n' "$id" done "$(cat "$d/exit" 2>/dev/null)"; else printf '%s\t%s\t\n' "$id" running; fi
+done"#
+    )
+}
+
+/// Launch a detached job on an SSH server; returns its job id at once. Gated as
+/// an Exec (the command runs), never auto-approved except by allow-all.
+async fn op_exec_detached(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    command: &str,
+    dry_run: bool,
+) -> (u16, Value) {
+    use base64::Engine as _;
+    let manager = app.state::<AppState>().sessions.clone();
+    // Faro Agent target: launch via the daemon's ExecStart (Plan 10 Phase 4).
+    if let Some(agent) = manager.get_agent(session_id).await {
+        return op_exec_detached_agent(app, state, &agent, session_id, command, dry_run).await;
+    }
+    let Some(ssh) = manager.get_ssh(session_id).await else {
+        return (400, json!({"error": "detached exec needs an SSH/SFTP or Faro Agent connection."}));
+    };
+    let session_name = ssh.profile.name.clone();
+    if !state.is_enabled(session_id).await {
+        return (403, json!({
+            "error": format!("connection '{session_name}' has not granted agent access. Ask the user to open Faro → Agent Bridge and toggle 'Allow agent access' for it.")
+        }));
+    }
+    if dry_run {
+        let policy = *state.policy.lock().await;
+        return (200, json!({
+            "wouldRun": command,
+            "detach": true,
+            "needsApproval": !policy.allow_all,
+        }));
+    }
+    if let Err(resp) = gate(
+        app,
+        state,
+        session_id,
+        &session_name,
+        OpClass::Exec,
+        "exec",
+        &format!("run detached (background job): {command}"),
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+    let job_id = Uuid::new_v4().to_string();
+    let script = job_launch_script(&job_id, &base64::engine::general_purpose::STANDARD.encode(command));
+    match ssh.exec_bounded(&script, 64 * 1024, Duration::from_secs(20), None).await {
+        Ok(out) if out.exit_code == Some(0) => {
+            state
+                .log(app, activity("exec", session_id, format!("detached job {job_id}: {command}"), true))
+                .await;
+            (200, json!({ "jobId": job_id, "status": "started" }))
+        }
+        Ok(out) => (
+            500,
+            json!({"error": format!("failed to launch background job: {}", out.stderr.trim())}),
+        ),
+        Err(e) => (500, json!({"error": e.to_string()})),
+    }
+}
+
+/// Launch a detached job on a paired Faro Agent (Plan 10 Phase 4, agent arm):
+/// the daemon spawns it under the bridge-chosen job id and returns at once; poll
+/// it with `/job`. Gated identically to the SSH arm.
+async fn op_exec_detached_agent(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    agent: &Arc<crate::session::AgentSession>,
+    session_id: &str,
+    command: &str,
+    dry_run: bool,
+) -> (u16, Value) {
+    let session_name = agent.profile.name.clone();
+    if !state.is_enabled(session_id).await {
+        return (403, json!({
+            "error": format!("connection '{session_name}' has not granted agent access. Ask the user to open Faro → Agent Bridge and toggle 'Allow agent access' for it.")
+        }));
+    }
+    if dry_run {
+        let policy = *state.policy.lock().await;
+        return (200, json!({
+            "wouldRun": command,
+            "detach": true,
+            "needsApproval": !policy.allow_all,
+        }));
+    }
+    if let Err(resp) = gate(
+        app,
+        state,
+        session_id,
+        &session_name,
+        OpClass::Exec,
+        "exec",
+        &format!("run detached (background job): {command}"),
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+    let job_id = Uuid::new_v4().to_string();
+    // 512 KiB per stream, matching the SSH poll cap.
+    match agent.exec_start(&job_id, command, 512 * 1024).await {
+        Ok(id) => {
+            state
+                .log(app, activity("exec", session_id, format!("detached job {id}: {command}"), true))
+                .await;
+            (200, json!({ "jobId": id, "status": "started" }))
+        }
+        Err(e) => (
+            500,
+            json!({"error": format!(
+                "failed to start background job on agent '{session_name}': {e}. The agent may predate Plan 10 (update faro-agentd), or the connection dropped."
+            )}),
+        ),
+    }
+}
+
+/// Parse the `job_poll_script` output into a status object.
+fn parse_job_poll(text: &str) -> Value {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mut nojob = false;
+    let mut exit: Option<i64> = None;
+    let mut running = true;
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("nojob=") {
+            nojob = v.trim() == "1";
+        } else if let Some(v) = line.strip_prefix("exit=") {
+            let v = v.trim();
+            if !v.is_empty() {
+                running = false;
+                exit = v.parse().ok();
+            }
+        } else if let Some(v) = line.strip_prefix("out=") {
+            stdout = b64.decode(v.trim()).ok().map(|b| String::from_utf8_lossy(&b).to_string()).unwrap_or_default();
+        } else if let Some(v) = line.strip_prefix("err=") {
+            stderr = b64.decode(v.trim()).ok().map(|b| String::from_utf8_lossy(&b).to_string()).unwrap_or_default();
+        }
+    }
+    if nojob {
+        return json!({"error": "no such job on that server (it may have been pruned)"});
+    }
+    json!({ "running": running, "exitCode": exit, "stdout": stdout, "stderr": stderr })
+}
+
+/// Poll a detached job's progress/output (SSH server or Faro Agent). Read-only.
+async fn op_job(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    job_id: &str,
+) -> (u16, Value) {
+    let manager = app.state::<AppState>().sessions.clone();
+    // Faro Agent target: poll via the daemon's ExecPoll (Plan 10 Phase 4).
+    if let Some(agent) = manager.get_agent(session_id).await {
+        let name = agent.profile.name.clone();
+        if let Err(resp) =
+            gate(app, state, session_id, &name, OpClass::Read, "job", &format!("read job {job_id}"), None).await
+        {
+            return resp;
+        }
+        return match agent.exec_poll(job_id).await {
+            Ok(s) if s.not_found => (
+                404,
+                json!({"error": "no such job on that agent (it may have been pruned, or the daemon restarted)", "jobId": job_id}),
+            ),
+            Ok(s) => (
+                200,
+                json!({ "running": s.running, "exitCode": s.exit_code, "stdout": s.stdout, "stderr": s.stderr, "jobId": job_id }),
+            ),
+            Err(e) => (500, json!({"error": e.to_string()})),
+        };
+    }
+    let Some(ssh) = manager.get_ssh(session_id).await else {
+        return (400, json!({"error": "detached jobs need an SSH/SFTP or Faro Agent connection."}));
+    };
+    let name = ssh.profile.name.clone();
+    if let Err(resp) = gate(app, state, session_id, &name, OpClass::Read, "job", &format!("read job {job_id}"), None).await {
+        return resp;
+    }
+    // A job id is a UUID we generated; reject anything else so it can't be used
+    // to smuggle shell into the path.
+    if !job_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return (400, json!({"error": "invalid job id"}));
+    }
+    match ssh.exec_bounded(&job_poll_script(job_id), 1024 * 1024, Duration::from_secs(15), None).await {
+        Ok(out) => {
+            let mut body = parse_job_poll(&out.stdout);
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("jobId".into(), json!(job_id));
+            }
+            let status = if body.get("error").is_some() { 404 } else { 200 };
+            (status, body)
+        }
+        Err(e) => (500, json!({"error": e.to_string()})),
+    }
+}
+
+/// List detached jobs on a server (SSH only). Read-only.
+async fn op_jobs(app: &AppHandle, state: &Arc<BridgeState>, session_id: &str) -> (u16, Value) {
+    let manager = app.state::<AppState>().sessions.clone();
+    let Some(ssh) = manager.get_ssh(session_id).await else {
+        return (400, json!({"error": "jobs are SSH-only for now."}));
+    };
+    let name = ssh.profile.name.clone();
+    if let Err(resp) = gate(app, state, session_id, &name, OpClass::Read, "jobs", "list background jobs", None).await {
+        return resp;
+    }
+    match ssh.exec_bounded(&job_list_script(), 256 * 1024, Duration::from_secs(15), None).await {
+        Ok(out) => {
+            let jobs: Vec<Value> = out
+                .stdout
+                .lines()
+                .filter_map(|line| {
+                    let mut it = line.split('\t');
+                    let id = it.next()?.trim();
+                    if id.is_empty() {
+                        return None;
+                    }
+                    let status = it.next().unwrap_or("").trim();
+                    let code = it.next().unwrap_or("").trim();
+                    Some(json!({
+                        "jobId": id,
+                        "running": status == "running",
+                        "exitCode": code.parse::<i64>().ok(),
+                    }))
+                })
+                .collect();
+            (200, json!({ "jobs": jobs }))
+        }
+        Err(e) => (500, json!({"error": e.to_string()})),
     }
 }
 
@@ -2091,6 +2859,136 @@ async fn op_download(
     }
 }
 
+/// Write `bytes` to `remote_path` on an SSH server (SFTP create) or a paired
+/// agent (`WriteChunk`). Gated as a Write — never auto-approved except by
+/// allow-all. Refuses to clobber an existing file unless `overwrite`. This is the
+/// engine behind `/write`, `faro_write` and `faro-cli agent write` (Plan 10
+/// Phase 2). Content is bounded by the bridge's 1 MiB request-body cap — for
+/// large files use `upload`.
+async fn op_write(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    remote_path: &str,
+    bytes: &[u8],
+    overwrite: bool,
+) -> (u16, Value) {
+    use base64::Engine as _;
+    use faro_agent_proto::msg::{Request, Response};
+    use tokio::io::AsyncWriteExt;
+
+    let manager = app.state::<AppState>().sessions.clone();
+    let (session_name, is_agent) = if let Some(ssh) = manager.get_ssh(session_id).await {
+        (ssh.profile.name.clone(), false)
+    } else if let Some(agent) = manager.get_agent(session_id).await {
+        (agent.profile.name.clone(), true)
+    } else {
+        return (
+            400,
+            json!({"error": "writing text works on SSH/SFTP and Faro Agent connections only; use upload for other protocols."}),
+        );
+    };
+
+    if let Err(resp) = gate(
+        app,
+        state,
+        session_id,
+        &session_name,
+        OpClass::Write,
+        "write",
+        &format!(
+            "Write {} → {session_name}:{remote_path} (overwrite: {})",
+            human_bytes(bytes.len() as u64),
+            if overwrite { "yes" } else { "no" }
+        ),
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    let result: Result<()> = if is_agent {
+        let Some(agent) = manager.get_agent(session_id).await else {
+            return (400, json!({"error": "session went away"}));
+        };
+        // Existence check (unless overwriting): a successful Stat means it's there.
+        async {
+            if !overwrite {
+                if let Ok(Response::Stat { .. }) =
+                    agent.request(Request::Stat { path: remote_path.to_string() }).await
+                {
+                    anyhow::bail!("{remote_path} already exists; pass overwrite to replace it");
+                }
+            }
+            let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+            match agent
+                .request(Request::WriteChunk {
+                    path: remote_path.to_string(),
+                    offset: 0,
+                    data,
+                    truncate: true,
+                    done: true,
+                })
+                .await?
+            {
+                Response::Written { .. } => Ok(()),
+                Response::Error { message, denied } => {
+                    anyhow::bail!(if denied { format!("denied: {message}") } else { message })
+                }
+                other => anyhow::bail!("unexpected write reply: {other:?}"),
+            }
+        }
+        .await
+    } else {
+        let Some(ssh) = manager.get_ssh(session_id).await else {
+            return (400, json!({"error": "session went away"}));
+        };
+        async {
+            let cell = ssh.ensure_sftp().await?;
+            let sftp = cell.lock().await;
+            if !overwrite && sftp.metadata(remote_path).await.is_ok() {
+                anyhow::bail!("{remote_path} already exists; pass overwrite to replace it");
+            }
+            let mut file = sftp
+                .create(remote_path)
+                .await
+                .with_context(|| format!("create {remote_path}"))?;
+            file.write_all(bytes).await?;
+            file.flush().await?;
+            file.shutdown().await.ok();
+            Ok(())
+        }
+        .await
+    };
+
+    match result {
+        Ok(()) => {
+            state
+                .log(
+                    app,
+                    activity(
+                        "write",
+                        session_id,
+                        format!("write {} → {remote_path}", human_bytes(bytes.len() as u64)),
+                        true,
+                    ),
+                )
+                .await;
+            (200, json!({ "path": remote_path, "bytes": bytes.len(), "status": "written" }))
+        }
+        Err(e) => {
+            state
+                .log(
+                    app,
+                    activity("error", session_id, format!("write {remote_path} — {e}"), false),
+                )
+                .await;
+            (500, json!({"error": e.to_string()}))
+        }
+    }
+}
+
 async fn op_upload(
     app: &AppHandle,
     state: &Arc<BridgeState>,
@@ -2667,26 +3565,109 @@ async fn op_sync(
     }
 }
 
-pub(crate) async fn op_search(
+/// Cap on per-file diff entries returned to the agent. Differences beyond this
+/// are elided (`listTruncated`); the summary counts always reflect the whole tree.
+const DIFF_MAX_ENTRIES: usize = 500;
+
+/// One resolved diff side: `None` is the local filesystem; `Some` is a connected,
+/// opted-in server. Kept as `(id, name, session)` so the label, the gate, and the
+/// hashing read all share one lookup.
+type DiffSide = Option<(String, String, Arc<Session>)>;
+
+/// Resolve one side of a diff. Absent or the literal `"local"` → the local
+/// filesystem; anything else resolves to an enabled session (so a server that
+/// hasn't granted agent access simply won't match — same rule as every other tool).
+async fn resolve_diff_side(
     app: &AppHandle,
     state: &Arc<BridgeState>,
-    session_id: &str,
-    root: &str,
-    query: &str,
+    session_arg: Option<&str>,
+) -> Result<DiffSide, String> {
+    match session_arg {
+        None => Ok(None),
+        Some(s) if s.eq_ignore_ascii_case("local") => Ok(None),
+        Some(s) => {
+            let id = resolve_session(app, state, Some(s), SessionNeed::Any).await?;
+            let sess = app
+                .state::<AppState>()
+                .sessions
+                .get(&id)
+                .await
+                .ok_or_else(|| format!("session {id} went away"))?;
+            let name = sess.profile().name.clone();
+            Ok(Some((id, name, sess)))
+        }
+    }
+}
+
+fn diff_side_label(side: &DiffSide, path: &str) -> String {
+    match side {
+        None => format!("local:{path}"),
+        Some((_, name, _)) => format!("{name}:{path}"),
+    }
+}
+
+fn diff_side_fs(side: &DiffSide) -> Box<dyn crate::remotefs::RemoteFs> {
+    match side {
+        None => Box::new(crate::remotefs::local::LocalFs),
+        Some((_, _, sess)) => crate::commands::fs_for_session(sess),
+    }
+}
+
+/// Compare two directory trees across any two Faro backends — including
+/// remote↔remote — and return the classified differences (Plan 6). A side is a
+/// connected server (its session name/id) or the local filesystem (`session`
+/// absent / "local"); at least one side must be a server so there's an opted-in
+/// session to authorize against. Gated ONCE as a READ: the whole op only walks
+/// (and, with `hash`, reads) — it never mutates. `hash` confirms same-size files
+/// by content sha256 (server-side over SSH where possible). Same-class files are
+/// summarized but omitted from `entries` to keep the response focused.
+async fn op_diff(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    side_a_arg: Option<&str>,
+    path_a: &str,
+    side_b_arg: Option<&str>,
+    path_b: &str,
+    hash: bool,
 ) -> (u16, Value) {
-    let manager = app.state::<AppState>().sessions.clone();
-    let Some(sess) = manager.get(session_id).await else {
-        return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
+    if path_a.is_empty() || path_b.is_empty() {
+        return (400, json!({"error": "pathA and pathB are required"}));
+    }
+    let side_a = match resolve_diff_side(app, state, side_a_arg).await {
+        Ok(v) => v,
+        Err(msg) => return (400, json!({ "error": msg })),
     };
-    let name = sess.profile().name.clone();
+    let side_b = match resolve_diff_side(app, state, side_b_arg).await {
+        Ok(v) => v,
+        Err(msg) => return (400, json!({ "error": msg })),
+    };
+
+    // Need a server side to authorize against — a purely local↔local diff has no
+    // session, and that's what `faro-cli diff` is for.
+    let gate_side = side_a.as_ref().or(side_b.as_ref());
+    let Some((gate_id, gate_name, _)) = gate_side else {
+        return (400, json!({"error": "faro_diff needs at least one connected server side (a local↔local diff has no session to authorize); use the `faro-cli diff` command for two local folders."}));
+    };
+    let gate_id = gate_id.clone();
+    let gate_name = gate_name.clone();
+
+    let label_a = diff_side_label(&side_a, path_a);
+    let label_b = diff_side_label(&side_b, path_b);
+    let summary_text = format!(
+        "Diff {label_a} ↔ {label_b}{}",
+        if hash { " (hashing content)" } else { "" }
+    );
+
+    // Walking (and hashing) both trees is a read; gate before ANY I/O so the
+    // listing itself is covered by the user's read policy.
     if let Err(resp) = gate(
         app,
         state,
-        session_id,
-        &name,
+        &gate_id,
+        &gate_name,
         OpClass::Read,
-        "search",
-        &format!("search \"{query}\" in {root}"),
+        "diff",
+        &summary_text,
         None,
     )
     .await
@@ -2694,50 +3675,173 @@ pub(crate) async fn op_search(
         return resp;
     }
 
-    let fs = crate::commands::fs_for_session(&sess);
-    let needle = query.to_lowercase();
-    let mut hits: Vec<Value> = Vec::new();
-    let mut stack: Vec<(String, usize)> = vec![(root.to_string(), 0)];
-    let mut visited = 0usize;
-    while let Some((dir, depth)) = stack.pop() {
-        if hits.len() >= SEARCH_MAX_RESULTS || visited >= SEARCH_MAX_DIRS {
-            break;
+    let fs_a = diff_side_fs(&side_a);
+    let fs_b = diff_side_fs(&side_b);
+    let sess_a = side_a.as_ref().map(|(_, _, s)| s.as_ref());
+    let sess_b = side_b.as_ref().map(|(_, _, s)| s.as_ref());
+
+    let result = match crate::diff::diff(
+        fs_a.as_ref(),
+        path_a,
+        sess_a,
+        fs_b.as_ref(),
+        path_b,
+        sess_b,
+        hash,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            state
+                .log(
+                    app,
+                    activity("error", &gate_id, format!("diff {label_a} ↔ {label_b} — {e}"), false),
+                )
+                .await;
+            return (500, json!({"error": format!("{e:#}")}));
         }
-        visited += 1;
-        let entries = match fs.list_dir(&dir).await {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries {
-            if entry.name.to_lowercase().contains(&needle) {
-                hits.push(json!({
-                    "name": entry.name,
-                    "path": entry.path,
-                    "kind": entry.kind,
-                    "size": entry.size,
-                }));
-                if hits.len() >= SEARCH_MAX_RESULTS {
-                    break;
-                }
-            }
-            if matches!(entry.kind, FileKind::Directory) && depth < SEARCH_MAX_DEPTH {
-                stack.push((entry.path.clone(), depth + 1));
-            }
-        }
-    }
-    let truncated = hits.len() >= SEARCH_MAX_RESULTS || visited >= SEARCH_MAX_DIRS;
+    };
+
+    let s = &result.summary;
     state
         .log(
             app,
             activity(
-                "search",
-                session_id,
-                format!("search \"{query}\" in {root} ({} hits)", hits.len()),
+                "diff",
+                &gate_id,
+                format!(
+                    "diff {label_a} ↔ {label_b} — {} only in A, {} only in B, {} differ, {} same",
+                    s.only_in_a, s.only_in_b, s.different, s.same
+                ),
                 true,
             ),
         )
         .await;
-    (200, json!({ "matches": hits, "truncated": truncated }))
+
+    // Only the actual differences go in `entries` (same-class files are noise for
+    // an agent); the summary still counts them all.
+    let diffs: Vec<&crate::diff::DiffEntry> = result
+        .entries
+        .iter()
+        .filter(|e| e.class != crate::diff::DiffClass::Same)
+        .collect();
+    let list_truncated = diffs.len() > DIFF_MAX_ENTRIES;
+    let entries: Vec<Value> = diffs
+        .iter()
+        .take(DIFF_MAX_ENTRIES)
+        .filter_map(|e| serde_json::to_value(e).ok())
+        .collect();
+
+    (
+        200,
+        json!({
+            "rootA": result.root_a,
+            "rootB": result.root_b,
+            "hashed": result.hashed,
+            "summary": {
+                "onlyInA": s.only_in_a,
+                "onlyInB": s.only_in_b,
+                "different": s.different,
+                "same": s.same,
+                "total": s.total,
+            },
+            "entries": entries,
+            "listTruncated": list_truncated,
+        }),
+    )
+}
+
+/// Build a [`crate::search::SearchQuery`] from a JSON body / MCP args object.
+/// Shared by the HTTP `/search` handler, the `faro_search` MCP dispatch, and the
+/// agent tool router — all hand in a `serde_json::Value` object with the same
+/// field names. The hit cap is clamped to `SEARCH_MAX_RESULTS` so an agent
+/// response stays lean.
+pub(crate) fn build_search_query(v: &Value, pattern: String) -> crate::search::SearchQuery {
+    use crate::search::{SearchKind, SearchQuery, DEFAULT_MAX_FILE_BYTES};
+    let regex = v.get("regex").and_then(|x| x.as_bool()).unwrap_or(false);
+    // `--regex` (or explicit content) selects content grep; otherwise name search.
+    let content = regex || v.get("content").and_then(|x| x.as_bool()).unwrap_or(false);
+    let str_arr = |key: &str| {
+        v.get(key)
+            .and_then(|a| a.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let max = v
+        .get("maxResults")
+        .and_then(|x| x.as_u64())
+        .map(|n| (n as usize).clamp(1, SEARCH_MAX_RESULTS))
+        .unwrap_or(SEARCH_MAX_RESULTS);
+    SearchQuery {
+        pattern,
+        kind: if content { SearchKind::Content } else { SearchKind::Name },
+        regex,
+        case_sensitive: v.get("caseSensitive").and_then(|x| x.as_bool()).unwrap_or(false),
+        include_globs: str_arr("include"),
+        exclude_globs: str_arr("exclude"),
+        content_remote: v.get("contentRemote").and_then(|x| x.as_bool()).unwrap_or(false),
+        max_results: max,
+        max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+    }
+}
+
+/// Search a connected server by file **name** or by **content** (Plan 7). Runs
+/// through the shared search engine, so content grep uses the server-side
+/// `rg`/`grep` fast path on SSH/agent and object stores name-match a flat key
+/// listing. Gated ONCE as a READ (like `glob`/`tail`, it only walks/greps — it
+/// never mutates).
+pub(crate) async fn op_search(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    root: &str,
+    query: &crate::search::SearchQuery,
+) -> (u16, Value) {
+    use crate::search::SearchKind;
+    let manager = app.state::<AppState>().sessions.clone();
+    let Some(sess) = manager.get(session_id).await else {
+        return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
+    };
+    let name = sess.profile().name.clone();
+    let kind_label = match query.kind {
+        SearchKind::Name => "name",
+        SearchKind::Content => "content",
+    };
+    let summary = format!("{kind_label} search \"{}\" in {root}", query.pattern);
+    if let Err(resp) = gate(app, state, session_id, &name, OpClass::Read, "search", &summary, None).await {
+        return resp;
+    }
+
+    let fs = crate::commands::fs_for_session(&sess);
+    match crate::search::search(fs.as_ref(), Some(sess.as_ref()), root, query).await {
+        Ok(result) => {
+            let matches: Vec<Value> =
+                result.hits.iter().filter_map(|h| serde_json::to_value(h).ok()).collect();
+            state
+                .log(
+                    app,
+                    activity("search", session_id, format!("{summary} ({} hits)", matches.len()), true),
+                )
+                .await;
+            (
+                200,
+                json!({
+                    "kind": kind_label,
+                    "strategy": result.stats.strategy,
+                    "truncated": result.stats.truncated,
+                    "note": result.stats.note,
+                    "matches": matches,
+                }),
+            )
+        }
+        Err(e) => {
+            state
+                .log(app, activity("error", session_id, format!("{summary} — {e}"), false))
+                .await;
+            (400, json!({"error": format!("{e:#}")}))
+        }
+    }
 }
 
 /// Status of a transfer the agent previously started. No gate — the agent owns
@@ -2951,6 +4055,423 @@ pub(crate) async fn op_context(app: &AppHandle, state: &Arc<BridgeState>) -> (u1
     )
 }
 
+// ---- Skills runner (Plan 8) ----
+
+/// How many targets a fleet run touches at once. Steps run in order *within* a
+/// target; this bounds the fan-out *across* targets.
+const SKILL_MAX_CONCURRENCY: usize = 4;
+/// Per-stream cap on a step's stdout/stderr in the aggregated run result, so a
+/// noisy fleet run doesn't balloon an MCP/CLI response (the live console still
+/// shows the full, un-clipped output — this only trims the summary).
+const SKILL_STEP_OUTPUT_CAP: usize = 16 * 1024;
+
+/// Merge a Skill's declared defaults with the caller-provided values (provided
+/// wins), then verify every required param resolved. The returned map is what
+/// `${param}` placeholders substitute from.
+fn build_param_map(
+    skill: &Skill,
+    provided: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, String> {
+    let mut map: HashMap<String, String> = HashMap::new();
+    for p in &skill.params {
+        if let Some(d) = &p.default {
+            map.insert(p.name.clone(), d.clone());
+        }
+    }
+    for (k, v) in provided {
+        map.insert(k.clone(), v.clone());
+    }
+    for p in &skill.params {
+        if p.required && !map.contains_key(&p.name) {
+            return Err(format!("missing required parameter '{}'", p.name));
+        }
+    }
+    Ok(map)
+}
+
+/// Substitute `${name}` placeholders in a step's command template. Values are
+/// inserted verbatim (not shell-escaped) — matching the raw-shell model of
+/// `faro_exec` and saved commands, where the author writes the shell. The dry-run
+/// preview and the one confirm gate both show the fully resolved command, so any
+/// interpolation is visible before it runs.
+fn substitute(template: &str, params: &HashMap<String, String>) -> String {
+    let mut out = template.to_string();
+    for (k, v) in params {
+        out = out.replace(&format!("${{{k}}}"), v);
+    }
+    out
+}
+
+/// One-line human summary of a Skill's default target selector (for tool
+/// descriptions).
+fn target_summary(sel: &TargetSelector) -> String {
+    if sel.all {
+        "Runs on ALL connected exec-capable servers by default.".to_string()
+    } else if sel.sessions.is_empty() {
+        "No default targets — pass `targets` to choose servers.".to_string()
+    } else {
+        format!("Default targets: {}.", sel.sessions.join(", "))
+    }
+}
+
+/// Trim a stream to `max` bytes on a UTF-8 boundary, with a marker.
+fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n… [output clipped]", &s[..end])
+}
+
+/// Resolve a Skill's targets to concrete, enabled, exec-capable sessions.
+/// `override_targets` (from the run call) wins over the skill's default selector;
+/// the literal `"all"` (in either) expands to every enabled exec session. Returns
+/// `(runnable, skipped)` — `skipped` names each requested target that couldn't
+/// run and why, so a fan-out never silently drops a server.
+async fn resolve_skill_targets(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    skill: &Skill,
+    override_targets: Option<&[String]>,
+) -> (Vec<(String, String, bool)>, Vec<(String, String)>) {
+    let all = enabled_sessions(app, state).await; // (id, name, BackendKind)
+    let mut runnable: Vec<(String, String, bool)> = Vec::new();
+    let mut skipped: Vec<(String, String)> = Vec::new();
+
+    let (use_all, explicit): (bool, Vec<String>) = match override_targets {
+        Some(list) if !list.is_empty() => {
+            if list.iter().any(|t| t.eq_ignore_ascii_case("all")) {
+                (true, Vec::new())
+            } else {
+                (false, list.to_vec())
+            }
+        }
+        _ => (skill.targets.all, skill.targets.sessions.clone()),
+    };
+
+    let classify = |kind: &BackendKind| -> Option<bool> {
+        match kind {
+            BackendKind::Ssh => Some(false),
+            BackendKind::Agent => Some(true),
+            BackendKind::Other => None,
+        }
+    };
+
+    if use_all {
+        for (id, name, kind) in &all {
+            match classify(kind) {
+                Some(is_agent) => runnable.push((id.clone(), name.clone(), is_agent)),
+                None => skipped.push((name.clone(), "not exec-capable (read-only backend)".into())),
+            }
+        }
+        return (runnable, skipped);
+    }
+
+    for t in explicit {
+        match all
+            .iter()
+            .find(|(id, name, _)| *id == t || name.eq_ignore_ascii_case(&t))
+        {
+            Some((id, name, kind)) => match classify(kind) {
+                Some(is_agent) => runnable.push((id.clone(), name.clone(), is_agent)),
+                None => skipped.push((name.clone(), "not exec-capable (read-only backend)".into())),
+            },
+            None => skipped.push((t.clone(), "no connection with agent access matches this name/id".into())),
+        }
+    }
+    // A name could resolve to the same session twice — dedupe by id.
+    runnable.sort_by(|a, b| a.0.cmp(&b.0));
+    runnable.dedup_by(|a, b| a.0 == b.0);
+    (runnable, skipped)
+}
+
+/// Summarize one finished step into `(ok, json)`. `ok` folds exit code + timeout;
+/// output streams are clipped for the aggregate (the live console keeps the full
+/// text).
+fn summarize_step(n: usize, label: &str, command: &str, status: u16, body: &Value) -> (bool, Value) {
+    if status == 200 {
+        let exit = body.get("exitCode").and_then(|v| v.as_i64());
+        let timed_out = body.get("timedOut").and_then(|v| v.as_bool()).unwrap_or(false);
+        let ok = !timed_out && exit.unwrap_or(0) == 0;
+        (
+            ok,
+            json!({
+                "step": n,
+                "name": label,
+                "command": command,
+                "ok": ok,
+                "exitCode": exit,
+                "stdout": clip(body.get("stdout").and_then(|v| v.as_str()).unwrap_or(""), SKILL_STEP_OUTPUT_CAP),
+                "stderr": clip(body.get("stderr").and_then(|v| v.as_str()).unwrap_or(""), SKILL_STEP_OUTPUT_CAP),
+                "truncated": body.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false),
+                "timedOut": timed_out,
+            }),
+        )
+    } else {
+        (
+            false,
+            json!({
+                "step": n,
+                "name": label,
+                "command": command,
+                "ok": false,
+                "error": body.get("error").and_then(|v| v.as_str()).unwrap_or("error"),
+            }),
+        )
+    }
+}
+
+/// Run a Skill's (already substituted) steps in order on one target, collecting a
+/// per-step result. Each step reuses the exec path (`exec_core` / `exec_core_agent`)
+/// so it streams to the Agent Console and lands in the audit log — the skill run
+/// was already approved once, so no per-step gate. Stops the remaining steps on
+/// the first failure when `stop_on_error`.
+#[allow(clippy::too_many_arguments)]
+async fn run_skill_on_target(
+    app: AppHandle,
+    state: Arc<BridgeState>,
+    session_id: String,
+    session_name: String,
+    is_agent: bool,
+    skill_name: String,
+    steps: Vec<(String, String)>, // (label, resolved command)
+    stop_on_error: bool,
+    timeout: Duration,
+) -> Value {
+    let manager = app.state::<AppState>().sessions.clone();
+    let mut step_results: Vec<Value> = Vec::new();
+    let mut target_ok = true;
+    for (i, (label, command)) in steps.iter().enumerate() {
+        let n = i + 1;
+        let console_label = format!("[{skill_name} · step {n}] {label}");
+        let (status, body) = if is_agent {
+            match manager.get_agent(&session_id).await {
+                Some(agent) => {
+                    exec_core_agent(&app, &state, &agent, &session_id, &session_name, command, &console_label, timeout).await
+                }
+                None => (500, json!({"error": "session went away"})),
+            }
+        } else {
+            match manager.get_ssh(&session_id).await {
+                Some(ssh) => {
+                    exec_core(&app, &state, &ssh, &session_id, &session_name, command, &console_label, timeout).await
+                }
+                None => (500, json!({"error": "session went away"})),
+            }
+        };
+        let (ok, sr) = summarize_step(n, label, command, status, &body);
+        step_results.push(sr);
+        if !ok {
+            target_ok = false;
+            if stop_on_error {
+                break;
+            }
+        }
+    }
+    json!({
+        "sessionId": session_id,
+        "sessionName": session_name,
+        "ok": target_ok,
+        "steps": step_results,
+    })
+}
+
+/// Run a Skill across its resolved targets (Plan 8). Validates params, resolves
+/// targets (override wins over the skill's default), and either previews
+/// (`dry_run`) or executes. A real run refuses a proposal (needs human approval),
+/// gates ONCE over the whole fleet (only allow-all auto-approves), then fans out
+/// with bounded concurrency and aggregates a per-target success/fail summary.
+pub(crate) async fn op_run_skill(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    skill_ref: &str,
+    params: HashMap<String, String>,
+    target_override: Option<Vec<String>>,
+    dry_run: bool,
+) -> (u16, Value) {
+    let Some(skill) = state.find_skill(skill_ref).await else {
+        return (404, json!({"error": format!("no skill named '{skill_ref}'")}));
+    };
+
+    let param_map = match build_param_map(&skill, &params) {
+        Ok(m) => m,
+        Err(msg) => return (400, json!({"error": msg})),
+    };
+
+    if skill.steps.is_empty() {
+        return (400, json!({"error": "this skill has no steps"}));
+    }
+
+    let (runnable, skipped) =
+        resolve_skill_targets(app, state, &skill, target_override.as_deref()).await;
+    let skipped_json: Vec<Value> = skipped
+        .iter()
+        .map(|(t, r)| json!({"target": t, "reason": r}))
+        .collect();
+
+    // Resolve every step's command once (reused across targets).
+    let steps: Vec<(String, String)> = skill
+        .steps
+        .iter()
+        .map(|s| {
+            let cmd = substitute(&s.command, &param_map);
+            let label = if s.name.trim().is_empty() { cmd.clone() } else { s.name.clone() };
+            (label, cmd)
+        })
+        .collect();
+
+    // Dry run: pure string substitution — no server is contacted, so no gate and
+    // no proposal block. Returns the resolved commands per target for preview.
+    if dry_run {
+        let auto = state.policy.lock().await.allow_all;
+        let targets_json: Vec<Value> = runnable
+            .iter()
+            .map(|(id, name, _)| {
+                json!({
+                    "sessionId": id,
+                    "sessionName": name,
+                    "commands": steps.iter().map(|(_, c)| json!(c)).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        return (
+            200,
+            json!({
+                "dryRun": true,
+                "skill": skill.name,
+                "proposal": skill.status == SkillStatus::Proposed,
+                "stepCount": steps.len(),
+                "targets": targets_json,
+                "skipped": skipped_json,
+                "needsApproval": !auto,
+            }),
+        );
+    }
+
+    // A proposal is not runnable until a human approves it in the Skills panel.
+    if skill.status == SkillStatus::Proposed {
+        return (
+            403,
+            json!({"error": format!(
+                "skill '{}' is a proposal awaiting human approval — approve it in Faro's Skills panel before running it",
+                skill.name
+            )}),
+        );
+    }
+
+    if runnable.is_empty() {
+        return (
+            400,
+            json!({
+                "error": "no runnable targets for this skill — need at least one SSH or Faro Agent connection with agent access granted",
+                "skipped": skipped_json,
+            }),
+        );
+    }
+
+    // One confirm gate covers the whole fleet run. A skill fans arbitrary
+    // multi-step commands across many servers, so ONLY allow-all auto-approves —
+    // the read-only safe-exec heuristic never applies to a whole skill.
+    let target_names: Vec<&str> = runnable.iter().map(|(_, n, _)| n.as_str()).collect();
+    let summary = format!(
+        "Run skill \"{}\" on {} server{} ({}) — {} step{} each",
+        skill.name,
+        runnable.len(),
+        if runnable.len() == 1 { "" } else { "s" },
+        target_names.join(", "),
+        steps.len(),
+        if steps.len() == 1 { "" } else { "s" },
+    );
+    let auto = state.policy.lock().await.allow_all;
+    if !auto {
+        let (gate_id, gate_name, _) = &runnable[0];
+        let approved = state
+            .request_approval(app, gate_id, gate_name, "skill", &summary)
+            .await;
+        if !approved {
+            state
+                .log(app, activity("denied", gate_id, summary.clone(), false))
+                .await;
+            return (
+                403,
+                json!({"error": "the user denied or did not respond to the skill run approval in Faro. Ask before trying again."}),
+            );
+        }
+    }
+
+    // Fan out across targets with bounded concurrency.
+    let timeout = EXEC_TIMEOUT;
+    let concurrency = SKILL_MAX_CONCURRENCY.min(runnable.len().max(1));
+    let sem = Arc::new(tokio::sync::Semaphore::new(concurrency));
+    let mut set = tokio::task::JoinSet::new();
+    for (id, name, is_agent) in runnable.clone() {
+        let app = app.clone();
+        let state = state.clone();
+        let steps = steps.clone();
+        let sem = sem.clone();
+        let skill_name = skill.name.clone();
+        let stop_on_error = skill.stop_on_error;
+        set.spawn(async move {
+            let _permit = sem.acquire().await;
+            run_skill_on_target(
+                app, state, id, name, is_agent, skill_name, steps, stop_on_error, timeout,
+            )
+            .await
+        });
+    }
+    let mut results: Vec<Value> = Vec::new();
+    while let Some(r) = set.join_next().await {
+        if let Ok(v) = r {
+            results.push(v);
+        }
+    }
+    results.sort_by(|a, b| {
+        a.get("sessionName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .cmp(b.get("sessionName").and_then(|v| v.as_str()).unwrap_or(""))
+    });
+    let succeeded = results
+        .iter()
+        .filter(|r| r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false))
+        .count();
+    let failed = results.len() - succeeded;
+
+    state
+        .log(
+            app,
+            activity(
+                "skill",
+                &runnable[0].0,
+                format!(
+                    "skill \"{}\" on {} server(s) — {} ok, {} failed",
+                    skill.name,
+                    results.len(),
+                    succeeded,
+                    failed
+                ),
+                failed == 0,
+            ),
+        )
+        .await;
+
+    (
+        200,
+        json!({
+            "skill": skill.name,
+            "status": "completed",
+            "targetCount": results.len(),
+            "succeeded": succeeded,
+            "failed": failed,
+            "results": results,
+            "skipped": skipped_json,
+        }),
+    )
+}
+
 // ---- MCP (Model Context Protocol) over Streamable HTTP ----
 //
 // One stateless JSON-RPC endpoint. Claude Code connects with:
@@ -2981,7 +4502,7 @@ async fn handle_mcp(
     let result: Result<Value, (i64, String)> = match method {
         "initialize" => Ok(mcp_initialize(&params)),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(mcp_tools_list()),
+        "tools/list" => Ok(mcp_tools_list(state).await),
         "tools/call" => Ok(mcp_tools_call(app, state, &params).await),
         other => Err((-32601, format!("method not found: {other}"))),
     };
@@ -3038,12 +4559,12 @@ fn mcp_initialize(params: &Value) -> Value {
     })
 }
 
-fn mcp_tools_list() -> Value {
+async fn mcp_tools_list(state: &Arc<BridgeState>) -> Value {
     let session_prop = json!({
         "type": "string",
         "description": "Session id or name. Optional when only one session is available."
     });
-    json!({
+    let mut base = json!({
         "tools": [
             {
                 "name": "faro_context",
@@ -3074,9 +4595,39 @@ fn mcp_tools_list() -> Value {
                         "command": { "type": "string", "description": "The command to run. Keep it non-interactive (no pagers/prompts). Prefer read-only status and diagnostic commands. `sudo` is supported: when the user has enabled it, Faro answers sudo's password prompt with their connection password — so just write `sudo <cmd>` normally; do NOT add `-S`, a password, or `echo <pw> |`." },
                         "dryRun": { "type": "boolean", "description": "If true, return a preview of what would run and whether it would need approval, without executing." },
                         "timeoutMs": { "type": "integer", "description": "Optional timeout in milliseconds for commands that legitimately run long (builds, backups). Default 60000; clamped to [1000, 900000]. The 512 KiB output cap is unchanged." },
+                        "detach": { "type": "boolean", "description": "Launch the command as a BACKGROUND job and return a jobId immediately instead of waiting — for multi-minute work (backfills, migrations) that would blow the timeout. Poll it with faro_job. Works on SSH servers and paired Faro Agent machines. On SSH the job keeps running server-side even across bridge restarts; on a Faro Agent it runs until the job finishes or the daemon restarts. A Faro Agent must run faro-agentd from Plan 10 or newer." },
                         "session": session_prop
                     },
                     "required": ["command"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "faro_job",
+                "description": "Poll a background job started by faro_exec with detach=true (on an SSH server or a paired Faro Agent). Returns whether it's still running, its exit code once finished, and its captured stdout/stderr (each capped at 512 KiB). Call repeatedly until running is false.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "jobId": { "type": "string", "description": "The jobId returned by a detached faro_exec." },
+                        "session": session_prop
+                    },
+                    "required": ["jobId"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "faro_exec_script",
+                "description": "Run a whole multi-line script on a connected computer in Faro (SSH server or paired Faro Agent machine) WITHOUT the base64/heredoc/quoting gymnastics a single-line `faro_exec` forces. Pass the script's exact source in `script`; it runs verbatim in the target's native shell (sh on POSIX/SSH, sh or PowerShell on a Faro Agent — check faro_server_info) so heredocs, nested quotes and newlines all survive. Use this instead of `faro_exec` whenever the program spans multiple lines or contains quoting that is awkward to escape. Always prompts for approval (a script is never auto-approved by the safe-read-only heuristic). Returns stdout, stderr and exit code; output is capped at 512 KiB.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "script": { "type": "string", "description": "The full script source to run, verbatim (multi-line allowed). It is NOT re-parsed at a shell boundary, so write it exactly as you would a local .sh/.ps1 file." },
+                        "label": { "type": "string", "description": "Optional friendly name shown in Faro's console + audit log (e.g. a filename or purpose). The script body itself is never dumped there." },
+                        "dryRun": { "type": "boolean", "description": "If true, return a preview (byte/line count, whether it would need approval) without running." },
+                        "timeoutMs": { "type": "integer", "description": "Optional timeout in milliseconds. Default 60000; clamped to [1000, 900000]." },
+                        "session": session_prop
+                    },
+                    "required": ["script"],
                     "additionalProperties": false
                 }
             },
@@ -3107,12 +4658,18 @@ fn mcp_tools_list() -> Value {
             },
             {
                 "name": "faro_search",
-                "description": "Find files/directories on the user's connected server whose name contains a substring (case-insensitive), recursively under a root path. Works for all protocols. Bounded in depth and results.",
+                "description": "Search a connected server by file NAME or by CONTENT (grep), recursively under a root path. Works on ANY protocol. NAME search (default) matches each entry's name — a pattern with '*'/'?' is a glob (e.g. '*.log'), otherwise a case-insensitive substring; it returns files AND directories. CONTENT search (set content=true, or regex=true) greps inside files: on SSH / Faro Agent servers it runs ripgrep/grep SERVER-SIDE (fast, no download) and returns matching lines with line numbers + previews; on object stores / FTP / WebDAV / cloud it must DOWNLOAD each file, so it's refused unless you set contentRemote=true. Use include/exclude name globs to scope which files are considered. Read-only. Results are capped (see truncated); the `strategy` field says which path ran (shell = server-side grep, generic = walk, objectFlat = bucket listing).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "query": { "type": "string", "description": "Case-insensitive substring to match against entry names." },
+                        "query": { "type": "string", "description": "What to look for: a name glob/substring, or (with content/regex) the grep pattern." },
                         "path": { "type": "string", "description": "Root directory to search under. Defaults to \".\"." },
+                        "content": { "type": "boolean", "description": "Grep file CONTENTS instead of matching names. Default false." },
+                        "regex": { "type": "boolean", "description": "Treat the content pattern as a regular expression (implies content). Default false = literal." },
+                        "caseSensitive": { "type": "boolean", "description": "Case-sensitive matching. Default false." },
+                        "include": { "type": "array", "items": { "type": "string" }, "description": "Only consider files whose name matches one of these globs (e.g. ['*.rs','*.toml'])." },
+                        "exclude": { "type": "array", "items": { "type": "string" }, "description": "Skip files whose name matches any of these globs." },
+                        "contentRemote": { "type": "boolean", "description": "Allow content search to DOWNLOAD every file on backends with no server-side grep (object stores, FTP, WebDAV, cloud). Default false." },
                         "session": session_prop
                     },
                     "required": ["query"],
@@ -3189,6 +4746,21 @@ fn mcp_tools_list() -> Value {
                 }
             },
             {
+                "name": "faro_write",
+                "description": "Write text straight into a file on the user's connected SSH server or paired Faro Agent machine — no local staging file, no upload. Use this to drop a small debug script, a config snippet, or a one-file patch directly on the server (SSH streams it via SFTP; a Faro Agent via a ranged write). By default it will NOT overwrite an existing file — set overwrite=true to replace. Approved as a write in Faro (never auto-approved except by allow-all). Content is bounded by a ~1 MiB request cap; for larger files use faro_upload. Returns the path and bytes written.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Absolute remote file path to write." },
+                        "content": { "type": "string", "description": "The exact text to write into the file (verbatim; written as UTF-8)." },
+                        "overwrite": { "type": "boolean", "description": "Replace the file if it already exists. Default false (a collision errors)." },
+                        "session": session_prop
+                    },
+                    "required": ["path", "content"],
+                    "additionalProperties": false
+                }
+            },
+            {
                 "name": "faro_upload_dir",
                 "description": "Upload a whole local directory tree into a directory on the user's connected server via Faro's transfer engine. The local directory is recreated INSIDE remoteDir (uploading /a/dist to /srv gives /srv/dist/…); remote subdirectories are created automatically and one transfer is queued per file. The user approves the WHOLE tree once — the prompt shows the file count, total size and overwrite mode. By default existing remote files are kept and colliding uploads are renamed (_1, _2, …); set overwrite=true to replace them. Returns transferIds plus counts; poll faro_transfer_status to confirm completion.",
                 "inputSchema": {
@@ -3217,6 +4789,22 @@ fn mcp_tools_list() -> Value {
                         "session": session_prop
                     },
                     "required": ["localDir", "remoteDir"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "faro_diff",
+                "description": "Compare two directory trees and get back the classified differences — which files are only on side A, only on side B, or present on both but differing. Works across ANY two of the user's connected backends, including remote↔remote (staging vs prod, two servers, two buckets), which a local diff tool can't do. Each side is a connected server (its name/id) plus a path, or the local filesystem (omit the session, or pass \"local\"); at least one side must be a server. By default files are compared by SIZE (cheap, no download); set hash=true to also confirm same-size files by content sha256 (server-side over SSH where possible, otherwise it reads the bytes — slower, so use it when a size match isn't conclusive). Read-only: it never changes anything, so it's gated as a read. Returns a summary (onlyInA/onlyInB/different/same counts) and the differing entries (same files are counted but omitted; the list is capped, see listTruncated). Use it to answer 'what's different between these two trees?' and then act (e.g. faro_sync the files that differ).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "sessionA": { "type": "string", "description": "Side A connection (name or id). Omit, or pass \"local\", for the local filesystem." },
+                        "pathA": { "type": "string", "description": "Directory path on side A." },
+                        "sessionB": { "type": "string", "description": "Side B connection (name or id). Omit, or pass \"local\", for the local filesystem." },
+                        "pathB": { "type": "string", "description": "Directory path on side B." },
+                        "hash": { "type": "boolean", "description": "Confirm same-size files by content hash (sha256). Default false (size only)." }
+                    },
+                    "required": ["pathA", "pathB"],
                     "additionalProperties": false
                 }
             },
@@ -3264,8 +4852,158 @@ fn mcp_tools_list() -> Value {
                     "required": ["name"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "faro_list_skills",
+                "description": "List the user's saved SKILLS — named, parameterized, multi-step workflows that fan shell commands across one or more of the user's connected servers (a Skill is the fleet-automation layer above a saved command). Returns each skill's name, description, parameters, step count, default targets, and status (approved = runnable; proposed = an AI-authored skill still awaiting the user's approval). Each APPROVED skill is also exposed as its own skill_<name> tool. Use this to discover what fleet workflows exist before composing raw commands.",
+                "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+            },
+            {
+                "name": "faro_run_skill",
+                "description": "Run one of the user's saved SKILLS by name across one or many connected servers. Provide `params` for the skill's declared parameters and, optionally, `targets` to override which servers it runs on (names/ids, or [\"all\"] for every exec-capable connection); omit `targets` to use the skill's configured default. ALWAYS run with dryRun=true first and show the user the resolved commands per target — a dry run substitutes params and lists what would run without contacting any server. A real run asks the user to approve the WHOLE fleet run once (unless they've enabled allow-all), then executes each step in order on every target, returning a per-target success/fail summary. A proposed (AI-authored) skill can be dry-run but must be human-approved in Faro before it will actually run.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "The skill's name (see faro_list_skills)." },
+                        "params": { "type": "object", "description": "Values for the skill's declared parameters, as a { name: value } object.", "additionalProperties": { "type": "string" } },
+                        "targets": { "type": "array", "items": { "type": "string" }, "description": "Override which servers to run on: connection names/ids, or [\"all\"] for every exec-capable connection. Omit to use the skill's default targets." },
+                        "dryRun": { "type": "boolean", "description": "Preview the resolved commands per target without running anything. Do this first." }
+                    },
+                    "required": ["name"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "faro_save_skill",
+                "description": "Compose and save a new SKILL — a named, parameterized, multi-step shell workflow — for the user to run across their fleet. This is how you author fleet automations: describe the steps as shell command templates using ${paramName} placeholders, declare the parameters, and set default targets. The skill is saved as a PROPOSAL: it does NOT run until the user reviews and approves it in Faro's Skills panel (you cannot approve your own skill). After saving, tell the user a proposal is waiting for their approval. Keep skills linear (a simple ordered list of steps) and prefer safe, idempotent commands.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Short, unique skill name (used as its skill_<name> tool once approved)." },
+                        "description": { "type": "string", "description": "What the skill does and when to use it." },
+                        "params": {
+                            "type": "array",
+                            "description": "Declared parameters the steps interpolate via ${name}.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string" },
+                                    "description": { "type": "string" },
+                                    "required": { "type": "boolean" },
+                                    "default": { "type": "string" }
+                                },
+                                "required": ["name"]
+                            }
+                        },
+                        "steps": {
+                            "type": "array",
+                            "description": "Ordered shell steps. Each command may use ${param} placeholders.",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": { "type": "string", "description": "Optional label for the step." },
+                                    "command": { "type": "string", "description": "Shell command template to run on each target." }
+                                },
+                                "required": ["command"]
+                            }
+                        },
+                        "targets": {
+                            "type": "object",
+                            "description": "Default servers to run on.",
+                            "properties": {
+                                "all": { "type": "boolean", "description": "Run on every exec-capable connection." },
+                                "sessions": { "type": "array", "items": { "type": "string" }, "description": "Specific connection names/ids." }
+                            }
+                        },
+                        "stopOnError": { "type": "boolean", "description": "Halt a target's remaining steps after the first failing step. Default true." }
+                    },
+                    "required": ["name", "steps"],
+                    "additionalProperties": false
+                }
             }
         ]
+    });
+
+    // Expose each APPROVED skill as its own `skill_<name>` tool so the agent can
+    // invoke it directly (the "MCPs create skills" surface). Proposals stay
+    // hidden until a human approves them.
+    if let Some(arr) = base.get_mut("tools").and_then(|t| t.as_array_mut()) {
+        for skill in state.list_skills().await {
+            if skill.status == SkillStatus::Approved {
+                arr.push(skill_tool_def(&skill));
+            }
+        }
+    }
+    base
+}
+
+/// MCP tool name for a skill: `skill_<slug>` (the plan's `skill:<name>` — colons
+/// aren't allowed in MCP tool names, so non-alphanumerics collapse to `_`).
+fn skill_tool_name(name: &str) -> String {
+    let slug: String = name
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' })
+        .collect();
+    format!("skill_{}", slug.trim_matches('_'))
+}
+
+/// Build the per-skill MCP tool definition: one property per declared parameter,
+/// plus `targets` / `dryRun` overrides.
+fn skill_tool_def(skill: &Skill) -> Value {
+    let mut props = serde_json::Map::new();
+    let mut required: Vec<Value> = Vec::new();
+    for p in &skill.params {
+        props.insert(
+            p.name.clone(),
+            json!({
+                "type": "string",
+                "description": if p.description.trim().is_empty() {
+                    format!("Parameter {}", p.name)
+                } else {
+                    p.description.clone()
+                }
+            }),
+        );
+        if p.required {
+            required.push(json!(p.name));
+        }
+    }
+    props.insert(
+        "targets".into(),
+        json!({
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Override which servers to run on (names/ids, or [\"all\"]). Omit to use the skill's default targets."
+        }),
+    );
+    props.insert(
+        "dryRun".into(),
+        json!({
+            "type": "boolean",
+            "description": "Preview the resolved commands per target without running anything. Do this first."
+        }),
+    );
+    let desc = format!(
+        "Run the user's saved Skill \"{}\"{}. A Skill is a pre-authored, multi-step workflow that fans shell commands across the user's connected servers. {} It has {} step(s). Always dryRun=true first to preview, then run (the user approves the whole fleet run once).",
+        skill.name,
+        if skill.description.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", skill.description)
+        },
+        target_summary(&skill.targets),
+        skill.steps.len(),
+    );
+    json!({
+        "name": skill_tool_name(&skill.name),
+        "description": desc,
+        "inputSchema": {
+            "type": "object",
+            "properties": Value::Object(props),
+            "required": required,
+            "additionalProperties": false
+        }
     })
 }
 
@@ -3306,6 +5044,9 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
         let (_, body) = op_context(app, state).await;
         return tool_text(serde_json::to_string_pretty(&body).unwrap_or_default());
     }
+    if name == "faro_list_skills" {
+        return tool_text(serde_json::to_string_pretty(&skills_overview(state).await).unwrap_or_default());
+    }
 
     match name {
         "faro_run_command" => {
@@ -3337,13 +5078,53 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             };
             let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
             let timeout_ms = args.get("timeoutMs").and_then(|v| v.as_u64());
+            let detach = args.get("detach").and_then(|v| v.as_bool()).unwrap_or(false);
             // Exec works on SSH servers and paired Faro Agent machines alike.
             let session_id = match resolve_session(app, state, session_arg, SessionNeed::Exec).await {
                 Ok(id) => id,
                 Err(msg) => return tool_error(&msg),
             };
+            let (status, body) = if detach {
+                op_exec_detached(app, state, &session_id, &command, dry_run).await
+            } else {
+                exec_on(app, state, &session_id, &command, dry_run, timeout_ms).await
+            };
+            if status == 200 {
+                if dry_run || detach {
+                    tool_text(serde_json::to_string_pretty(&body).unwrap_or_default())
+                } else {
+                    tool_text(format_exec_result(&body))
+                }
+            } else {
+                tool_error(body.get("error").and_then(|v| v.as_str()).unwrap_or("error"))
+            }
+        }
+        "faro_job" => {
+            let Some(job_id) = arg_str(&args, "jobId") else {
+                return tool_error("`jobId` is required");
+            };
+            // SSH servers and Faro Agent machines both run detached jobs now.
+            let session_id = match resolve_session(app, state, session_arg, SessionNeed::Exec).await {
+                Ok(id) => id,
+                Err(msg) => return tool_error(&msg),
+            };
+            mcp_wrap(op_job(app, state, &session_id, &job_id).await)
+        }
+        "faro_exec_script" => {
+            let Some(script) = arg_str(&args, "script") else {
+                return tool_error("`script` is required");
+            };
+            let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
+            let timeout_ms = args.get("timeoutMs").and_then(|v| v.as_u64());
+            let label = arg_str(&args, "label")
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "a script".to_string());
+            let session_id = match resolve_session(app, state, session_arg, SessionNeed::Exec).await {
+                Ok(id) => id,
+                Err(msg) => return tool_error(&msg),
+            };
             let (status, body) =
-                exec_on(app, state, &session_id, &command, dry_run, timeout_ms).await;
+                exec_script_on(app, state, &session_id, &script, &label, dry_run, timeout_ms).await;
             if status == 200 {
                 if dry_run {
                     tool_text(serde_json::to_string_pretty(&body).unwrap_or_default())
@@ -3376,10 +5157,11 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             }
         }
         "faro_search" => {
-            let Some(query) = arg_str(&args, "query") else {
+            let Some(pattern) = arg_str(&args, "query") else {
                 return tool_error("`query` is required");
             };
             let root = arg_str(&args, "path").unwrap_or_else(|| ".".to_string());
+            let query = build_search_query(&args, pattern);
             match resolve_session(app, state, session_arg, SessionNeed::Any).await {
                 Ok(id) => mcp_wrap(op_search(app, state, &id, &root, &query).await),
                 Err(msg) => tool_error(&msg),
@@ -3447,6 +5229,18 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 Err(msg) => tool_error(&msg),
             }
         }
+        "faro_write" => {
+            let (Some(path), Some(content)) = (arg_str(&args, "path"), arg_str(&args, "content"))
+            else {
+                return tool_error("`path` and `content` are required");
+            };
+            let overwrite = args.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+            // Write targets SSH + Faro Agent (SFTP create / WriteChunk).
+            match resolve_session(app, state, session_arg, SessionNeed::Exec).await {
+                Ok(id) => mcp_wrap(op_write(app, state, &id, &path, content.as_bytes(), overwrite).await),
+                Err(msg) => tool_error(&msg),
+            }
+        }
         "faro_upload_dir" => {
             let (Some(local_dir), Some(remote_dir)) =
                 (arg_str(&args, "localDir"), arg_str(&args, "remoteDir"))
@@ -3485,6 +5279,29 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 Err(msg) => tool_error(&msg),
             }
         }
+        "faro_diff" => {
+            let (Some(path_a), Some(path_b)) = (arg_str(&args, "pathA"), arg_str(&args, "pathB"))
+            else {
+                return tool_error("`pathA` and `pathB` are required");
+            };
+            // A missing / "local" session on a side means the local filesystem;
+            // op_diff resolves each side and gates against a server side.
+            let side_a = arg_str(&args, "sessionA");
+            let side_b = arg_str(&args, "sessionB");
+            let hash = args.get("hash").and_then(|v| v.as_bool()).unwrap_or(false);
+            mcp_wrap(
+                op_diff(
+                    app,
+                    state,
+                    side_a.as_deref(),
+                    &path_a,
+                    side_b.as_deref(),
+                    &path_b,
+                    hash,
+                )
+                .await,
+            )
+        }
         "faro_transfer_status" => {
             let Some(transfer_id) = arg_str(&args, "transferId") else {
                 return tool_error("`transferId` is required");
@@ -3496,8 +5313,82 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             // session_arg is resolved + gated inside op_history only when present.
             mcp_wrap(op_history(app, state, session_arg, limit).await)
         }
+        "faro_run_skill" => {
+            let Some(skill_name) = arg_str(&args, "name") else {
+                return tool_error("`name` is required");
+            };
+            let params = params_from_value(args.get("params"));
+            let targets = str_array(args.get("targets"));
+            let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
+            mcp_wrap(op_run_skill(app, state, &skill_name, params, targets, dry_run).await)
+        }
+        "faro_save_skill" => match serde_json::from_value::<Skill>(args.clone()) {
+            Ok(def) => {
+                if def.name.trim().is_empty() {
+                    return tool_error("a skill `name` is required");
+                }
+                if def.steps.is_empty() || def.steps.iter().any(|s| s.command.trim().is_empty()) {
+                    return tool_error("a skill needs at least one step with a non-empty command");
+                }
+                let saved = state.propose_skill(def).await;
+                // Nudge the GUI to surface the new proposal.
+                let _ = app.emit("bridge://skill-proposed", &saved);
+                tool_text(format!(
+                    "Saved skill \"{}\" as a PROPOSAL (id {}). It won't run until the user reviews and approves it in Faro's Skills panel (you can't approve your own skill). Ask the user to review and approve it; you can dry-run it in the meantime with faro_run_skill (dryRun=true) to show what it would do.",
+                    saved.name, saved.id
+                ))
+            }
+            Err(e) => tool_error(&format!("invalid skill definition: {e}")),
+        },
+        // Per-skill tools: `skill_<slug>` invokes an approved skill directly.
+        n if n.starts_with("skill_") => {
+            let skills = state.list_skills().await;
+            let Some(skill) = skills
+                .iter()
+                .find(|s| s.status == SkillStatus::Approved && skill_tool_name(&s.name) == n)
+            else {
+                return tool_error(&format!("unknown skill tool: {n}"));
+            };
+            // Pull declared param values out of the flat args object.
+            let mut params: HashMap<String, String> = HashMap::new();
+            for p in &skill.params {
+                if let Some(v) = arg_str(&args, &p.name) {
+                    params.insert(p.name.clone(), v);
+                }
+            }
+            let targets = str_array(args.get("targets"));
+            let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
+            mcp_wrap(op_run_skill(app, state, &skill.name, params, targets, dry_run).await)
+        }
         other => tool_error(&format!("unknown tool: {other}")),
     }
+}
+
+/// Lean, agent-facing overview of the saved skills (name, description, params,
+/// step count, default targets, status). Shared by `faro_list_skills` (MCP) and
+/// available to the REST/CLI surface via `/skills`.
+async fn skills_overview(state: &Arc<BridgeState>) -> Value {
+    let skills = state.list_skills().await;
+    let out: Vec<Value> = skills
+        .iter()
+        .map(|s| {
+            json!({
+                "name": s.name,
+                "description": s.description,
+                "status": if s.status == SkillStatus::Approved { "approved" } else { "proposed" },
+                "params": s.params.iter().map(|p| json!({
+                    "name": p.name,
+                    "description": p.description,
+                    "required": p.required,
+                    "default": p.default,
+                })).collect::<Vec<_>>(),
+                "stepCount": s.steps.len(),
+                "targets": { "all": s.targets.all, "sessions": s.targets.sessions },
+                "tool": if s.status == SkillStatus::Approved { Some(skill_tool_name(&s.name)) } else { None },
+            })
+        })
+        .collect();
+    json!({ "skills": out })
 }
 
 /// Backend class of an enabled session, for tool-capability routing.
@@ -3708,6 +5599,33 @@ async fn write_jsonrpc_error(
 mod tests {
     use super::*;
 
+    // Plan 10 Phase 1: the CLI base64-encodes a script's raw bytes; the bridge
+    // decodes them back. Prove that hop is byte-exact for a heredoc + nested
+    // quotes + trailing-newline script (the content that breaks a command line).
+    #[test]
+    fn exec_script_base64_roundtrip_is_byte_exact() {
+        use base64::Engine as _;
+        let script = "#!/bin/sh\ncat <<'EOF'\nnested 'single' and \"double\" quotes\nEOF\n";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(script);
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), script);
+    }
+
+    #[test]
+    fn script_summary_has_header_and_survives_multibyte_truncation() {
+        // Short script → header + full body.
+        let s = script_approval_summary("script foo.sh", "echo hi\necho bye");
+        assert!(s.starts_with("Run script foo.sh (16 bytes, 2 lines):"), "got: {s}");
+        assert!(s.contains("echo bye"));
+        // Long script with a multibyte char straddling the 4 KiB cap must not
+        // panic on a char-boundary split.
+        let big = format!("{}é tail", "a".repeat(4095));
+        let s = script_approval_summary("big", &big);
+        assert!(s.contains("preview truncated"));
+    }
+
     #[test]
     fn exec_timeout_defaults_and_clamps() {
         // Absent → the 60 s default.
@@ -3822,5 +5740,152 @@ mod tests {
         assert_eq!(bytes, 9);
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ---- Skills (Plan 8) ----
+
+    fn skill_with_params(params: Vec<SkillParam>) -> Skill {
+        Skill {
+            params,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn param_map_defaults_and_overrides() {
+        let skill = skill_with_params(vec![
+            SkillParam {
+                name: "service".into(),
+                required: true,
+                ..Default::default()
+            },
+            SkillParam {
+                name: "signal".into(),
+                default: Some("HUP".into()),
+                ..Default::default()
+            },
+        ]);
+        let mut provided = HashMap::new();
+        provided.insert("service".to_string(), "nginx".to_string());
+        let map = build_param_map(&skill, &provided).unwrap();
+        assert_eq!(map.get("service").unwrap(), "nginx");
+        // Declared default fills in when not provided.
+        assert_eq!(map.get("signal").unwrap(), "HUP");
+        // Provided wins over the declared default.
+        provided.insert("signal".to_string(), "TERM".to_string());
+        let map = build_param_map(&skill, &provided).unwrap();
+        assert_eq!(map.get("signal").unwrap(), "TERM");
+    }
+
+    #[test]
+    fn param_map_requires_required() {
+        let skill = skill_with_params(vec![SkillParam {
+            name: "service".into(),
+            required: true,
+            ..Default::default()
+        }]);
+        let err = build_param_map(&skill, &HashMap::new()).unwrap_err();
+        assert!(err.contains("service"));
+    }
+
+    #[test]
+    fn substitute_replaces_placeholders() {
+        let mut params = HashMap::new();
+        params.insert("service".to_string(), "nginx".to_string());
+        params.insert("signal".to_string(), "HUP".to_string());
+        assert_eq!(
+            substitute("systemctl reload ${service} # ${signal}", &params),
+            "systemctl reload nginx # HUP"
+        );
+        // An unresolved placeholder is left verbatim.
+        assert_eq!(substitute("echo ${missing}", &params), "echo ${missing}");
+    }
+
+    #[test]
+    fn migrate_command_seeds_single_step_approved_skill() {
+        let cmd = SavedCommand {
+            id: "c1".into(),
+            name: "disk".into(),
+            command: "df -h".into(),
+            description: String::new(),
+        };
+        let skill = migrate_command_to_skill(&cmd);
+        assert_eq!(skill.name, "disk");
+        assert_eq!(skill.steps.len(), 1);
+        assert_eq!(skill.steps[0].command, "df -h");
+        assert_eq!(skill.status, SkillStatus::Approved);
+        assert_eq!(skill.created_by, "user");
+        assert!(!skill.id.is_empty());
+    }
+
+    #[test]
+    fn skill_tool_name_sanitizes() {
+        // Colons/spaces/dots collapse to underscores (MCP names allow no colon).
+        assert_eq!(skill_tool_name("Restart Web"), "skill_restart_web");
+        assert_eq!(skill_tool_name("rotate.logs"), "skill_rotate_logs");
+        assert_eq!(skill_tool_name("  audit  "), "skill_audit");
+    }
+
+    #[test]
+    fn clip_trims_on_char_boundary() {
+        // Short strings pass through untouched.
+        assert_eq!(clip("hello", 100), "hello");
+        // A multi-byte char at the cut point isn't split.
+        let s = "aé"; // 'a' = 1 byte, 'é' = 2 bytes
+        let out = clip(s, 2);
+        assert!(out.starts_with('a'));
+        assert!(out.contains("clipped"));
+    }
+
+    fn one_step_skill(name: &str) -> Skill {
+        Skill {
+            name: name.into(),
+            steps: vec![SkillStep {
+                name: String::new(),
+                command: "true".into(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// The safety crux: a hand-authored skill is born approved, but an
+    /// AI-authored one is forced to a proposal it can't self-approve; only the
+    /// (local-UI) approve path flips it to runnable.
+    #[tokio::test]
+    async fn skills_store_propose_approve_delete() {
+        // No config_path (default) → persist() is a no-op, so this touches no disk.
+        let state = BridgeState::default();
+
+        // Hand-authored via the local UI path → approved.
+        let list = state.upsert_skill(one_step_skill("restart")).await;
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].status, SkillStatus::Approved);
+        let restart_id = list[0].id.clone();
+        assert!(!restart_id.is_empty());
+
+        // AI path: even if the definition claims approved/user, it's forced to a
+        // proposal authored by "ai" with a fresh id.
+        let sneaky = Skill {
+            status: SkillStatus::Approved,
+            created_by: "user".into(),
+            id: "attacker-chosen".into(),
+            ..one_step_skill("ai-skill")
+        };
+        let proposed = state.propose_skill(sneaky).await;
+        assert_eq!(proposed.status, SkillStatus::Proposed);
+        assert_eq!(proposed.created_by, "ai");
+        assert_ne!(proposed.id, "attacker-chosen");
+
+        // The human approve gate flips it to runnable.
+        let found = state.find_skill("ai-skill").await.unwrap();
+        assert_eq!(found.status, SkillStatus::Proposed);
+        let list = state.approve_skill(&found.id).await;
+        let ai = list.iter().find(|s| s.name == "ai-skill").unwrap();
+        assert_eq!(ai.status, SkillStatus::Approved);
+
+        // Delete removes exactly the targeted skill.
+        let list = state.delete_skill(&restart_id).await;
+        assert!(list.iter().all(|s| s.id != restart_id));
+        assert_eq!(list.len(), 1);
     }
 }

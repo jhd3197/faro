@@ -68,6 +68,18 @@ export interface FileSystemAdapter {
    * disk usage" action.
    */
   analyzeDiskUsage?(sessionId: SessionId, path: string): Promise<void>;
+  /**
+   * Optional: compare this directory against another tree (a Meld-style
+   * side-by-side diff; the host picks the second side). Omit it and the pane
+   * doesn't offer the "Compare with…" action.
+   */
+  compareDirectory?(sessionId: SessionId, path: string): Promise<void>;
+  /**
+   * Optional: search this directory tree by file name or content (a
+   * Spotlight/grep over the backend; the host owns the streaming panel). Omit it
+   * and the pane doesn't offer the "Search here…" action.
+   */
+  searchDirectory?(sessionId: SessionId, path: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

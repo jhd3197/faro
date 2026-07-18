@@ -9,8 +9,10 @@ pub mod bridge;
 pub mod commands;
 pub mod agent;
 mod agent_host;
+mod cli_updater;
 pub mod db;
 mod deeplink;
+pub mod diff;
 mod diskscan;
 mod editor;
 mod foldersync;
@@ -20,10 +22,12 @@ pub mod oauth;
 pub mod profiles;
 pub mod remotefs;
 pub mod scan;
+pub mod search;
 pub mod session;
 pub mod sync;
 mod terminal;
 mod transfer;
+mod virtualfs;
 
 pub struct AppState {
     pub sessions: Arc<session::SessionManager>,
@@ -33,9 +37,20 @@ pub struct AppState {
     pub editors: Arc<editor::EditManager>,
     pub bridge: Arc<bridge::BridgeState>,
     pub agent_host: Arc<agent_host::AgentHost>,
+    /// CLI version-drift watcher (Plan 10 Phase 0c/0d) — keeps `faro-cli` in step
+    /// with the app per the user's `cliUpdate` preference.
+    pub cli_updater: Arc<cli_updater::CliUpdater>,
     pub foldersync: Arc<foldersync::FolderSync>,
+    /// On-demand virtual folders (Plan 9) — OneDrive-style placeholders. Owns
+    /// the OS sync-root registrations; inert on non-Windows / non-`virtualfs`
+    /// builds.
+    pub virtualfs: Arc<virtualfs::VirtualFs>,
     /// Running disk-usage scans (Plan 4). Ephemeral — not persisted.
     pub diskscan: Arc<diskscan::ScanManager>,
+    /// Running directory diffs (Plan 6). Ephemeral — not persisted.
+    pub diff: Arc<diff::DiffManager>,
+    /// Running fleet searches (Plan 7). Ephemeral — not persisted.
+    pub search: Arc<search::SearchManager>,
     /// Shared `faro.db` — the per-connection index (sync_state today; scan/search
     /// caches later). See `db.rs`.
     pub db: Arc<db::Db>,
@@ -91,11 +106,21 @@ pub fn run() {
                     agent_host::AgentHost::load(&handle)
                         .expect("failed to initialise agent host settings"),
                 ),
+                cli_updater: Arc::new(
+                    cli_updater::CliUpdater::load(&handle)
+                        .expect("failed to initialise CLI updater settings"),
+                ),
                 foldersync: Arc::new(
                     foldersync::FolderSync::load(&handle)
                         .expect("failed to initialise folder sync settings"),
                 ),
+                virtualfs: Arc::new(
+                    virtualfs::VirtualFs::load(&handle)
+                        .expect("failed to initialise virtualfs settings"),
+                ),
                 diskscan: Arc::new(diskscan::ScanManager::new()),
+                diff: Arc::new(diff::DiffManager::new()),
+                search: Arc::new(search::SearchManager::new()),
                 db,
             };
             app.manage(state);
@@ -114,6 +139,15 @@ pub fn run() {
             let host_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 host.auto_start_if_enabled(host_handle).await;
+            });
+
+            // Check whether the installed faro-cli lags the app (Plan 10 0c/0d);
+            // updates silently when the user chose `auto`, else emits status so
+            // the status-bar pill can prompt.
+            let cli_updater = app.state::<AppState>().cli_updater.clone();
+            let cli_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                cli_updater.auto_start_if_enabled(cli_handle).await;
             });
 
             // Restart any folder-sync pairs the user left enabled.
@@ -165,16 +199,33 @@ pub fn run() {
             agent_host::agent_host_close_pairing,
             agent_host::agent_host_set_policy,
             agent_host::agent_host_revoke_peer,
+            cli_updater::cli_updater_status,
+            cli_updater::cli_updater_check,
+            cli_updater::cli_updater_update,
+            cli_updater::cli_updater_set_mode,
             foldersync::foldersync_list,
             foldersync::foldersync_upsert,
             foldersync::foldersync_remove,
             foldersync::foldersync_set_enabled,
             foldersync::foldersync_sync_now,
+            virtualfs::virtualfs_supported,
+            virtualfs::virtualfs_status,
+            virtualfs::virtualfs_free_up_space,
             diskscan::diskscan_start,
             diskscan::diskscan_status,
             diskscan::diskscan_tree,
             diskscan::diskscan_cancel,
             diskscan::diskscan_forget,
+            diff::diff_start,
+            diff::diff_status,
+            diff::diff_result,
+            diff::diff_cancel,
+            diff::diff_forget,
+            search::search_start,
+            search::search_status,
+            search::search_result,
+            search::search_cancel,
+            search::search_forget,
             commands::list_agent_jobs,
             commands::kill_agent_job,
             commands::respond_to_host_prompt,
@@ -222,6 +273,11 @@ pub fn run() {
             commands::bridge_list_commands,
             commands::bridge_save_command,
             commands::bridge_delete_command,
+            commands::bridge_list_skills,
+            commands::bridge_save_skill,
+            commands::bridge_delete_skill,
+            commands::bridge_approve_skill,
+            commands::bridge_run_skill,
             commands::export_agent_log,
         ])
         .run(tauri::generate_context!())

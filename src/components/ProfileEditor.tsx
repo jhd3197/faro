@@ -32,6 +32,7 @@ import {
   Radar,
   Loader2,
   Link2,
+  X,
 } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { generatePassword } from "@/lib/password";
@@ -77,6 +78,16 @@ function guessProvider(endpoint?: string): S3Provider {
   // A bare endpoint we don't recognize is some self-hosted / niche S3 server.
   return "generic";
 }
+
+/// Protocol picker, grouped for the left rail. New backends slot into a group
+/// instead of stretching a flat grid taller — the rail just scrolls.
+const PROTOCOL_GROUPS: { label: string; items: Protocol[] }[] = [
+  { label: "Servers", items: ["sftp", "ftp", "ftps"] },
+  { label: "Object storage", items: ["s3", "azure", "gcs"] },
+  { label: "Web", items: ["webdav", "http"] },
+  { label: "Cloud drives", items: ["dropbox", "onedrive", "gdrive", "box"] },
+  { label: "Machine", items: ["faro-agent"] },
+];
 
 export function ProfileEditor({ profile, prefill, onClose }: Props) {
   const saveProfile = useConnections((s) => s.saveProfile);
@@ -314,12 +325,52 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="anim-modal max-h-[90vh] w-[32rem] max-w-[92vw] overflow-y-auto rounded-xl border border-border bg-bg-panel p-5 shadow-elev-3"
+        className="anim-modal flex max-h-[88vh] w-[52rem] max-w-[94vw] overflow-hidden rounded-xl border border-border bg-bg-panel shadow-elev-3"
       >
-        <div id={titleId} className="mb-4 text-sm font-semibold">
-          {profile ? "Edit connection" : "New connection"}
-        </div>
+        {/* Left rail — grouped protocol picker. Scrolls as the list grows so the
+            dialog stays wide-and-short instead of tall-and-narrow. */}
+        <nav className="flex w-52 shrink-0 flex-col gap-3 overflow-y-auto border-r border-border bg-bg-subtle/50 p-2">
+          <div
+            id={titleId}
+            className="px-2 pb-0.5 pt-1 text-[15px] font-semibold tracking-tight"
+          >
+            {profile ? "Edit connection" : "New connection"}
+          </div>
+          {PROTOCOL_GROUPS.map((grp) => (
+            <div key={grp.label}>
+              <div className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-text-dim">
+                {grp.label}
+              </div>
+              <div className="flex flex-col gap-0.5">
+                {grp.items.map((p) => (
+                  <ProtocolButton
+                    key={p}
+                    active={protocol === p}
+                    onClick={() => onProtocolChange(p)}
+                    label={PROTOCOL_LABEL[p]}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+        </nav>
 
+        {/* Right pane — the form for the selected protocol. */}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex items-center gap-2 border-b border-border px-5 py-3">
+            <span className="text-sm font-semibold">{PROTOCOL_LABEL[protocol]}</span>
+            <span className="text-[11px] text-text-dim">{protocolHint(protocol)}</span>
+            <div className="flex-1" />
+            <button
+              onClick={onClose}
+              aria-label="Close"
+              className="rounded-md p-1.5 text-text-muted hover:bg-bg-hover hover:text-text"
+            >
+              <X size={14} />
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto px-5 py-4">
         <div className="flex gap-2">
           <Field label="Name" className="flex-1">
             <input
@@ -344,20 +395,6 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             </datalist>
           </Field>
         </div>
-
-        <Field label="Protocol">
-          <div className="grid grid-cols-3 gap-1 rounded-md border border-border bg-bg-subtle p-1">
-            {(["sftp", "ftp", "ftps", "s3", "azure", "gcs", "webdav", "http", "dropbox", "onedrive", "gdrive", "box", "faro-agent"] as Protocol[]).map((p) => (
-              <ProtocolButton
-                key={p}
-                active={protocol === p}
-                onClick={() => onProtocolChange(p)}
-                label={PROTOCOL_LABEL[p]}
-                hint={protocolHint(p)}
-              />
-            ))}
-          </div>
-        </Field>
 
         {isS3 ? (
           <S3Section
@@ -581,27 +618,29 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             . Prefer SFTP when the server supports it.
           </Hint>
         )}
+          </div>
 
-        <div className="mt-5 flex items-center justify-end gap-2">
-          {!canSave && (
-            <span className="mr-auto text-[11px] text-text-dim">
-              Needs {missing.join(", ")}
-            </span>
-          )}
-          <button
-            className="rounded-md border border-border px-3.5 py-1.5 text-sm hover:bg-bg-hover"
-            onClick={onClose}
-          >
-            Cancel
-          </button>
-          <button
-            className="btn-accent rounded-md px-3.5 py-1.5 text-sm font-medium text-white disabled:opacity-40 disabled:cursor-not-allowed"
-            onClick={save}
-            disabled={!canSave}
-            title={canSave ? undefined : `Fill in: ${missing.join(", ")}`}
-          >
-            Save
-          </button>
+          <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
+            {!canSave && (
+              <span className="mr-auto text-[11px] text-text-dim">
+                Needs {missing.join(", ")}
+              </span>
+            )}
+            <button
+              className="rounded-md border border-border px-3.5 py-1.5 text-sm hover:bg-bg-hover"
+              onClick={onClose}
+            >
+              Cancel
+            </button>
+            <button
+              className="btn-accent rounded-md px-3.5 py-1.5 text-sm font-medium text-white disabled:opacity-40 disabled:cursor-not-allowed"
+              onClick={save}
+              disabled={!canSave}
+              title={canSave ? undefined : `Fill in: ${missing.join(", ")}`}
+            >
+              Save
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -1396,42 +1435,42 @@ function ProtocolButton({
   active,
   onClick,
   label,
-  hint,
 }: {
   active: boolean;
   onClick: () => void;
   label: string;
-  hint: string;
 }) {
-  let Icon = TerminalIcon;
-  if (label === "FTPS") Icon = ShieldCheck;
-  else if (label === "FTP") Icon = ShieldOff;
-  else if (label === "S3" || label === "Azure" || label === "GCS") Icon = Cloud;
-  else if (label === "WebDAV") Icon = Globe;
-  else if (label === "HTTP") Icon = Download;
-  else if (label === "Dropbox") Icon = Box;
-  else if (label === "OneDrive") Icon = Cloud;
-  else if (label === "Google Drive") Icon = Cloud;
-  else if (label === "Box") Icon = Box;
-  else if (label === "Faro Agent") Icon = MonitorSmartphone;
+  const Icon = protocolIcon(label);
   return (
     <button
       type="button"
       onClick={onClick}
+      aria-current={active ? "true" : undefined}
       className={
-        "flex flex-col items-start rounded-sm px-2 py-1.5 text-left transition-colors " +
+        "flex items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors " +
         (active
-          ? "bg-accent-soft text-text ring-1 ring-inset ring-accent/40"
+          ? "bg-accent-soft font-medium text-accent"
           : "text-text-muted hover:bg-bg-hover hover:text-text")
       }
     >
-      <span className="flex items-center gap-1 text-[11px] font-semibold">
-        <Icon size={11} className={active ? "text-accent" : ""} />
-        {label}
-      </span>
-      <span className="text-[10px] text-text-dim">{hint}</span>
+      <Icon size={14} className={active ? "text-accent" : "text-text-dim"} />
+      <span className="truncate">{label}</span>
     </button>
   );
+}
+
+function protocolIcon(label: string) {
+  if (label === "FTPS") return ShieldCheck;
+  if (label === "FTP") return ShieldOff;
+  if (label === "S3" || label === "Azure" || label === "GCS") return Cloud;
+  if (label === "WebDAV") return Globe;
+  if (label === "HTTP") return Download;
+  if (label === "Dropbox") return Box;
+  if (label === "OneDrive") return Cloud;
+  if (label === "Google Drive") return Cloud;
+  if (label === "Box") return Box;
+  if (label === "Faro Agent") return MonitorSmartphone;
+  return TerminalIcon;
 }
 
 function Hint({

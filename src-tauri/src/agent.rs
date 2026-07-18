@@ -422,12 +422,13 @@ async fn run_tool(
             }
         }
         "faro_search" => {
-            let query = input
+            let pattern = input
                 .get("query")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("query is required"))?;
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            let (status, body) = op_search(app, state, &session_id, path, query).await;
+            let query = crate::bridge::build_search_query(input, pattern.to_string());
+            let (status, body) = op_search(app, state, &session_id, path, &query).await;
             if status == 200 {
                 Ok(body)
             } else {

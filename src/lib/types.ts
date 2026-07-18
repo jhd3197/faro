@@ -144,6 +144,23 @@ export interface AgentHostStatus {
   pairing: AgentHostPairing | null;
 }
 
+/** How to handle a stale `faro-cli` (Plan 10 Phase 0c/0d). Mirrors Rust's
+ *  CliUpdateMode. `ask` prompts, `auto` updates silently, `off` never checks. */
+export type CliUpdateMode = "ask" | "auto" | "off";
+
+/** CLI version-drift status (mirrors Rust's CliStatus). */
+export interface CliStatus {
+  mode: CliUpdateMode;
+  installed: boolean;
+  cliPath: string | null;
+  cliVersion: string | null;
+  appVersion: string;
+  /** installed && cliVersion < appVersion — the CLI lags the app. */
+  stale: boolean;
+  /** One-line result of the last update/install action, if any. */
+  message: string | null;
+}
+
 /** A parsed faro:// deep link forwarded from Rust (mirrors DeepLink there).
  *  Every field optional; never carries a password. */
 export interface DeepLink {
@@ -187,6 +204,10 @@ export interface ImporterPaths {
 export type SyncDirection = "localToRemote" | "remoteToLocal";
 export type SyncStrategy = "additive" | "mirror";
 export type SyncReason = "missing" | "newer" | "sizeChanged" | "edited";
+/** How a pair materializes files locally. `mirror` moves whole files eagerly;
+ *  `onDemand` registers OneDrive-style placeholders that hydrate on open
+ *  (Plan 9 — Windows-only, inert elsewhere). */
+export type SyncMode = "mirror" | "onDemand";
 
 export interface SyncFile {
   relative: string;
@@ -226,6 +247,7 @@ export interface SyncPair {
   remoteRoot: string;
   direction: SyncDirection;
   strategy: SyncStrategy;
+  mode: SyncMode; // default "mirror"
   enabled: boolean;
   pollIntervalSecs: number; // default 60
   exclude: string[]; // gitignore-style patterns; never pushed nor mirror-deleted
@@ -238,6 +260,16 @@ export interface PairView extends SyncPair {
   state: PairState;
   inFlight: number;
   lastSynced: number | null; // ms epoch
+  lastError: string | null;
+}
+
+// ---- On-demand virtual folders (Plan 9; mirrors src-tauri/src/virtualfs) ----
+
+/** Live status of one on-demand sync root (placeholders that hydrate on open). */
+export interface VirtualFsRootStatus {
+  pairId: string;
+  localRoot: string;
+  running: boolean; // a provider is connected and serving hydration callbacks
   lastError: string | null;
 }
 
@@ -282,6 +314,135 @@ export interface DiskScanProgress {
   filesFound: number;
   totalBytes: number;
   strategy: ScanStrategy;
+}
+
+// ---- Directory Diff (mirrors src-tauri/src/diff.rs) ----
+
+export type DiffClass = "onlyInA" | "onlyInB" | "different" | "same";
+/** Why a both-present file was classified "different". */
+export type DiffReason = "size" | "content";
+export type DiffRunState = "comparing" | "done" | "error" | "canceled";
+export type DiffPhase = "walkingA" | "walkingB" | "hashing";
+
+/** One path in the diff, with whichever side(s) it appears on. */
+export interface DiffEntry {
+  relative: string;
+  class: DiffClass;
+  reason?: DiffReason;
+  aPath?: string;
+  aSize?: number;
+  aModified?: number;
+  bPath?: string;
+  bSize?: number;
+  bModified?: number;
+  /** Set when `--hash` couldn't hash a side; the size classification stands. */
+  hashError?: string;
+}
+
+export interface DiffSummary {
+  onlyInA: number;
+  onlyInB: number;
+  different: number;
+  same: number;
+  total: number;
+}
+
+export interface DiffResult {
+  rootA: string;
+  rootB: string;
+  hashed: boolean;
+  summary: DiffSummary;
+  entries: DiffEntry[];
+}
+
+/** A diff snapshot: live counts while comparing, the `result` once done. */
+export interface DiffSnapshot {
+  id: string;
+  sessionA: string;
+  pathA: string;
+  sessionB: string;
+  pathB: string;
+  hashed: boolean;
+  state: DiffRunState;
+  phase: DiffPhase;
+  filesA: number;
+  filesB: number;
+  error?: string;
+  result?: DiffResult;
+  startedAt: number;
+}
+
+/** The lightweight `diff://progress` event body. */
+export interface DiffProgress {
+  id: string;
+  phase: DiffPhase;
+  filesA: number;
+  filesB: number;
+}
+
+// ---- Fleet Search (mirrors src-tauri/src/search.rs) ----
+
+export type SearchKind = "name" | "content";
+export type SearchRunState = "searching" | "done" | "error" | "canceled";
+/** Which strategy ran: "generic" walk, "shell" (server-side rg/grep/find), or
+ *  "objectFlat" (a bucket key listing, name search only). */
+export type SearchStrategy = "generic" | "shell" | "objectFlat";
+
+/** A search request sent to `search_start` (camelCase mirrors SearchQuery). */
+export interface SearchQuery {
+  pattern: string;
+  kind: SearchKind;
+  /** Content: treat the pattern as a regex. Ignored for name search. */
+  regex: boolean;
+  caseSensitive: boolean;
+  includeGlobs: string[];
+  excludeGlobs: string[];
+  /** Allow content search to download files on grep-less backends. */
+  contentRemote: boolean;
+  maxResults: number;
+  maxFileBytes: number;
+}
+
+/** One search hit. Name hits carry the entry; content hits add line/column/preview. */
+export interface SearchHit {
+  path: string;
+  relative: string;
+  isDir: boolean;
+  size: number;
+  line?: number;
+  column?: number;
+  preview?: string;
+}
+
+/** A search snapshot: live counts while searching, the `hits` once done. */
+export interface SearchSnapshot {
+  id: string;
+  sessionId: string;
+  root: string;
+  kind: SearchKind;
+  state: SearchRunState;
+  strategy: SearchStrategy;
+  filesScanned: number;
+  hitCount: number;
+  truncated: boolean;
+  note?: string;
+  error?: string;
+  hits?: SearchHit[];
+  startedAt: number;
+}
+
+/** The lightweight `search://progress` event body. */
+export interface SearchProgress {
+  id: string;
+  strategy: SearchStrategy;
+  filesScanned: number;
+  hitCount: number;
+}
+
+/** A batch of newly-found hits streamed over `search://hit`. */
+export interface SearchHitBatch {
+  id: string;
+  hits: SearchHit[];
 }
 
 // ---- Edit-in-place ----
@@ -609,6 +770,93 @@ export interface SavedCommand {
   name: string;
   command: string;
   description: string;
+}
+
+// ---- Skills (Plan 8): parameterized, fleet-targetable, AI-authorable) ----
+
+export type SkillStatus = "approved" | "proposed";
+
+/** One named input a Skill's steps interpolate via `${name}`. */
+export interface SkillParam {
+  name: string;
+  description: string;
+  required: boolean;
+  default: string | null;
+}
+
+/** One linear step of a Skill: a shell command template (`${param}` allowed). */
+export interface SkillStep {
+  name: string;
+  command: string;
+}
+
+/** Which connected servers a Skill runs on by default. */
+export interface TargetSelector {
+  all: boolean;
+  sessions: string[];
+}
+
+/** A saved, AI-authorable Skill: a named, parameterized, multi-step workflow the
+ *  agent (or the user) can run across one or many connected servers. Proposed
+ *  skills are AI-authored and need one human approval before they can run. */
+export interface Skill {
+  id: string;
+  name: string;
+  description: string;
+  params: SkillParam[];
+  steps: SkillStep[];
+  targets: TargetSelector;
+  status: SkillStatus;
+  createdBy: string; // "user" | "ai"
+  stopOnError: boolean;
+}
+
+/** Result of one step on one target in a skill run. */
+export interface SkillStepResult {
+  step: number;
+  name: string;
+  command: string;
+  ok: boolean;
+  exitCode?: number | null;
+  stdout?: string;
+  stderr?: string;
+  truncated?: boolean;
+  timedOut?: boolean;
+  error?: string;
+}
+
+export interface SkillTargetResult {
+  sessionId: string;
+  sessionName: string;
+  ok: boolean;
+  steps: SkillStepResult[];
+}
+
+export interface SkillSkipped {
+  target: string;
+  reason: string;
+}
+
+/** Aggregated result of running a skill (real run). */
+export interface SkillRunResult {
+  skill: string;
+  status: string;
+  targetCount: number;
+  succeeded: number;
+  failed: number;
+  results: SkillTargetResult[];
+  skipped: SkillSkipped[];
+}
+
+/** Result of a dry-run: resolved commands per target, nothing executed. */
+export interface SkillDryRunResult {
+  dryRun: true;
+  skill: string;
+  proposal: boolean;
+  stepCount: number;
+  targets: { sessionId: string; sessionName: string; commands: string[] }[];
+  skipped: SkillSkipped[];
+  needsApproval: boolean;
 }
 
 // Live agent console (streamed exec output + op feed).

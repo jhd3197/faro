@@ -5,6 +5,7 @@ import { FileBrowser } from "./components/FileBrowser";
 import { FileUiBridge } from "./components/FileUiBridge";
 import { TerminalDock } from "./components/Terminal";
 import { TransferQueue } from "./components/TransferQueue";
+import { CliUpdatePrompt } from "./components/CliUpdatePrompt";
 import { Settings } from "./components/Settings";
 import { HostKeyModal } from "./components/HostKeyModal";
 import { AuthPromptModal } from "./components/AuthPromptModal";
@@ -50,6 +51,9 @@ import { AgentBridge, AgentBridgeHost } from "./components/AgentBridge";
 import { AgentConsoleDock } from "./components/AgentConsole";
 import { AgentChatDock } from "./components/AgentChat";
 import { DiskUsageHost } from "./components/DiskUsage";
+import { DirectoryDiffHost } from "./components/DirectoryDiff";
+import { FleetSearchHost } from "./components/FleetSearch";
+import { SkillsHost } from "./components/SkillsPanel";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { relTime } from "./lib/format";
 import { cn } from "./lib/cn";
@@ -120,6 +124,9 @@ export default function App() {
       <AgentBridgeHost />
       <OverwriteDialogHost />
       <DiskUsageHost />
+      <DirectoryDiffHost />
+      <FleetSearchHost />
+      <SkillsHost />
       <CommandPalette />
       <KeyboardShortcutsDialog />
       <div className="flex flex-1 overflow-hidden">
@@ -154,6 +161,7 @@ export default function App() {
             />
           </div>
           <TransferQueue />
+          <CliUpdatePrompt />
           <StatusBar
             terminalOpen={terminalOpen && supportsTerminal}
             onToggleTerminal={toggleTerminal}

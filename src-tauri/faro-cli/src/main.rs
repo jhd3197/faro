@@ -99,6 +99,70 @@ enum Cmd {
         dry_run: bool,
     },
 
+    /// Compare two directory trees and report what differs.
+    ///
+    /// Each side is `profile:/path` (a saved profile), `local:/path`, or a plain
+    /// local path — so **remote↔remote** works too (staging vs prod, two servers,
+    /// two buckets), which no local diff tool can do. By default files are
+    /// compared by size; `--hash` confirms same-size files by content (sha256).
+    /// Exits 0 when the trees are identical, 1 when they differ.
+    Diff {
+        /// Side A: `profile:/path`, `local:/path`, or a local path.
+        a: String,
+        /// Side B: `profile:/path`, `local:/path`, or a local path.
+        b: String,
+        /// Confirm same-size files by content hash (sha256). Opt-in — it reads
+        /// every same-size file (server-side over SSH where possible).
+        #[arg(long)]
+        hash: bool,
+        /// Emit the full result as JSON (every entry, including unchanged).
+        #[arg(long)]
+        json: bool,
+        /// Also list unchanged files in the human output (JSON always includes them).
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Search a directory tree by file name or by content (grep).
+    ///
+    /// The target is `profile:/path` (a saved profile) or a local path. Name
+    /// search matches each entry's name (a `*`/`?` makes it a glob, else a
+    /// substring); `--content` greps file contents (literal, or `--regex`).
+    /// On SSH / Faro Agent servers content search runs `rg`/`grep` server-side;
+    /// object stores name-match a flat key listing. Exits 0 when something
+    /// matched, 1 when nothing did.
+    Search {
+        /// Target: `profile:/path` or a local path.
+        target: String,
+        /// What to look for (a name glob/substring, or a content pattern).
+        pattern: String,
+        /// Grep file contents instead of matching names.
+        #[arg(long)]
+        content: bool,
+        /// Treat the content pattern as a regular expression (implies --content).
+        #[arg(long)]
+        regex: bool,
+        /// Case-sensitive matching (default: insensitive).
+        #[arg(long)]
+        case_sensitive: bool,
+        /// Only consider files whose name matches this glob (repeatable).
+        #[arg(long)]
+        include: Vec<String>,
+        /// Skip files whose name matches this glob (repeatable).
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// Allow content search to DOWNLOAD every file on backends with no
+        /// server-side grep (object stores, FTP, WebDAV, cloud). Off by default.
+        #[arg(long)]
+        content_remote: bool,
+        /// Cap on returned hits (default 1000).
+        #[arg(long)]
+        max: Option<usize>,
+        /// Emit the raw JSON result.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Manage saved profiles.
     Profiles {
         #[command(subcommand)]
@@ -116,6 +180,46 @@ enum Cmd {
         #[command(subcommand)]
         action: AgentCmd,
     },
+
+    /// Run saved Skills (fleet automations) through Faro's Agent Bridge.
+    ///
+    /// A Skill is a named, parameterized, multi-step workflow that fans shell
+    /// commands across one or many connected servers. Like `agent`, this talks
+    /// to the Bridge open in the Faro app, so a run goes through Faro's approval
+    /// and shows up in its live console.
+    Skill {
+        #[command(subcommand)]
+        action: SkillCmd,
+    },
+
+    /// Update this faro-cli binary to the latest release (or a specific --tag).
+    ///
+    /// Downloads the matching release asset from GitHub (the same source the
+    /// agent installer uses) and swaps it in place. faro-cli and the Faro app
+    /// ship as separate downloads, so the CLI can lag the app after an app
+    /// update — this catches it up. Use --check to only compare versions.
+    SelfUpdate {
+        /// Update to a specific release tag (e.g. v1.4.0) instead of the latest.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Only report current vs latest version; don't download or replace anything.
+        #[arg(long)]
+        check: bool,
+    },
+
+    /// Fetch a URL behind HTTP Basic Auth using a saved HTTP(S) profile's creds.
+    ///
+    /// Reuses the stored username/password of a saved HTTP(S) connection (Plan 5
+    /// Phase 4's HttpFs) to GET an auth-walled page — e.g. a rendered page on a
+    /// staging site — and writes the body to stdout. The profile is matched by the
+    /// URL's host; pass --profile to choose explicitly. Never echoes credentials.
+    Fetch {
+        /// The URL to GET (http/https).
+        url: String,
+        /// Saved HTTP(S) profile to use (by name/id). Omit to match on the host.
+        #[arg(long)]
+        profile: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -127,12 +231,45 @@ enum ProfileCmd {
 }
 
 #[derive(Subcommand)]
+enum SkillCmd {
+    /// List the saved Skills (name, status, params, step count, default targets).
+    List {
+        /// Emit the raw JSON result.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a Skill across its targets.
+    Run {
+        /// The Skill's name (as shown by `skill list`).
+        name: String,
+        /// Server(s) to run on (name or id). Repeatable. Pass `all` for every
+        /// exec-capable connection. Omit to use the Skill's default targets.
+        #[arg(long)]
+        target: Vec<String>,
+        /// Parameter value as `key=value`. Repeatable.
+        #[arg(long)]
+        param: Vec<String>,
+        /// Show the resolved commands per target without running anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Emit the raw JSON result.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum AgentCmd {
     /// Show agent context: bridge state, policy, enabled sessions, saved commands.
     Context,
     /// List the servers the Agent Bridge can currently reach.
     Sessions,
     /// Run a shell command on a server (SSH or Faro Agent). Exits with its exit code.
+    ///
+    /// For a multi-line program (heredocs, nested quotes) pass `--file <path>` or
+    /// `--stdin` instead of a command: the script bytes are read locally and run
+    /// verbatim on the server, so nothing gets re-parsed at a shell boundary. See
+    /// also `agent script`.
     Exec {
         /// Saved server name (as shown in Faro) or its session id.
         server: String,
@@ -142,9 +279,53 @@ enum AgentCmd {
         /// Timeout in milliseconds (default 60000; clamped to 1000–900000).
         #[arg(long)]
         timeout_ms: Option<u64>,
-        /// The command to run. Quote it, or pass it as trailing arguments.
-        #[arg(trailing_var_arg = true, required = true)]
+        /// Read the program to run from this local file, verbatim (no shell
+        /// re-parsing). Mutually exclusive with a trailing command / --stdin.
+        #[arg(long, conflicts_with = "stdin")]
+        file: Option<String>,
+        /// Read the program to run from stdin, verbatim.
+        #[arg(long)]
+        stdin: bool,
+        /// Launch as a background job and return a job id immediately (poll with
+        /// `agent job`). For multi-minute work that would time out. Works on SSH
+        /// servers and paired Faro Agent machines (agent needs faro-agentd from
+        /// Plan 10+). Can't be combined with --file/--stdin yet.
+        #[arg(long)]
+        detach: bool,
+        /// The command to run. Quote it, or pass it as trailing arguments. Omit
+        /// when using --file / --stdin.
+        #[arg(trailing_var_arg = true)]
         command: Vec<String>,
+    },
+    /// Run a whole local script file on a server (SSH or Faro Agent), verbatim.
+    ///
+    /// Reads the file's bytes locally and ships them as an opaque payload, so
+    /// heredocs, nested quotes and newlines survive intact — no base64 or quoting
+    /// gymnastics. Shorthand for `agent exec <server> --file <script>`.
+    Script {
+        /// Saved server name (as shown in Faro) or its session id.
+        server: String,
+        /// Local path to the script to run.
+        file: String,
+        /// Show what would run and whether it would need approval, without executing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Timeout in milliseconds (default 60000; clamped to 1000–900000).
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+    },
+    /// Poll a background job started with `agent exec --detach` (SSH server or
+    /// paired Faro Agent).
+    Job {
+        /// Saved server name (as shown in Faro) or its session id.
+        server: String,
+        /// The job id returned by `agent exec --detach`.
+        job_id: String,
+    },
+    /// List background jobs on a server (SSH only).
+    Jobs {
+        /// Saved server name (as shown in Faro) or its session id.
+        server: String,
     },
     /// List a remote directory.
     Ls {
@@ -169,13 +350,59 @@ enum AgentCmd {
         /// Glob pattern, e.g. '*.log'.
         pattern: String,
     },
-    /// Find entries whose name contains a substring, recursively.
+    /// Search a connected server by file name or by content (grep).
+    ///
+    /// Name search (default) matches entry names (a `*`/`?` makes it a glob).
+    /// `--content` greps file contents — server-side via `rg`/`grep` on SSH /
+    /// Faro Agent servers. Read-only; goes through Faro's approval + console.
     Search {
         server: String,
-        /// Case-insensitive substring to match against entry names.
+        /// What to look for (a name glob/substring, or a content pattern).
         query: String,
         /// Root directory to search under (default: ".").
         path: Option<String>,
+        /// Grep file contents instead of matching names.
+        #[arg(long)]
+        content: bool,
+        /// Treat the content pattern as a regex (implies --content).
+        #[arg(long)]
+        regex: bool,
+        /// Case-sensitive matching (default: insensitive).
+        #[arg(long)]
+        case_sensitive: bool,
+        /// Only consider files whose name matches this glob (repeatable).
+        #[arg(long)]
+        include: Vec<String>,
+        /// Skip files whose name matches this glob (repeatable).
+        #[arg(long)]
+        exclude: Vec<String>,
+        /// Allow content search to download files on grep-less backends.
+        #[arg(long)]
+        content_remote: bool,
+    },
+    /// Write text straight into a remote file — no local staging file, no upload.
+    ///
+    /// Drops a debug script, a config snippet or a one-file patch directly on the
+    /// server (SSH via SFTP, a Faro Agent via a ranged write), bypassing the
+    /// mangling-prone upload path. Provide the content with exactly one of
+    /// --from-file / --stdin / --content. Refuses to overwrite unless --overwrite.
+    Write {
+        /// Saved server name (as shown in Faro) or its session id.
+        server: String,
+        /// Absolute remote file path to write.
+        remote_path: String,
+        /// Read the content from this local file.
+        #[arg(long, conflicts_with_all = ["stdin", "content"])]
+        from_file: Option<String>,
+        /// Read the content from stdin.
+        #[arg(long, conflicts_with = "content")]
+        stdin: bool,
+        /// Inline content to write.
+        #[arg(long)]
+        content: Option<String>,
+        /// Replace the file if it already exists (default: refuse).
+        #[arg(long)]
+        overwrite: bool,
     },
     /// Download a remote file to a local dir (default: your Downloads).
     Download {
@@ -219,6 +446,24 @@ enum AgentCmd {
         /// Show the plan without executing.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Diff two directory trees through the Agent Bridge — any two connected
+    /// servers (remote↔remote), or a server vs local. Read-only.
+    ///
+    /// Each side is `server:/path` (a connected server), `local:/path`, or a
+    /// plain path (local). By default files compare by size; `--hash` confirms
+    /// same-size files by content.
+    Diff {
+        /// Side A: `server:/path`, `local:/path`, or a local path.
+        a: String,
+        /// Side B: `server:/path`, `local:/path`, or a local path.
+        b: String,
+        /// Confirm same-size files by content hash (sha256).
+        #[arg(long)]
+        hash: bool,
+        /// Emit the raw JSON result.
+        #[arg(long)]
+        json: bool,
     },
     /// Check a transfer started via `agent download` / `agent upload`.
     Transfer { transfer_id: String },
@@ -291,6 +536,25 @@ async fn run(cli: Cli) -> Result<()> {
             mirror,
             dry_run,
         } => cmd_sync(&store, &local, &remote, direction, mirror, dry_run).await,
+        Cmd::Diff { a, b, hash, json, all } => cmd_diff(&store, &a, &b, hash, json, all).await,
+        Cmd::Search {
+            target,
+            pattern,
+            content,
+            regex,
+            case_sensitive,
+            include,
+            exclude,
+            content_remote,
+            max,
+            json,
+        } => {
+            cmd_search(
+                &store, &target, &pattern, content, regex, case_sensitive, include, exclude,
+                content_remote, max, json,
+            )
+            .await
+        }
         Cmd::Profiles { action } => match action {
             ProfileCmd::List => cmd_profiles_list(&store).await,
             ProfileCmd::Show { name } => cmd_profiles_show(&store, &name).await,
@@ -298,6 +562,12 @@ async fn run(cli: Cli) -> Result<()> {
         // The agent subcommands talk to the running bridge over HTTP (blocking
         // ureq); they need no profile store and don't await.
         Cmd::Agent { action } => cmd_agent(action),
+        // Skills likewise run through the bridge.
+        Cmd::Skill { action } => cmd_skill(action),
+        // Self-update fetches a release asset from GitHub over HTTPS.
+        Cmd::SelfUpdate { tag, check } => cmd_self_update(tag, check),
+        // Authenticated GET through a saved HTTP profile's creds.
+        Cmd::Fetch { url, profile } => cmd_fetch(&store, &url, profile).await,
     }
 }
 
@@ -715,6 +985,351 @@ async fn cmd_sync(
     Ok(())
 }
 
+// ---- Directory diff ----------------------------------------------------
+
+/// One side of a diff: a local path, or an opened remote session + path. The
+/// session is kept alive because `--hash` reads bytes through it after the walk.
+enum DiffSide {
+    Local(String),
+    Remote { session: Session, path: String },
+}
+
+/// Parse a diff side. Same rules as `parse_target`, plus an explicit `local:`
+/// prefix (the plan's documented syntax) that forces the local filesystem even
+/// where a same-named profile exists.
+fn parse_diff_target(raw: &str) -> Target {
+    if let Some((name, path)) = raw.split_once(':') {
+        if name.eq_ignore_ascii_case("local") {
+            return Target::Local(path.to_string());
+        }
+    }
+    parse_target(raw)
+}
+
+async fn resolve_diff_side(store: &ProfileStore, raw: &str) -> Result<DiffSide> {
+    match parse_diff_target(raw) {
+        Target::Local(p) => Ok(DiffSide::Local(p)),
+        Target::Remote { profile_name, path } => {
+            let profile = find_profile(store, &profile_name).await?;
+            let session = open_session(&profile).await?;
+            Ok(DiffSide::Remote { session, path })
+        }
+    }
+}
+
+async fn cmd_diff(
+    store: &ProfileStore,
+    a: &str,
+    b: &str,
+    hash: bool,
+    json: bool,
+    all: bool,
+) -> Result<()> {
+    let side_a = resolve_diff_side(store, a).await?;
+    let side_b = resolve_diff_side(store, b).await?;
+
+    let fs_a: Box<dyn RemoteFs> = match &side_a {
+        DiffSide::Local(_) => Box::new(faro_lib::remotefs::local::LocalFs),
+        DiffSide::Remote { session, .. } => fs_for(session),
+    };
+    let fs_b: Box<dyn RemoteFs> = match &side_b {
+        DiffSide::Local(_) => Box::new(faro_lib::remotefs::local::LocalFs),
+        DiffSide::Remote { session, .. } => fs_for(session),
+    };
+
+    let (root_a, sess_a) = match &side_a {
+        DiffSide::Local(p) => (p.as_str(), None),
+        DiffSide::Remote { session, path } => (path.as_str(), Some(session)),
+    };
+    let (root_b, sess_b) = match &side_b {
+        DiffSide::Local(p) => (p.as_str(), None),
+        DiffSide::Remote { session, path } => (path.as_str(), Some(session)),
+    };
+
+    if !json {
+        eprintln!(
+            "{}",
+            dim(&format!(
+                "Diffing {} ↔ {}{}",
+                root_a,
+                root_b,
+                if hash { " (hashing content)" } else { "" }
+            ))
+        );
+    }
+
+    let result = faro_lib::diff::diff(
+        fs_a.as_ref(),
+        root_a,
+        sess_a,
+        fs_b.as_ref(),
+        root_b,
+        sess_b,
+        hash,
+    )
+    .await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        print_diff_human(&result, all);
+    }
+
+    // Conventional diff exit code: 0 when identical, 1 when the trees differ.
+    let s = &result.summary;
+    let differ = s.only_in_a + s.only_in_b + s.different;
+    std::process::exit(if differ == 0 { 0 } else { 1 })
+}
+
+fn print_diff_human(result: &faro_lib::diff::DiffResult, all: bool) {
+    use faro_lib::diff::{DiffClass, DiffReason};
+
+    let mut shown = 0usize;
+    for e in &result.entries {
+        if e.class == DiffClass::Same && !all {
+            continue;
+        }
+        let (marker, detail) = match e.class {
+            DiffClass::OnlyInA => (
+                "\x1b[36mA only\x1b[0m",
+                e.a_size.map(fmt_bytes).unwrap_or_default(),
+            ),
+            DiffClass::OnlyInB => (
+                "\x1b[35mB only\x1b[0m",
+                e.b_size.map(fmt_bytes).unwrap_or_default(),
+            ),
+            DiffClass::Different => {
+                let why = match e.reason {
+                    Some(DiffReason::Size) => format!(
+                        "size {} → {}",
+                        e.a_size.map(fmt_bytes).unwrap_or_default(),
+                        e.b_size.map(fmt_bytes).unwrap_or_default()
+                    ),
+                    Some(DiffReason::Content) => "content".to_string(),
+                    None => String::new(),
+                };
+                ("\x1b[33mdiffer\x1b[0m", why)
+            }
+            DiffClass::Same => ("\x1b[2msame\x1b[0m  ", String::new()),
+        };
+        let hash_note = if e.hash_error.is_some() {
+            dim("  [hash unavailable]")
+        } else {
+            String::new()
+        };
+        if detail.is_empty() {
+            println!("{marker}  {}{hash_note}", e.relative);
+        } else {
+            println!("{marker}  {}  {}{hash_note}", e.relative, dim(&detail));
+        }
+        shown += 1;
+    }
+
+    if shown == 0 {
+        eprintln!("Trees are identical.");
+    }
+
+    let s = &result.summary;
+    eprintln!(
+        "\n{}",
+        dim(&format!(
+            "{} only in A · {} only in B · {} differ · {} same{}",
+            s.only_in_a,
+            s.only_in_b,
+            s.different,
+            s.same,
+            if result.hashed { " (hashed)" } else { "" }
+        ))
+    );
+}
+
+// ---- Fleet search ------------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+async fn cmd_search(
+    store: &ProfileStore,
+    target: &str,
+    pattern: &str,
+    content: bool,
+    regex: bool,
+    case_sensitive: bool,
+    include: Vec<String>,
+    exclude: Vec<String>,
+    content_remote: bool,
+    max: Option<usize>,
+    json: bool,
+) -> Result<()> {
+    use faro_lib::search::{SearchKind, SearchQuery, DEFAULT_MAX_FILE_BYTES, DEFAULT_MAX_RESULTS};
+
+    // Resolve the target to a RemoteFs + optional live session (local = None).
+    let (fs, session, root): (Box<dyn RemoteFs>, Option<Session>, String) = match parse_target(target) {
+        Target::Local(p) => (Box::new(faro_lib::remotefs::local::LocalFs), None, p),
+        Target::Remote { profile_name, path } => {
+            let profile = find_profile(store, &profile_name).await?;
+            let session = open_session(&profile).await?;
+            let fs = fs_for(&session);
+            (fs, Some(session), path)
+        }
+    };
+    let root = if root.trim().is_empty() { ".".to_string() } else { root };
+
+    // `--regex` implies content search (a regex over names is unusual; the plan
+    // scopes regex to content grep).
+    let content = content || regex;
+    let query = SearchQuery {
+        pattern: pattern.to_string(),
+        kind: if content { SearchKind::Content } else { SearchKind::Name },
+        regex,
+        case_sensitive,
+        include_globs: include,
+        exclude_globs: exclude,
+        content_remote,
+        max_results: max.unwrap_or(DEFAULT_MAX_RESULTS),
+        max_file_bytes: DEFAULT_MAX_FILE_BYTES,
+    };
+
+    if !json {
+        eprintln!(
+            "{}",
+            dim(&format!(
+                "Searching {root} for {pattern:?}{}",
+                if content { " (content)" } else { "" }
+            ))
+        );
+    }
+
+    let result = faro_lib::search::search(fs.as_ref(), session.as_ref(), &root, &query).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        print_search_human(&result);
+    }
+
+    // grep convention: 0 when something matched, 1 when nothing did.
+    std::process::exit(if result.hits.is_empty() { 1 } else { 0 })
+}
+
+fn print_search_human(result: &faro_lib::search::SearchResult) {
+    use faro_lib::search::{SearchKind, SearchStrategy};
+
+    for h in &result.hits {
+        match result.kind {
+            SearchKind::Name => {
+                if h.is_dir {
+                    println!("\x1b[34m{}/\x1b[0m", h.relative);
+                } else {
+                    println!("{}  {}", h.relative, dim(&fmt_bytes(h.size)));
+                }
+            }
+            SearchKind::Content => {
+                let line = h.line.unwrap_or(0);
+                let preview = h.preview.as_deref().unwrap_or("");
+                println!(
+                    "\x1b[36m{}\x1b[0m:\x1b[33m{}\x1b[0m: {}",
+                    h.relative, line, preview
+                );
+            }
+        }
+    }
+
+    if result.hits.is_empty() {
+        eprintln!("No matches.");
+    }
+
+    let s = &result.stats;
+    let strat = match s.strategy {
+        SearchStrategy::Generic => "walk",
+        SearchStrategy::Shell => "exec",
+        SearchStrategy::ObjectFlat => "object",
+    };
+    let mut summary = format!("{} hits · {strat}", result.hits.len());
+    if s.truncated {
+        summary.push_str(" · capped (more matches exist)");
+    }
+    if let Some(note) = &s.note {
+        summary.push_str(&format!(" · {note}"));
+    }
+    eprintln!("\n{}", dim(&summary));
+}
+
+// ---- Authenticated fetch (Plan 10 Phase 5) -----------------------------
+
+/// GET `url_str` through a saved HTTP(S) profile's stored Basic-Auth creds and
+/// write the body to stdout. The profile is chosen explicitly (`--profile`) or
+/// matched to the URL's host. The Authorization header is applied by the session
+/// and never printed.
+async fn cmd_fetch(store: &ProfileStore, url_str: &str, profile_opt: Option<String>) -> Result<()> {
+    let url = reqwest::Url::parse(url_str).with_context(|| format!("parse URL {url_str}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        bail!("fetch needs an http/https URL (got {})", url.scheme());
+    }
+    let host = url.host_str().ok_or_else(|| anyhow!("URL has no host"))?;
+
+    let profile = match profile_opt {
+        Some(name) => {
+            let p = find_profile(store, &name).await?;
+            if p.protocol != "http" && p.protocol != "https" {
+                bail!("`{}` is not an HTTP/HTTPS profile", p.name);
+            }
+            p
+        }
+        None => {
+            let profiles = store.list().await?;
+            let matches: Vec<ConnectionProfile> = profiles
+                .into_iter()
+                .filter(|p| {
+                    (p.protocol == "http" || p.protocol == "https")
+                        && profile_host(p).as_deref().map(|h| h.eq_ignore_ascii_case(host))
+                            .unwrap_or(false)
+                })
+                .collect();
+            match matches.len() {
+                1 => matches.into_iter().next().unwrap(),
+                0 => bail!(
+                    "no saved HTTP profile matches host `{host}`. Add one in Faro, or pass \
+                     --profile <name>."
+                ),
+                _ => bail!(
+                    "more than one saved HTTP profile matches host `{host}`; pass --profile <name>."
+                ),
+            }
+        }
+    };
+
+    let session = open_session(&profile).await?;
+    let Session::Http(http) = session else {
+        bail!("`{}` is not an HTTP/HTTPS profile", profile.name);
+    };
+    let resp = http
+        .request(reqwest::Method::GET, url)
+        .send()
+        .await
+        .context("GET failed")?;
+    let status = resp.status();
+    let body = resp.bytes().await.context("read response body")?;
+    let mut so = io::stdout();
+    so.write_all(&body).ok();
+    so.flush().ok();
+    if !status.is_success() {
+        eprintln!("\n{}", warn(&format!("HTTP {}", status.as_u16())));
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// The host of an HTTP(S) profile's URL (stored in `endpoint`), for matching a
+/// `fetch` URL to a saved profile.
+fn profile_host(p: &ConnectionProfile) -> Option<String> {
+    let raw = p.endpoint.as_deref()?.trim();
+    let with_scheme = if raw.contains("://") {
+        raw.to_string()
+    } else {
+        format!("https://{raw}")
+    };
+    reqwest::Url::parse(&with_scheme).ok()?.host_str().map(|h| h.to_string())
+}
+
 async fn cmd_profiles_list(store: &ProfileStore) -> Result<()> {
     let profiles = store.list().await?;
     if profiles.is_empty() {
@@ -755,6 +1370,167 @@ async fn cmd_profiles_show(store: &ProfileStore, name: &str) -> Result<()> {
     Ok(())
 }
 
+// ---- self-update (Plan 10 Phase 0b) ------------------------------------
+
+/// GitHub repo the release assets live under (same as scripts/install-agentd.sh).
+const RELEASE_REPO: &str = "jhd3197/Faro";
+
+/// The release asset name matching this OS/arch — mirrors the `faro-cli` matrix
+/// in `.github/workflows/release.yml` and the daemon installer's naming.
+fn target_asset_name() -> Result<&'static str> {
+    Ok(match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", "x86_64") => "faro-cli-windows-x86_64.exe",
+        ("linux", "x86_64") => "faro-cli-linux-x86_64",
+        ("macos", "x86_64") => "faro-cli-macos-x86_64",
+        ("macos", "aarch64") => "faro-cli-macos-arm64",
+        (os, arch) => bail!(
+            "no prebuilt faro-cli for {os}/{arch}; build from source (cargo build -p faro-cli)"
+        ),
+    })
+}
+
+/// Ask GitHub for the latest release tag, normalised to a bare version
+/// (`v1.4.0` → `1.4.0`).
+fn latest_release_tag() -> Result<String> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(30))
+        .build();
+    let url = format!("https://api.github.com/repos/{RELEASE_REPO}/releases/latest");
+    let resp = agent
+        .get(&url)
+        .set("User-Agent", "faro-cli-self-update")
+        .set("Accept", "application/vnd.github+json")
+        .call()
+        .with_context(|| format!("query {url}"))?;
+    let v: serde_json::Value = resp.into_json().context("parse GitHub release JSON")?;
+    let tag = v
+        .get("tag_name")
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| anyhow!("the GitHub release response had no tag_name"))?;
+    Ok(tag.trim_start_matches('v').to_string())
+}
+
+/// Release download URL for `asset`, at a specific tag or `latest`.
+fn asset_url(tag: Option<&str>, asset: &str) -> String {
+    match tag {
+        Some(t) => format!("https://github.com/{RELEASE_REPO}/releases/download/{t}/{asset}"),
+        None => format!("https://github.com/{RELEASE_REPO}/releases/latest/download/{asset}"),
+    }
+}
+
+fn download_bytes(url: &str) -> Result<Vec<u8>> {
+    use std::io::Read as _;
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(300))
+        .build();
+    let resp = agent
+        .get(url)
+        .set("User-Agent", "faro-cli-self-update")
+        .call()
+        .with_context(|| format!("download {url}"))?;
+    let mut buf = Vec::new();
+    resp.into_reader()
+        .read_to_end(&mut buf)
+        .context("read download body")?;
+    Ok(buf)
+}
+
+/// Replace the binary at `target` with `new_bytes`. A running exe can't be
+/// overwritten in place on Windows (and to stay crash-safe on Unix), so write the
+/// new bytes to a sibling temp file on the same volume, then rename: on Unix an
+/// atomic rename over the target (the running process keeps the old inode); on
+/// Windows, move the current exe aside first (allowed while running), move the
+/// new one in, and leave the `.old` for the OS to reap. Split out from
+/// `current_exe()` so the swap mechanism is unit-testable on a temp file.
+fn swap_binary_at(target: &std::path::Path, new_bytes: &[u8]) -> Result<()> {
+    let dir = target
+        .parent()
+        .ok_or_else(|| anyhow!("target has no parent directory"))?;
+    let file_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("faro-cli");
+    let new_path = dir.join(format!("{file_name}.new"));
+    std::fs::write(&new_path, new_bytes)
+        .with_context(|| format!("write {}", new_path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&new_path, std::fs::Permissions::from_mode(0o755))
+            .context("chmod +x the new binary")?;
+        std::fs::rename(&new_path, target)
+            .with_context(|| format!("replace {}", target.display()))?;
+    }
+    #[cfg(windows)]
+    {
+        let old_path = dir.join(format!("{file_name}.old"));
+        let _ = std::fs::remove_file(&old_path); // clear a stale one
+        std::fs::rename(target, &old_path).context("rename current exe aside")?;
+        if let Err(e) = std::fs::rename(&new_path, target) {
+            // Roll back so the user isn't left without a binary.
+            let _ = std::fs::rename(&old_path, target);
+            let _ = std::fs::remove_file(&new_path);
+            return Err(anyhow::Error::new(e).context("move the new exe into place"));
+        }
+        let _ = std::fs::remove_file(&old_path); // often locked while running; ignore
+    }
+    Ok(())
+}
+
+fn cmd_self_update(tag: Option<String>, check: bool) -> Result<()> {
+    let current = cli_version();
+    let asset = target_asset_name()?;
+
+    // Target version for reporting: the explicit tag, else GitHub's latest.
+    let target_ver = match &tag {
+        Some(t) => t.trim_start_matches('v').to_string(),
+        None => latest_release_tag()?,
+    };
+
+    if check {
+        println!("current: v{current}");
+        println!("latest:  v{target_ver}");
+        match (parse_semver(current), parse_semver(&target_ver)) {
+            (Some(c), Some(l)) if c < l => {
+                println!("→ an update is available — run `faro-cli self-update`");
+            }
+            (Some(_), Some(_)) => println!("→ already up to date"),
+            _ => println!("→ could not compare versions"),
+        }
+        return Ok(());
+    }
+
+    // Skip a no-op update to latest when we're already current.
+    if tag.is_none() {
+        if let (Some(c), Some(l)) = (parse_semver(current), parse_semver(&target_ver)) {
+            if c >= l {
+                println!("faro-cli v{current} is already up to date.");
+                return Ok(());
+            }
+        }
+    }
+
+    let url = asset_url(tag.as_deref(), asset);
+    eprintln!("Downloading {asset} (v{target_ver})…");
+    let bytes = download_bytes(&url)?;
+    // A real faro-cli is multi-MB; a tiny body is an HTML error page (bad tag) or
+    // a redirect that wasn't followed — refuse to install it over the binary.
+    if bytes.len() < 200_000 {
+        bail!(
+            "downloaded asset is only {} bytes — that doesn't look like faro-cli (wrong --tag?)",
+            bytes.len()
+        );
+    }
+    let exe = std::env::current_exe().context("resolve the running faro-cli path")?;
+    swap_binary_at(&exe, &bytes)?;
+    println!("Updated faro-cli: v{current} → v{target_ver}");
+    #[cfg(windows)]
+    println!(
+        "(this process keeps running the old code; the next `faro-cli` call uses the new binary)"
+    );
+    Ok(())
+}
+
 // ---- Agent Bridge client -----------------------------------------------
 //
 // `faro-cli agent …` talks to Faro's RUNNING Agent Bridge over localhost HTTP
@@ -766,6 +1542,9 @@ async fn cmd_profiles_show(store: &ProfileStore, name: &str) -> Result<()> {
 struct Endpoint {
     url: String,
     token: String,
+    /// The running Faro app's version, published in the discovery file. Used to
+    /// warn when this CLI binary is older than the app (Plan 10 Phase 0a).
+    app_version: Option<String>,
 }
 
 /// Read the bridge URL + token from Faro's discovery file (same data dir the
@@ -790,7 +1569,55 @@ fn read_endpoint() -> Result<Endpoint> {
         .and_then(|x| x.as_str())
         .ok_or_else(|| anyhow!("agent-endpoint.json is missing `token`"))?
         .to_string();
-    Ok(Endpoint { url, token })
+    let app_version = v
+        .get("version")
+        .and_then(|x| x.as_str())
+        .map(String::from);
+    Ok(Endpoint { url, token, app_version })
+}
+
+/// This CLI binary's build version.
+fn cli_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// Parse a `MAJOR.MINOR.PATCH` version into a comparable tuple, ignoring any
+/// pre-release/build metadata (`-rc1`, `+meta`). Returns None if it doesn't look
+/// like a semver, so an unparseable value simply suppresses the staleness check
+/// rather than firing a bogus warning.
+fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
+    let core = s.trim().split(['-', '+']).next().unwrap_or(s);
+    let mut it = core.split('.');
+    let major = it.next()?.parse().ok()?;
+    let minor = it.next().unwrap_or("0").parse().ok()?;
+    let patch = it.next().unwrap_or("0").parse().ok()?;
+    Some((major, minor, patch))
+}
+
+/// Print a one-line stderr warning when this CLI is OLDER than the running Faro
+/// app (Plan 10 Phase 0a). The app and `faro-cli` ship as separate downloads, so
+/// the CLI silently lags after an app update — this turns a cryptic
+/// `unexpected argument '--flag'` into a clear "your CLI is stale." Best-effort:
+/// if either version is absent or unparseable, or the CLI is same/newer, it says
+/// nothing.
+fn warn_if_stale(ep: &Endpoint) {
+    let Some(app) = ep.app_version.as_deref().and_then(parse_semver) else {
+        return;
+    };
+    let Some(cli) = parse_semver(cli_version()) else {
+        return;
+    };
+    if cli < app {
+        eprintln!(
+            "{}",
+            warn(&format!(
+                "faro-cli v{} is older than the running Faro app v{}; some commands/flags \
+                 may be missing — update with `faro-cli self-update` or from Faro → Settings.",
+                cli_version(),
+                ep.app_version.as_deref().unwrap_or("?"),
+            ))
+        );
+    }
 }
 
 /// POST a JSON body to a bridge route. The 180s timeout comfortably exceeds the
@@ -889,8 +1716,129 @@ fn resolve_server(ep: &Endpoint, name: &str) -> Result<String> {
     }
 }
 
+/// True when `p` starts with a Windows drive prefix (`C:\` or `C:/`).
+fn is_windows_drive_path(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
+}
+
+/// Best-effort: is the connected server a Windows machine? Reads `/info`'s
+/// `remote.os` (cached at connect for Faro Agents; `uname -s` for SSH). Any
+/// failure or unknown OS → false, so the mangling guard errs toward firing.
+fn server_is_windows(ep: &Endpoint, session_id: &str) -> bool {
+    let Ok(body) = http_post(ep, "/info", serde_json::json!({ "sessionId": session_id })) else {
+        return false;
+    };
+    body.get("remote")
+        .and_then(|r| r.get("os"))
+        .and_then(|v| v.as_str())
+        .map(|os| os.eq_ignore_ascii_case("windows"))
+        .unwrap_or(false)
+}
+
+/// Reject a remote-path argument that Git Bash / MSYS almost certainly mangled.
+/// When a remote path arrives Windows-drive-prefixed (`C:\…` / `C:/…`) but the
+/// target isn't actually a Windows machine, MSYS rewrote a POSIX path like
+/// `/var/www` into `C:/Program Files/Git/var/www` *before* faro-cli saw it —
+/// uploading there would silently land in a nonsense directory. Turn that into a
+/// clear, actionable error (Plan 10 Phase 3). The `/info` round-trip only happens
+/// on the drive-prefixed error path, so the common good path pays nothing.
+fn guard_mangled_remote_path(ep: &Endpoint, session_id: &str, remote_path: &str) -> Result<()> {
+    // Only pay for the OS lookup when the path actually looks mangled.
+    let is_windows_target = is_windows_drive_path(remote_path) && server_is_windows(ep, session_id);
+    check_mangled_remote_path(remote_path, is_windows_target)
+}
+
+/// Pure decision behind [`guard_mangled_remote_path`], split out so the
+/// reject/allow rule and its message are unit-testable without a live bridge.
+fn check_mangled_remote_path(remote_path: &str, is_windows_target: bool) -> Result<()> {
+    if !is_windows_drive_path(remote_path) || is_windows_target {
+        return Ok(());
+    }
+    bail!(
+        "that remote path looks like Git Bash rewrote it (MSYS path conversion turned a \
+         POSIX path such as /var/www into `{remote_path}`). Re-run with `MSYS_NO_PATHCONV=1`, \
+         prefix the path with `//` (e.g. `//var/www`), or drop text straight in with \
+         `faro-cli agent write`."
+    )
+}
+
+/// Read a script's bytes from a local file or stdin, returning the bytes plus a
+/// friendly label (the filename, or "stdin") for Faro's console/audit. Used by
+/// `agent exec --file/--stdin` and `agent script` (Plan 10 Phase 1).
+fn read_script_source(file: Option<&str>, stdin: bool) -> Result<(Vec<u8>, String)> {
+    if let Some(path) = file {
+        let bytes = std::fs::read(path).with_context(|| format!("read script {path}"))?;
+        Ok((bytes, format!("script {}", basename(path))))
+    } else if stdin {
+        use std::io::Read as _;
+        let mut buf = Vec::new();
+        io::stdin()
+            .read_to_end(&mut buf)
+            .context("read script from stdin")?;
+        Ok((buf, "script (stdin)".to_string()))
+    } else {
+        bail!("no script source (expected --file or --stdin)")
+    }
+}
+
+/// Ship a script to the bridge's `/exec_script` route (base64 on the wire so any
+/// bytes survive) and print its output. The user never sees the base64 — that's
+/// the whole point (Plan 10 Phase 1).
+fn run_agent_script(
+    ep: &Endpoint,
+    session_id: &str,
+    script: &[u8],
+    label: &str,
+    dry_run: bool,
+    timeout_ms: Option<u64>,
+) -> Result<()> {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(script);
+    let mut req = serde_json::json!({
+        "sessionId": session_id,
+        "script": b64,
+        "label": label,
+        "dryRun": dry_run,
+    });
+    if let Some(t) = timeout_ms {
+        req["timeoutMs"] = serde_json::json!(t);
+    }
+    let body = http_post(ep, "/exec_script", req)?;
+    if dry_run {
+        println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+        return Ok(());
+    }
+    print_exec_output_and_exit(&body)
+}
+
+/// Print an exec/script result (stdout, stderr, timeout note) and exit this
+/// process with the remote command's exit code. Shared by `agent exec`,
+/// `agent script` and `agent exec --file/--stdin`.
+fn print_exec_output_and_exit(body: &serde_json::Value) -> Result<()> {
+    if let Some(out) = body.get("stdout").and_then(|v| v.as_str()) {
+        let mut so = io::stdout();
+        so.write_all(out.as_bytes()).ok();
+        so.flush().ok();
+    }
+    if let Some(e) = body.get("stderr").and_then(|v| v.as_str()) {
+        if !e.is_empty() {
+            let mut se = io::stderr();
+            se.write_all(e.as_bytes()).ok();
+            se.flush().ok();
+        }
+    }
+    if body.get("timedOut").and_then(|v| v.as_bool()).unwrap_or(false) {
+        eprintln!("{}", warn("command timed out before finishing"));
+    }
+    // exitCode is a number or null on the wire; null => 0, like cmd_exec.
+    let code = body.get("exitCode").and_then(|v| v.as_i64()).unwrap_or(0);
+    std::process::exit(code as i32)
+}
+
 fn cmd_agent(action: AgentCmd) -> Result<()> {
     let ep = read_endpoint()?;
+    warn_if_stale(&ep);
     match action {
         AgentCmd::Context => {
             let body = http_get(&ep, "/context")?;
@@ -918,32 +1866,82 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             }
             Ok(())
         }
-        AgentCmd::Exec { server, dry_run, timeout_ms, command } => {
+        AgentCmd::Exec { server, dry_run, timeout_ms, file, stdin, detach, command } => {
             let id = resolve_server(&ep, &server)?;
-            let mut req =
-                serde_json::json!({ "sessionId": id, "command": command.join(" "), "dryRun": dry_run });
+            // --file / --stdin ship a script verbatim; otherwise run the joined
+            // command line. Exactly one source must be given.
+            if file.is_some() || stdin {
+                if !command.is_empty() {
+                    bail!("pass a command OR --file/--stdin, not both");
+                }
+                if detach {
+                    bail!("--detach can't be combined with --file/--stdin yet");
+                }
+                let (bytes, label) = read_script_source(file.as_deref(), stdin)?;
+                return run_agent_script(&ep, &id, &bytes, &label, dry_run, timeout_ms);
+            }
+            if command.is_empty() {
+                bail!("nothing to run — give a command, or use --file <path> / --stdin");
+            }
+            let mut req = serde_json::json!({
+                "sessionId": id,
+                "command": command.join(" "),
+                "dryRun": dry_run,
+                "detach": detach,
+            });
             if let Some(t) = timeout_ms {
                 req["timeoutMs"] = serde_json::json!(t);
             }
             let body = http_post(&ep, "/exec", req)?;
-            if let Some(out) = body.get("stdout").and_then(|v| v.as_str()) {
-                let mut so = io::stdout();
-                so.write_all(out.as_bytes()).ok();
-                so.flush().ok();
+            if detach && !dry_run {
+                let job = body.get("jobId").and_then(|v| v.as_str()).unwrap_or("?");
+                println!("started background job: {job}");
+                println!("poll with: faro-cli agent job {server} {job}");
+                return Ok(());
             }
-            if let Some(e) = body.get("stderr").and_then(|v| v.as_str()) {
-                if !e.is_empty() {
-                    let mut se = io::stderr();
-                    se.write_all(e.as_bytes()).ok();
-                    se.flush().ok();
+            if dry_run {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                return Ok(());
+            }
+            print_exec_output_and_exit(&body)
+        }
+        AgentCmd::Job { server, job_id } => {
+            let id = resolve_server(&ep, &server)?;
+            let body = http_post(&ep, "/job", serde_json::json!({ "sessionId": id, "jobId": job_id }))?;
+            print_job(&body);
+            let running = body.get("running").and_then(|v| v.as_bool()).unwrap_or(false);
+            // Mirror the job's exit code once it's finished, like a foreground exec.
+            if !running {
+                if let Some(code) = body.get("exitCode").and_then(|v| v.as_i64()) {
+                    std::process::exit(code as i32);
                 }
             }
-            if body.get("timedOut").and_then(|v| v.as_bool()).unwrap_or(false) {
-                eprintln!("{}", warn("command timed out before finishing"));
+            Ok(())
+        }
+        AgentCmd::Jobs { server } => {
+            let id = resolve_server(&ep, &server)?;
+            let body = http_post(&ep, "/jobs", serde_json::json!({ "sessionId": id }))?;
+            let jobs = body.get("jobs").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+            if jobs.is_empty() {
+                eprintln!("No background jobs on {server}.");
             }
-            // exitCode is a number or null on the wire; null => 0, like cmd_exec.
-            let code = body.get("exitCode").and_then(|v| v.as_i64()).unwrap_or(0);
-            std::process::exit(code as i32)
+            for j in &jobs {
+                let jid = j.get("jobId").and_then(|v| v.as_str()).unwrap_or("?");
+                let running = j.get("running").and_then(|v| v.as_bool()).unwrap_or(false);
+                let code = j.get("exitCode").and_then(|v| v.as_i64());
+                let state = if running {
+                    "running".to_string()
+                } else {
+                    format!("done (exit {})", code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()))
+                };
+                println!("{jid}  {state}");
+            }
+            Ok(())
+        }
+        AgentCmd::Script { server, file, dry_run, timeout_ms } => {
+            let id = resolve_server(&ep, &server)?;
+            let (bytes, label) = read_script_source(Some(&file), false)?;
+            run_agent_script(&ep, &id, &bytes, &label, dry_run, timeout_ms)
         }
         AgentCmd::Ls { server, path } => {
             let id = resolve_server(&ep, &server)?;
@@ -994,27 +1992,60 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             }
             Ok(())
         }
-        AgentCmd::Search { server, query, path } => {
+        AgentCmd::Search {
+            server,
+            query,
+            path,
+            content,
+            regex,
+            case_sensitive,
+            include,
+            exclude,
+            content_remote,
+        } => {
             let id = resolve_server(&ep, &server)?;
-            let mut req = serde_json::json!({ "sessionId": id, "query": query });
+            let mut req = serde_json::json!({
+                "sessionId": id,
+                "query": query,
+                "content": content || regex,
+                "regex": regex,
+                "caseSensitive": case_sensitive,
+                "include": include,
+                "exclude": exclude,
+                "contentRemote": content_remote,
+            });
             if let Some(p) = path {
                 req["path"] = serde_json::Value::String(p);
             }
             let body = http_post(&ep, "/search", req)?;
+            let is_content = body.get("kind").and_then(|v| v.as_str()) == Some("content");
             if let Some(matches) = body.get("matches").and_then(|v| v.as_array()) {
                 for m in matches {
-                    if let Some(p) = m.get("path").and_then(|v| v.as_str()) {
-                        println!("{p}");
+                    let path = m.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                    if is_content {
+                        let line = m.get("line").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let preview = m.get("preview").and_then(|v| v.as_str()).unwrap_or("");
+                        println!(
+                            "\x1b[36m{path}\x1b[0m:\x1b[33m{line}\x1b[0m: {preview}"
+                        );
+                    } else if m.get("isDir").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        println!("{path}/");
+                    } else {
+                        println!("{path}");
                     }
                 }
             }
+            if let Some(note) = body.get("note").and_then(|v| v.as_str()) {
+                eprintln!("{}", dim(note));
+            }
             if body.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false) {
-                eprintln!("{}", warn("results truncated"));
+                eprintln!("{}", warn("results truncated (cap reached)"));
             }
             Ok(())
         }
         AgentCmd::Download { server, remote_path, local_dir } => {
             let id = resolve_server(&ep, &server)?;
+            guard_mangled_remote_path(&ep, &id, &remote_path)?;
             let mut req = serde_json::json!({ "sessionId": id, "path": remote_path });
             if let Some(d) = local_dir {
                 req["localDir"] = serde_json::Value::String(d);
@@ -1023,8 +2054,46 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             print_transfer_started(&body);
             Ok(())
         }
+        AgentCmd::Write { server, remote_path, from_file, stdin, content, overwrite } => {
+            let id = resolve_server(&ep, &server)?;
+            guard_mangled_remote_path(&ep, &id, &remote_path)?;
+            // Exactly one content source.
+            let bytes: Vec<u8> = match (from_file, stdin, content) {
+                (Some(path), false, None) => {
+                    std::fs::read(&path).with_context(|| format!("read {path}"))?
+                }
+                (None, true, None) => {
+                    use std::io::Read as _;
+                    let mut buf = Vec::new();
+                    io::stdin().read_to_end(&mut buf).context("read content from stdin")?;
+                    buf
+                }
+                (None, false, Some(text)) => text.into_bytes(),
+                (None, false, None) => {
+                    bail!("no content — give one of --from-file <path>, --stdin, or --content <text>")
+                }
+                _ => bail!("give exactly one of --from-file / --stdin / --content"),
+            };
+            use base64::Engine as _;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            let body = http_post(
+                &ep,
+                "/write",
+                serde_json::json!({
+                    "sessionId": id,
+                    "path": &remote_path,
+                    "content": b64,
+                    "overwrite": overwrite,
+                }),
+            )?;
+            let n = body.get("bytes").and_then(|v| v.as_u64()).unwrap_or(bytes.len() as u64);
+            let p = body.get("path").and_then(|v| v.as_str()).unwrap_or(&remote_path);
+            println!("wrote {} to {p}", fmt_bytes(n));
+            Ok(())
+        }
         AgentCmd::Upload { server, local_path, remote_dir } => {
             let id = resolve_server(&ep, &server)?;
+            guard_mangled_remote_path(&ep, &id, &remote_dir)?;
             let body = http_post(
                 &ep,
                 "/upload",
@@ -1035,6 +2104,7 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
         }
         AgentCmd::UploadDir { server, local_dir, remote_dir, overwrite } => {
             let id = resolve_server(&ep, &server)?;
+            guard_mangled_remote_path(&ep, &id, &remote_dir)?;
             let body = http_post(
                 &ep,
                 "/upload_dir",
@@ -1133,6 +2203,24 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             }
             Ok(())
         }
+        AgentCmd::Diff { a, b, hash, json } => {
+            let (server_a, path_a) = split_agent_diff_side(&a);
+            let (server_b, path_b) = split_agent_diff_side(&b);
+            let mut req = serde_json::json!({ "pathA": path_a, "pathB": path_b, "hash": hash });
+            if let Some(s) = server_a {
+                req["sessionA"] = serde_json::Value::String(s);
+            }
+            if let Some(s) = server_b {
+                req["sessionB"] = serde_json::Value::String(s);
+            }
+            let body = http_post(&ep, "/diff", req)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+            } else {
+                print_agent_diff(&body);
+            }
+            Ok(())
+        }
         AgentCmd::Transfer { transfer_id } => {
             let body = http_post(&ep, "/transfer", serde_json::json!({ "transferId": transfer_id }))?;
             println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
@@ -1226,6 +2314,187 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
     }
 }
 
+fn cmd_skill(action: SkillCmd) -> Result<()> {
+    let ep = read_endpoint()?;
+    warn_if_stale(&ep);
+    match action {
+        SkillCmd::List { json } => {
+            let body = http_get(&ep, "/skills")?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                return Ok(());
+            }
+            let skills = body
+                .get("skills")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if skills.is_empty() {
+                eprintln!(
+                    "No skills yet. Create one in Faro's Skills panel, or have the AI propose one."
+                );
+                return Ok(());
+            }
+            for s in &skills {
+                let name = s.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                let desc = s.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                let steps = s.get("steps").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+                let params = s
+                    .get("params")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|p| p.get("name").and_then(|n| n.as_str()))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                let params_note = if params.is_empty() {
+                    String::new()
+                } else {
+                    format!("  params: {params}")
+                };
+                println!(
+                    "{name:<20} {steps} step{}  → {}{params_note}",
+                    if steps == 1 { "" } else { "s" },
+                    describe_skill_targets(s),
+                );
+                if !desc.is_empty() {
+                    println!("{:<20} {}", "", dim(desc));
+                }
+                if skill_status(s) == "proposed" {
+                    println!("{:<20} {}", "", warn("proposal — approve in Faro before running"));
+                }
+            }
+            Ok(())
+        }
+        SkillCmd::Run { name, target, param, dry_run, json } => {
+            let mut params = serde_json::Map::new();
+            for p in &param {
+                let Some((k, v)) = p.split_once('=') else {
+                    bail!("--param must be key=value (got '{p}')");
+                };
+                params.insert(k.trim().to_string(), serde_json::Value::String(v.to_string()));
+            }
+            let mut req = serde_json::json!({
+                "name": name,
+                "params": serde_json::Value::Object(params),
+                "dryRun": dry_run,
+            });
+            if !target.is_empty() {
+                req["targets"] = serde_json::json!(target);
+            }
+            let body = http_post(&ep, "/skill_run", req)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+                return Ok(());
+            }
+            if dry_run {
+                print_skill_dry_run(&body);
+                return Ok(());
+            }
+            let failed = print_skill_run(&body);
+            if failed > 0 {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+    }
+}
+
+fn skill_status(s: &serde_json::Value) -> &str {
+    s.get("status").and_then(|v| v.as_str()).unwrap_or("approved")
+}
+
+/// One-line summary of a skill's default target selector for `skill list`.
+fn describe_skill_targets(s: &serde_json::Value) -> String {
+    let t = s.get("targets");
+    if t.and_then(|v| v.get("all")).and_then(|v| v.as_bool()).unwrap_or(false) {
+        return "all servers".to_string();
+    }
+    let sessions = t
+        .and_then(|v| v.get("sessions"))
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", "))
+        .unwrap_or_default();
+    if sessions.is_empty() {
+        "no default targets".to_string()
+    } else {
+        sessions
+    }
+}
+
+/// Print any targets the bridge couldn't run (never silently dropped).
+fn print_skill_skipped(body: &serde_json::Value) {
+    let skipped = body.get("skipped").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    for s in &skipped {
+        let t = s.get("target").and_then(|v| v.as_str()).unwrap_or("?");
+        let reason = s.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+        eprintln!("{}", warn(&format!("skipped {t}: {reason}")));
+    }
+}
+
+fn print_skill_dry_run(body: &serde_json::Value) {
+    let name = body.get("skill").and_then(|v| v.as_str()).unwrap_or("");
+    println!("Dry run — skill \x1b[1m{name}\x1b[0m:");
+    let targets = body.get("targets").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    if targets.is_empty() {
+        println!("  {}", warn("no runnable targets"));
+    }
+    for t in &targets {
+        let tn = t.get("sessionName").and_then(|v| v.as_str()).unwrap_or("?");
+        println!("\n  ▸ \x1b[1m{tn}\x1b[0m");
+        let cmds = t.get("commands").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        for (i, c) in cmds.iter().enumerate() {
+            println!("    {}. {}", i + 1, c.as_str().unwrap_or(""));
+        }
+    }
+    print_skill_skipped(body);
+    if body.get("needsApproval").and_then(|v| v.as_bool()).unwrap_or(false) {
+        println!("\n{}", dim("A real run will ask for approval in Faro."));
+    }
+}
+
+/// Render a completed skill run; returns the number of failed targets.
+fn print_skill_run(body: &serde_json::Value) -> u64 {
+    let succeeded = body.get("succeeded").and_then(|v| v.as_u64()).unwrap_or(0);
+    let failed = body.get("failed").and_then(|v| v.as_u64()).unwrap_or(0);
+    let results = body.get("results").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    for r in &results {
+        let tn = r.get("sessionName").and_then(|v| v.as_str()).unwrap_or("?");
+        let ok = r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+        let marker = if ok { "\x1b[32m✓\x1b[0m" } else { "\x1b[31m✗\x1b[0m" };
+        println!("{marker} \x1b[1m{tn}\x1b[0m");
+        let steps = r.get("steps").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        for st in &steps {
+            let sok = st.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+            let n = st.get("step").and_then(|v| v.as_u64()).unwrap_or(0);
+            let label = st.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if let Some(e) = st.get("error").and_then(|v| v.as_str()) {
+                println!("  {} step {n}: {}", if sok { "·" } else { "✗" }, warn(e));
+                continue;
+            }
+            let code = st
+                .get("exitCode")
+                .and_then(|v| v.as_i64())
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            let dot = if sok { "\x1b[32m·\x1b[0m" } else { "\x1b[31m✗\x1b[0m" };
+            println!("  {dot} step {n} (exit {code}) {}", dim(label));
+            if !sok {
+                if let Some(se) = st.get("stderr").and_then(|v| v.as_str()) {
+                    for line in se.lines().take(10) {
+                        println!("      {line}");
+                    }
+                }
+            }
+        }
+    }
+    print_skill_skipped(body);
+    println!("\n{succeeded} ok, {failed} failed");
+    failed
+}
+
 fn print_agent_entries(body: &serde_json::Value) {
     let Some(entries) = body.get("entries").and_then(|v| v.as_array()) else {
         return;
@@ -1243,6 +2512,112 @@ fn print_agent_entries(body: &serde_json::Value) {
             let size = e.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
             println!("{name}\t{}", fmt_bytes(size));
         }
+    }
+}
+
+/// Split a `agent diff` side into (server, path). `local:/x` and a plain path
+/// (or a `C:\…` drive) mean the local filesystem (server = None); `name:/x`
+/// targets a connected server. Mirrors the bridge, which treats an absent
+/// sessionA/B as local.
+fn split_agent_diff_side(raw: &str) -> (Option<String>, String) {
+    if let Some((name, path)) = raw.split_once(':') {
+        if name.eq_ignore_ascii_case("local") {
+            return (None, path.to_string());
+        }
+        // A Windows drive letter (`C:\…`) is a local path, not a server.
+        if name.len() == 1 && name.as_bytes()[0].is_ascii_alphabetic() {
+            return (None, raw.to_string());
+        }
+        return (Some(name.to_string()), path.to_string());
+    }
+    (None, raw.to_string())
+}
+
+/// Render the Agent Bridge `/diff` response (only differing entries are sent;
+/// the summary counts the rest).
+fn print_agent_diff(body: &serde_json::Value) {
+    let entries = body.get("entries").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    for e in &entries {
+        let rel = e.get("relative").and_then(|v| v.as_str()).unwrap_or("");
+        let class = e.get("class").and_then(|v| v.as_str()).unwrap_or("");
+        let a_size = e.get("aSize").and_then(|v| v.as_u64());
+        let b_size = e.get("bSize").and_then(|v| v.as_u64());
+        let (marker, detail) = match class {
+            "onlyInA" => ("\x1b[36mA only\x1b[0m", a_size.map(fmt_bytes).unwrap_or_default()),
+            "onlyInB" => ("\x1b[35mB only\x1b[0m", b_size.map(fmt_bytes).unwrap_or_default()),
+            "different" => {
+                let why = match e.get("reason").and_then(|v| v.as_str()) {
+                    Some("size") => format!(
+                        "size {} → {}",
+                        a_size.map(fmt_bytes).unwrap_or_default(),
+                        b_size.map(fmt_bytes).unwrap_or_default()
+                    ),
+                    Some("content") => "content".to_string(),
+                    _ => String::new(),
+                };
+                ("\x1b[33mdiffer\x1b[0m", why)
+            }
+            _ => ("?", String::new()),
+        };
+        let hash_note = if e.get("hashError").is_some() {
+            dim("  [hash unavailable]")
+        } else {
+            String::new()
+        };
+        if detail.is_empty() {
+            println!("{marker}  {rel}{hash_note}");
+        } else {
+            println!("{marker}  {rel}  {}{hash_note}", dim(&detail));
+        }
+    }
+    if let Some(s) = body.get("summary") {
+        let g = |k: &str| s.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        let hashed = body.get("hashed").and_then(|v| v.as_bool()).unwrap_or(false);
+        eprintln!(
+            "\n{}",
+            dim(&format!(
+                "{} only in A · {} only in B · {} differ · {} same{}",
+                g("onlyInA"),
+                g("onlyInB"),
+                g("different"),
+                g("same"),
+                if hashed { " (hashed)" } else { "" }
+            ))
+        );
+    }
+    if body.get("listTruncated").and_then(|v| v.as_bool()).unwrap_or(false) {
+        eprintln!("{}", warn("entry list truncated — use --json for the full result"));
+    }
+}
+
+/// Render a `/job` poll: stream out/err, then a status line.
+fn print_job(body: &serde_json::Value) {
+    if let Some(err) = body.get("error").and_then(|v| v.as_str()) {
+        eprintln!("{}", warn(err));
+        return;
+    }
+    if let Some(out) = body.get("stdout").and_then(|v| v.as_str()) {
+        let mut so = io::stdout();
+        so.write_all(out.as_bytes()).ok();
+        so.flush().ok();
+    }
+    if let Some(e) = body.get("stderr").and_then(|v| v.as_str()) {
+        if !e.is_empty() {
+            let mut se = io::stderr();
+            se.write_all(e.as_bytes()).ok();
+            se.flush().ok();
+        }
+    }
+    let running = body.get("running").and_then(|v| v.as_bool()).unwrap_or(false);
+    if running {
+        eprintln!("\n{}", dim("job still running — poll again"));
+    } else {
+        let code = body
+            .get("exitCode")
+            .and_then(|v| v.as_i64())
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "?".into());
+        eprintln!("\n{}", dim(&format!("job finished (exit {code})")));
     }
 }
 
@@ -1508,5 +2883,110 @@ fn fmt_bytes(n: u64) -> String {
         format!("{:.1} MB", n as f64 / (1024.0 * 1024.0))
     } else {
         format!("{:.2} GB", n as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        asset_url, check_mangled_remote_path, is_windows_drive_path, parse_semver, swap_binary_at,
+    };
+
+    #[test]
+    fn asset_url_points_at_the_release() {
+        assert_eq!(
+            asset_url(None, "faro-cli-windows-x86_64.exe"),
+            "https://github.com/jhd3197/Faro/releases/latest/download/faro-cli-windows-x86_64.exe"
+        );
+        assert_eq!(
+            asset_url(Some("v1.4.0"), "faro-cli-linux-x86_64"),
+            "https://github.com/jhd3197/Faro/releases/download/v1.4.0/faro-cli-linux-x86_64"
+        );
+    }
+
+    // Plan 10 Phase 0b: the swap must replace the target's bytes even though (on
+    // Windows) a running exe can't be overwritten in place — exercised here on a
+    // temp file to prove the rename-aside/move-in mechanism.
+    #[test]
+    fn swap_binary_replaces_target_bytes() {
+        let dir = tempdir_unique();
+        let target = dir.join("faro-cli.exe");
+        std::fs::write(&target, b"OLD BINARY").unwrap();
+        swap_binary_at(&target, b"NEW BINARY BYTES").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"NEW BINARY BYTES");
+        // No stray temp file left behind.
+        assert!(!dir.join("faro-cli.exe.new").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A unique temp dir without pulling in the tempfile crate (Date/rand are
+    /// fine in a test binary, unlike the workflow sandbox).
+    fn tempdir_unique() -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        let uniq = format!(
+            "faro-cli-test-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        p.push(uniq);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn mangled_path_rejected_only_on_non_windows_target() {
+        // Drive-prefixed path against a POSIX server → rejected with the hint.
+        let err = check_mangled_remote_path("C:/Program Files/Git/var/www", false)
+            .expect_err("should reject a mangled path on a POSIX target");
+        let msg = format!("{err}");
+        assert!(msg.contains("MSYS_NO_PATHCONV=1"));
+        assert!(msg.contains("agent write"));
+        // Same path against a genuine Windows machine → allowed (real drive path).
+        assert!(check_mangled_remote_path("C:/Users/me/app", true).is_ok());
+        // A normal POSIX remote path is always fine, target OS regardless.
+        assert!(check_mangled_remote_path("/var/www/html", false).is_ok());
+        assert!(check_mangled_remote_path("//var/www", false).is_ok());
+    }
+
+    #[test]
+    fn detects_windows_drive_paths() {
+        // MSYS-mangled remote paths (Plan 10 Phase 3) — these trip the guard.
+        assert!(is_windows_drive_path("C:/Program Files/Git/var/www"));
+        assert!(is_windows_drive_path(r"C:\Users\me"));
+        assert!(is_windows_drive_path("D:/data"));
+        // Real remote POSIX paths — never flagged.
+        assert!(!is_windows_drive_path("/var/www/html"));
+        assert!(!is_windows_drive_path("//var/www")); // the leading-// escape
+        assert!(!is_windows_drive_path("./rel"));
+        assert!(!is_windows_drive_path("home/user"));
+        // A bare drive letter with no separator isn't a path prefix.
+        assert!(!is_windows_drive_path("C:"));
+    }
+
+    #[test]
+    fn semver_parses_and_orders() {
+        assert_eq!(parse_semver("1.3.19"), Some((1, 3, 19)));
+        assert_eq!(parse_semver("1.4.0"), Some((1, 4, 0)));
+        // pre-release / build metadata is ignored down to the core triple.
+        assert_eq!(parse_semver("2.0.0-rc1"), Some((2, 0, 0)));
+        assert_eq!(parse_semver("2.0.0+build.7"), Some((2, 0, 0)));
+        // short forms default missing components to 0.
+        assert_eq!(parse_semver("3"), Some((3, 0, 0)));
+        assert_eq!(parse_semver("3.2"), Some((3, 2, 0)));
+        // garbage suppresses the check rather than firing a bogus warning.
+        assert_eq!(parse_semver("nightly"), None);
+    }
+
+    #[test]
+    fn stale_when_cli_older_than_app() {
+        // The staleness warning fires iff cli < app (Plan 10 Phase 0a).
+        assert!(parse_semver("1.3.10") < parse_semver("1.3.19"));
+        assert!(parse_semver("1.2.99") < parse_semver("1.3.0"));
+        // Same or newer is NOT stale.
+        assert!(!(parse_semver("1.3.19") < parse_semver("1.3.19")));
+        assert!(!(parse_semver("1.4.0") < parse_semver("1.3.19")));
     }
 }

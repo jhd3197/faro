@@ -1185,7 +1185,7 @@ pub async fn stop_edit(
 
 // ---------- Agent Bridge ----------
 
-use crate::bridge::{ActivityEntry, ApprovalDecision, ApprovalPolicy, BridgeStatus, SavedCommand};
+use crate::bridge::{ActivityEntry, ApprovalDecision, ApprovalPolicy, BridgeStatus, SavedCommand, Skill};
 
 #[tauri::command]
 pub async fn bridge_start(
@@ -1286,6 +1286,67 @@ pub async fn bridge_delete_command(
     state: State<'_, AppState>,
 ) -> Result<Vec<SavedCommand>, String> {
     Ok(state.bridge.delete_command(&id).await)
+}
+
+// ---------- Skills (Plan 8; local-UI authoring + fleet runner) ----------
+
+#[tauri::command]
+pub async fn bridge_list_skills(state: State<'_, AppState>) -> Result<Vec<Skill>, String> {
+    Ok(state.bridge.list_skills().await)
+}
+
+/// Create/update a hand-authored Skill (born approved). Keyed by id; a blank id
+/// mints a new one. Local-UI only — the agent's write path is `faro_save_skill`,
+/// which forces a proposal.
+#[tauri::command]
+pub async fn bridge_save_skill(
+    skill: Skill,
+    state: State<'_, AppState>,
+) -> Result<Vec<Skill>, String> {
+    Ok(state.bridge.upsert_skill(skill).await)
+}
+
+#[tauri::command]
+pub async fn bridge_delete_skill(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<Skill>, String> {
+    Ok(state.bridge.delete_skill(&id).await)
+}
+
+/// Approve a proposed (AI-authored) Skill so it becomes runnable — the one human
+/// gate on the agent's authoring path.
+#[tauri::command]
+pub async fn bridge_approve_skill(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<Skill>, String> {
+    Ok(state.bridge.approve_skill(&id).await)
+}
+
+/// Run a Skill across its targets from the GUI. Returns the aggregated per-target
+/// result on success; a hard failure (proposal not approved, no targets, unknown
+/// skill) surfaces as an error.
+#[tauri::command]
+pub async fn bridge_run_skill(
+    name: String,
+    params: std::collections::HashMap<String, String>,
+    targets: Option<Vec<String>>,
+    dry_run: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let (status, body) =
+        crate::bridge::op_run_skill(&app, &state.bridge, &name, params, targets, dry_run).await;
+    if status == 200 {
+        Ok(body)
+    } else {
+        Err(body
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("skill run failed")
+            .to_string())
+    }
 }
 
 // ---------- Agent console export ----------

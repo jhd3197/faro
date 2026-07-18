@@ -17,10 +17,13 @@ import {
   Trash2,
   RefreshCw,
   Play,
+  Wand2,
+  ChevronRight,
 } from "lucide-react";
 import { useBridge } from "@/stores/bridgeStore";
 import { useConnections } from "@/stores/connectionsStore";
 import { useLayout } from "@/stores/layoutStore";
+import { useSkills } from "@/stores/skillsStore";
 import { useDialog } from "@/hooks/useDialog";
 import { ipc } from "@/lib/ipc";
 import { toast } from "@/stores/toastStore";
@@ -43,6 +46,7 @@ const APPROVAL_COPY: Record<string, { title: string; foot: string }> = {
   upload_dir: { title: "Agent wants to upload a directory", foot: "Uploads the whole tree through Faro's transfer engine." },
   sync: { title: "Agent wants to sync directories", foot: "Copies through Faro's transfer engine; mirror mode deletes destination files missing from the source." },
   search: { title: "Agent wants to search the server", foot: "Searches through your authenticated Faro session." },
+  skill: { title: "Agent wants to run a Skill across servers", foot: "Runs the skill's steps on every listed server through your authenticated Faro sessions." },
 };
 function approvalCopy(kind: string) {
   return (
@@ -79,6 +83,13 @@ function summaryStats(
     const del = command.match(/delete (\d+) files? on the destination \(mirror\)/);
     if (del)
       stats.push({ label: `DELETES ${del[1]} files on the destination`, danger: true });
+  } else if (kind === "skill") {
+    // "Run skill "X" on N server(s) (…) — M step(s) each"
+    const servers = command.match(/on (\d+) servers? \(/);
+    if (servers)
+      stats.push({ label: `${servers[1]} server${servers[1] === "1" ? "" : "s"}`, danger: true });
+    const steps = command.match(/— (\d+) steps? each/);
+    if (steps) stats.push({ label: `${steps[1]} step${steps[1] === "1" ? "" : "s"} each` });
   }
   return stats;
 }
@@ -837,6 +848,27 @@ export function AgentBridge({ onClose }: { onClose: () => void }) {
             onSave={saveCommand}
             onDelete={deleteCommand}
           />
+
+          {/* Skills — multi-step, fleet-targetable automations (Plan 8). */}
+          <Card title="Fleet Skills">
+            <div className="flex items-start gap-2">
+              <div className="min-w-0 flex-1 text-[11px] leading-snug text-text-dim">
+                Named, parameterized, multi-step workflows the AI can compose and
+                run across many servers. Approve AI proposals, author your own,
+                dry-run, then run — with a per-target result summary.
+              </div>
+              <button
+                onClick={() => {
+                  onClose();
+                  useSkills.getState().openPanel();
+                }}
+                className="flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] hover:bg-bg-hover"
+              >
+                <Wand2 size={12} /> Open Skills
+                <ChevronRight size={12} />
+              </button>
+            </div>
+          </Card>
 
           {/* History — what the agent has done (in-memory, last 200). */}
           <HistoryCard

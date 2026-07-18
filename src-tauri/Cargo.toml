@@ -74,6 +74,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # Misc
 anyhow = "1"
 thiserror = "1"
+# Content-search matching (regex mode) + glob→regex compilation for fleet search.
+regex = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -98,13 +100,34 @@ notify = "6"
 # no dbus/secret-service build dependency.
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 
-# Windows-only: registry access for the PuTTY sessions importer.
+# Windows-only: registry access for the PuTTY sessions importer, plus the
+# Cloud Filter API (`cldapi.dll`) that powers on-demand virtual folders (Plan 9)
+# via the safe `cloud-filter` wrapper crate. It's optional — only pulled when the
+# `virtualfs` feature is on — so the default build never compiles the native
+# provider. Using the wrapper instead of hand-rolled `windows`-crate FFI keeps
+# the unsafe surface tiny for code that can only be verified manually in Explorer.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# cloud-filter drives the hard part (connect + placeholders + hydration
+# callbacks over cldapi). The `windows` crate (same 0.58 cloud-filter pulls) is
+# used ONLY for `CfRegisterSyncRoot`/`CfUnregisterSyncRoot`, because the WinRT
+# `StorageProviderSyncRootManager` cloud-filter registers with requires package
+# identity, which unpackaged Faro doesn't have — the Win32 register API doesn't.
+cloud-filter = { version = "0.0.6", optional = true }
+windows = { version = "0.58", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_CloudFilters",
+] }
 
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# On-demand virtual folders (Plan 9): the Windows Cloud Filter provider —
+# OneDrive-style placeholders that hydrate on open and free-up-space to evict.
+# OFF by default: it compiles native `cldapi` FFI and registers OS sync roots on
+# the user's disk, which must be verified manually in Explorer (hydrate on open,
+# free-up-space, badge states) before shipping. Enable with `--features virtualfs`.
+virtualfs = ["dep:cloud-filter", "dep:windows"]
 
 [profile.dev]
 incremental = true

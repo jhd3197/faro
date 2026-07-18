@@ -20,6 +20,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { cn } from "@/lib/cn";
 import { RemoteControlSettings } from "./RemoteControlSettings";
 import { SyncSettings } from "./SyncSettings";
+import { CliUpdaterSettings } from "./CliUpdaterSettings";
 
 interface Props {
   onClose: () => void;
@@ -34,6 +35,7 @@ type SectionId =
   | "remoteControl"
   | "sync"
   | "bridge"
+  | "cli"
   | "agent";
 
 const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
@@ -45,6 +47,7 @@ const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
   { id: "remoteControl", label: "Remote control", icon: <MonitorSmartphone size={14} /> },
   { id: "sync", label: "Folder Sync", icon: <FolderSync size={14} /> },
   { id: "bridge", label: "Agent Bridge", icon: <Radio size={14} /> },
+  { id: "cli", label: "faro-cli", icon: <TerminalSquare size={14} /> },
   { id: "agent", label: "Chat", icon: <Bot size={14} /> },
 ];
 
@@ -363,6 +366,9 @@ export function Settings({ onClose }: Props) {
 
       case "remoteControl":
         return <RemoteControlSettings />;
+
+      case "cli":
+        return <CliUpdaterSettings />;
 
       case "sync":
         return <SyncSettings />;

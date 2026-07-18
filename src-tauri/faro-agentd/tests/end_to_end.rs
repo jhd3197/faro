@@ -359,6 +359,74 @@ async fn pairing_window_expires() {
     assert!(daemon.pairing_code().await.is_none(), "expired window must clear");
 }
 
+/// Detached background jobs over the real channel (Plan 10 Phase 4, agent arm):
+/// `ExecStart` returns a job id at once, `ExecPoll` streams the capture and the
+/// final exit code, and an unknown id polls as `not_found`. This is the exact
+/// wire path a paired phone drives.
+#[tokio::test]
+async fn detached_job_start_poll_and_unknown() {
+    let (daemon, server_id, _dir) = make_daemon(Config::default());
+    let server_pub = server_id.public_bytes().unwrap();
+    let client_id = Identity::generate().unwrap();
+    daemon
+        .config
+        .lock()
+        .await
+        .upsert_peer("test-controller", client_id.public_b64());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let serve_daemon = daemon.clone();
+    tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let _ = faro_agentd::handle_paired(stream, serve_daemon).await;
+    });
+
+    let mut ch = connect_paired(addr, &client_id, server_pub).await;
+
+    // Launch — returns immediately with the id we supplied.
+    let token = "detached_agent_ok";
+    let command = if cfg!(windows) {
+        format!("Write-Output {token}")
+    } else {
+        format!("echo {token}")
+    };
+    ch.send(&Request::ExecStart { job_id: "job-e2e".into(), command, max_bytes: 65536 })
+        .await
+        .unwrap();
+    match ch.recv::<Response>().await.unwrap() {
+        Response::ExecStarted { job_id } => assert_eq!(job_id, "job-e2e"),
+        other => panic!("expected exec-started, got {other:?}"),
+    }
+
+    // Poll until it finishes (bounded so a hang fails instead of spinning).
+    let mut finished: Option<(Option<i32>, String)> = None;
+    for _ in 0..100 {
+        ch.send(&Request::ExecPoll { job_id: "job-e2e".into() }).await.unwrap();
+        match ch.recv::<Response>().await.unwrap() {
+            Response::ExecStatus { running: false, exit_code, stdout, not_found, .. } => {
+                assert!(!not_found, "a started job must not report not_found");
+                finished = Some((exit_code, stdout));
+                break;
+            }
+            Response::ExecStatus { running: true, .. } => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            other => panic!("expected exec-status, got {other:?}"),
+        }
+    }
+    let (exit_code, stdout) = finished.expect("detached job finished");
+    assert_eq!(exit_code, Some(0));
+    assert!(stdout.contains(token), "stdout was {stdout:?}");
+
+    // An unknown id polls as not_found (the bridge maps this to a 404).
+    ch.send(&Request::ExecPoll { job_id: "no-such-job".into() }).await.unwrap();
+    match ch.recv::<Response>().await.unwrap() {
+        Response::ExecStatus { not_found, .. } => assert!(not_found),
+        other => panic!("expected exec-status not_found, got {other:?}"),
+    }
+}
+
 fn base64_encode(b: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(b)

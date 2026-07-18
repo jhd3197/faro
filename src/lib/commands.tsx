@@ -13,11 +13,13 @@ import {
   Palette,
   SunMoon,
   Radio,
+  Wand2,
 } from "lucide-react";
 import { useConnections } from "@/stores/connectionsStore";
 import { useTransfers } from "@/stores/transfersStore";
 import { useLayout } from "@/stores/layoutStore";
 import { useSettings, APP_THEMES } from "@/stores/settingsStore";
+import { useSkills } from "@/stores/skillsStore";
 
 export interface Command {
   id: string;
@@ -46,6 +48,7 @@ export function useCommands(): Command[] {
   const toggleConsole = useLayout((s) => s.toggleConsole);
   const openDialog = useLayout((s) => s.openDialog);
   const setShortcutsOpen = useLayout((s) => s.setShortcutsOpen);
+  const openSkills = useSkills((s) => s.openPanel);
 
   const appTheme = useSettings((s) => s.appTheme);
   const setAppTheme = useSettings((s) => s.setAppTheme);
@@ -92,6 +95,14 @@ export function useCommands(): Command[] {
       icon: <Radio size={14} />,
       keywords: "agent bridge mcp claude code remote exec",
       run: () => openDialog("agentBridge"),
+    },
+    {
+      id: "fleet-skills",
+      title: "Fleet Skills…",
+      group: "General",
+      icon: <Wand2 size={14} />,
+      keywords: "skill skills fleet automation run command multi server mcp agent",
+      run: () => openSkills(),
     },
     {
       id: "agent-console",

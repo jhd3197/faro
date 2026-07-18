@@ -92,6 +92,13 @@ Three new units, plus wiring into the existing app:
 | `WriteChunk{path,offset,data,truncate,done}` | ranged write (upload)  |
 | `Delete{path,recursive}` / `CreateDir` / `Rename` / `Chmod` | fs mutations |
 | `Exec{command,timeoutMs,maxBytes}` | run a native shell command       |
+| `ExecStart{jobId,command,maxBytes}` | launch a detached background job |
+| `ExecPoll{jobId}` / `ExecKill{jobId}` | poll / kill a background job    |
+
+The `ExecStart`/`ExecPoll`/`ExecKill` trio is **additive** (Plan 10 Phase 4) — a
+pre-Plan-10 daemon doesn't recognise it, so the controller degrades to a clear
+"update the agent" message rather than a silent failure. The protocol version is
+unchanged, so every existing op keeps working against an older daemon.
 
 Every logical message is JSON, split into ≤64 KiB Noise segments (each with a
 continuation flag) so large directory listings and file chunks stream safely
@@ -107,6 +114,42 @@ AI agent reaches it through the same bridge tools it uses for SSH servers
   `sh` elsewhere). Takes an optional `timeoutMs` (default 60 000 ms, clamped to
   1 s – 15 min; `faro-cli agent exec --timeout-ms …`); output is capped at
   512 KiB.
+- **Background jobs (`--detach`, SSH-only)** — for work that runs longer than a
+  timeout is comfortable (backfills, migrations), `faro_exec` with `detach=true`
+  (`faro-cli agent exec <server> --detach "<cmd>"`) launches the command
+  server-side and returns a `jobId` **immediately** instead of blocking. The
+  command keeps running under `setsid`/`nohup` in a per-job dir
+  (`~/.faro/jobs/<id>/{cmd,out,err,exit,pid}`), surviving even a bridge restart.
+  Poll it with **`faro_job`** (`faro-cli agent job <server> <id>`), which streams
+  the captured stdout/stderr (each capped at 512 KiB) and reports the exit code
+  once finished; `faro-cli agent jobs <server>` lists running/finished jobs. Job
+  dirs older than 7 days are pruned on the next launch. This retires the manual
+  `nohup … & ; tail -f log` loop. Gated as an Exec (never auto-approved except by
+  allow-all); polling is a Read.
+- **Background jobs on a paired Faro Agent** — the same `--detach` / `faro_job`
+  surface works against a paired machine: the daemon spawns the command, tracks
+  it by id in memory (capped output per stream, finished jobs reaped on a TTL),
+  and answers `ExecPoll` with the capture + exit code. The one difference from
+  the SSH arm: agent jobs live only for the daemon's lifetime — a daemon restart
+  forgets in-flight jobs (a later poll returns "no such job"), whereas the SSH
+  arm's on-disk `~/.faro/jobs` dir survives one. Requires **faro-agentd from
+  Plan 10 or newer** on the target; an older daemon doesn't know the op and the
+  bridge reports a clear "update the agent" error. `agent jobs` (list) stays
+  SSH-only for now; poll agent jobs by id.
+- **`faro_exec_script`** — runs a whole **multi-line script verbatim**
+  (`/exec_script`, `faro-cli agent script <server> <file>` or `agent exec
+  --file/--stdin`). The script bytes are read locally and shipped as an opaque
+  base64 payload, so heredocs, nested quotes and newlines survive with no
+  base64/quoting gymnastics on the caller's side. Same 512 KiB cap and the same
+  approval gate as `exec` — but, like a Write, **never** auto-approved by the
+  safe-read-only heuristic (only allow-all), since a script is multi-statement.
+- **`faro_write`** — write text straight into a remote file (`/write`,
+  `faro-cli agent write <server> <path> [--from-file|--stdin|--content]
+  [--overwrite]`) with no local staging file and without the mangling-prone
+  upload path — SSH streams via SFTP `create`, a Faro Agent via a ranged
+  `WriteChunk`. Gated as a Write (never auto-approved except allow-all); refuses
+  to clobber an existing file unless `overwrite`. Bounded by the ~1 MiB
+  request-body cap — for large files use `faro_upload`.
 - **`faro_read_file`** — capped file read via the daemon's `ReadFile`.
 - **`faro_list_dir` / `faro_search` / `faro_download` / `faro_upload`** — file
   ops through `AgentFs` and the transfer engine (uploads stream as ranged
@@ -123,6 +166,30 @@ AI agent reaches it through the same bridge tools it uses for SSH servers
 - `faro_glob`, `faro_tail` and `faro_read_files_batch` stay **SSH-only** (they
   use `find`/`tail -f`/SFTP); on a paired machine the agent is told to run a
   native equivalent through `faro_exec` instead.
+
+## Running faro-cli from Git Bash / MSYS
+
+Two gotchas hit anyone driving `faro-cli agent …` from Git Bash on Windows:
+
+- **POSIX remote paths get rewritten.** MSYS path conversion rewrites a leading
+  `/var/www/html` argument into a Windows path (`C:/Program Files/Git/var/www/…`)
+  *before* `faro-cli` ever sees it — so an upload silently lands in a nonsense
+  directory. `faro-cli agent upload` / `upload-dir` / `download` / `write` now
+  **detect a Windows-drive-prefixed remote path against a non-Windows server and
+  refuse it** with a hint instead of uploading. To pass a real POSIX remote path,
+  do one of:
+  - prefix it with `MSYS_NO_PATHCONV=1`, e.g.
+    `MSYS_NO_PATHCONV=1 faro-cli agent upload prod ./app.tar /var/www`;
+  - double the leading slash — `//var/www` — which MSYS leaves alone; or
+  - drop text straight onto the box with `faro-cli agent write` (no local staging
+    file, no upload path to mangle).
+- **The CLI can lag the app.** `faro-cli` and `faro-agentd` are **separate
+  release downloads** from the desktop app (see Distribution below), so after an
+  app update the on-PATH CLI can be older than the running app — advertising flags
+  the CLI predates. `faro-cli agent …` compares its build version to the app
+  version published in `agent-endpoint.json` and prints a one-line staleness
+  warning when it's behind; update with `faro-cli self-update` or from
+  Faro → Settings.
 
 ## Distribution
 

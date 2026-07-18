@@ -1,14 +1,21 @@
 # Plan 9 — On-demand virtual folders (Plan 2, Phase 3)
 
-## Status: DESIGNED, NOT BUILT
+## Status: WINDOWS PROVIDER BUILT (feature-flagged) — Explorer verification left
+
+The Windows Cloud Filter provider is implemented behind the off-by-default
+`virtualfs` cargo feature (`src-tauri/src/virtualfs/`). See
+**[Build status](#build-status-implemented)** at the bottom for exactly what's
+built, what was verified at runtime, and what still needs manual Explorer
+testing. The original design (below) is unchanged and remains the reference.
 
 Phases 1–2 of Plan 2 (continuous **real-file** one-way sync) are implemented
 (`src-tauri/src/foldersync.rs`). This document is the implementation-ready
 design for **Phase 3 — OneDrive-style on-demand placeholders** ("files show in
-the folder, download on open, free-up-space to evict"). It is **not built**,
-deliberately: true on-demand is per-OS *native filesystem-provider* code, and
-shipping unverified provider code risks leaving orphaned OS sync-roots on a
-user's disk. It should be built as its own focused effort, Windows first.
+the folder, download on open, free-up-space to evict"). True on-demand is per-OS
+*native filesystem-provider* code, and shipping unverified provider code risks
+leaving orphaned OS sync-roots on a user's disk — which is why the whole thing
+is gated behind `--features virtualfs` (the default build never compiles it) and
+why the register→unregister orphan-cleanup path is the first thing verified.
 
 ## Why it's a separate tier
 
@@ -108,3 +115,61 @@ Ship Phases 1–2 (done). Build the **Windows Cloud Filter provider** as a
 dedicated feature-flagged effort with manual Explorer-driven verification
 (hydrate on open, free-up-space, badge states). Only then evaluate macOS File
 Provider and the FUSE fallback.
+
+---
+
+## Build status (implemented)
+
+Windows provider built behind the **off-by-default `virtualfs` cargo feature**
+(`cargo build -p faro --features virtualfs`). The default build never compiles
+any of it — `src-tauri/src/virtualfs/unsupported.rs` is an inert stub, so an
+on-demand pair configured on a normal build degrades to a clear "not available".
+
+**What's built**
+- `src-tauri/src/virtualfs/mod.rs` — the cross-platform `VirtualFs` subsystem
+  (agent_host.rs shape): persisted registered roots (`virtualfs.json`),
+  **orphan-safe `reconcile`** (unregister roots whose pair no longer exists,
+  start the live ones — pure `plan_reconcile`, unit-tested), a `Hydrator`
+  abstraction, and `virtualfs_supported / _status / _free_up_space` commands.
+- `SyncPair.mode: Mirror | OnDemand` on folder sync; on-demand pairs skip the
+  eager reconcile loop and are driven by `VirtualFs` (every foldersync mutation
+  → `reconcile_virtualfs`, centralizing orphan cleanup).
+- `src-tauri/src/virtualfs/windows.rs` — the provider, built on the safe
+  **`cloud-filter` 0.0.6** wrapper for connect + placeholders + hydration
+  callbacks. `fetch_data` hydrates by downloading through the shared
+  `TransferManager` path (so every backend works) and streaming to the OS in
+  4 KiB-aligned chunks via a captured tokio `Handle` + `block_on` (callbacks run
+  on cldapi OS threads). `fetch_placeholders` populates subdirs lazily;
+  `dehydrate` allows "free up space"; delete/rename stay local (live view, never
+  mutates the backend). Callback paths are validated against the pair's remote
+  root.
+- Frontend: a Mirror | On-demand toggle in the sync-pair form (shown only where
+  `virtualFsSupported`), a cloud badge + Free-up-space action per on-demand pair.
+
+**Key finding (why registration is Win32, not the wrapper's default).**
+`cloud-filter` registers sync roots through the **WinRT
+`StorageProviderSyncRootManager`, which requires package identity**. Unpackaged
+Faro (Tauri/NSIS) doesn't have it, so that `Register` returned `Ok` but
+registered nothing (`GetSyncRootInformationForId` → `NOT_FOUND`; a runtime test
+caught this). Fix: register/unregister via the **Win32 `CfRegisterSyncRoot` /
+`CfUnregisterSyncRoot`** (the API this plan specified — no package identity
+needed), keyed by path, and use `cloud-filter` only for the callback machinery
+(its `Session::connect` already uses the path-based `CfConnectSyncRoot`, so it
+composes). If Faro ever ships as MSIX/sparse-package, the WinRT path becomes
+available too.
+
+**Verified at runtime**
+- The **register → `CfGetSyncRootInfoByPath` → unregister** round-trip passes on
+  real `cldapi` from an unpackaged test process — the orphan-safety primitive
+  `reconcile` depends on (`sync_root_register_unregister_round_trips`). This also
+  proves the feature-on build links `cldapi.lib` and the FFI executes.
+- `cargo check -p faro` (default) and `--features virtualfs` both clean;
+  `cargo test -p faro --lib` 85 pass; `npx tsc --noEmit` clean.
+
+**Left for manual Explorer verification (the maintainer's step)**
+Build `--features virtualfs`, create an on-demand pair against a live backend,
+and confirm in Explorer: placeholders appear, opening a file hydrates it,
+right-click → "Free up space" (or the pair's button) dehydrates, and the
+cloud/check badges render. Follow-ups: a poll to re-populate top-level
+placeholders when the remote gains/loses files after start; ranged (vs
+whole-file) hydration; macOS File Provider + FUSE fallback (Tier 2, unbuilt).

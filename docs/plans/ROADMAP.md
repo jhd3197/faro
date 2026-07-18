@@ -42,11 +42,12 @@ thematic detail.
 | 4 | `4_disk-usage-explorer` | ✅ built (GUI click-through on a live backend left) | First *visible*, read-only consumer of #3 — proves the foundation at low risk. |
 | 5 | `5_additional-backends` | 🔄 Phases 0–2, 4, 5 shipped (S3/GCS/WebDAV/HTTP + all 4 OAuth clouds) | Only SMB (Phase 3) remains — blocked on MSVC/libsmbclient. |
 | 6 | `6_directory-diff` | ⬜ | Reuses #3's scan engine (two trees) + `change_signal`/`etag`. |
-| 7 | `7_fleet-search` | ⬜ | Reuses #3's scan engine; later a `faro.db` filename index. |
-| 8 | `8_fleet-skills` | ⬜ | AI-authored fleet automations over the bridge. Independent. |
-| 9 | `9_on-demand-virtual-folders` | ⬜ | OneDrive-style placeholders (Plan 2 Phase 3). Large, per-OS, Windows-first. |
-| 10 | `10_iconify-brand-icons` | ⬜ | Additive brand/protocol logos. Independent polish; do whenever. |
-| 11 | `11_scoped-connection-sharing` | 🅿️ deferred | Blocked on a login/auth foundation. |
+| 7 | `7_fleet-search` | ✅ built (live-backend GUI click-through left) | Reuses #3's scan engine; later a `faro.db` filename index. |
+| 8 | `8_fleet-skills` | ✅ built (live multi-server fan-out run left) | AI-authored fleet automations over the bridge. Independent. |
+| 9 | `9_on-demand-virtual-folders` | 🔄 Windows provider built (feature-flagged); Explorer verify left | OneDrive-style placeholders (Plan 2 Phase 3). Large, per-OS, Windows-first. |
+| 10 | `10_faro-cli-agent-dx` | ✅ built (live SSH-box + phone-agent smoke tests left) | faro-cli/Agent-Bridge remote exec/write DX. All six phases in: CLI version-drift + self-update, `agent script`/`--stdin`, `agent write`, MSYS path guard, background/detached jobs (SSH + agent arms), authenticated `fetch`. Independent of the scan foundation. |
+| 11 | `11_iconify-brand-icons` | ⬜ | Additive brand/protocol logos. Independent polish; do whenever. |
+| 12 | `12_scoped-connection-sharing` | 🅿️ deferred | Blocked on a login/auth foundation. |
 
 Cross-project **Track D** (ServerKit ↔ Faro) has no plan file — it's a
 convergence effort tracked only in the Track section below.
@@ -129,8 +130,14 @@ transfer / sync for free.
 OneDrive-style placeholders: files show in the folder, download on open, free-up-
 space to evict. Native, per-OS, **Windows-first** (Cloud Filter API).
 
-- ⬜ Windows provider (Cloud Filter API via the `windows` crate) — its own
-  feature-flagged effort; reuses the Track A engine for listing + hydration.
+- ✅ **Windows provider built** behind the off-by-default `virtualfs` feature
+  (`src-tauri/src/virtualfs/`): orphan-safe sync-root registration via the Win32
+  `CfRegisterSyncRoot` (the WinRT wrapper path needs package identity unpackaged
+  Faro lacks — a runtime test caught it), hydration on open through the shared
+  `TransferManager` download path via the `cloud-filter` callback machinery, a
+  `SyncPair.mode` toggle + Free-up-space UI. Register→unregister round-trip
+  verified on real `cldapi`. ⬜ Remaining: manual Explorer verification (hydrate
+  on open, free-up-space, badges) — build `--features virtualfs`.
 - ⬜ macOS File Provider extension, ⬜ Linux FUSE, or the WinFsp/FUSE virtual-mount
   fallback. *Designed in Plan 9; not built.*
 
@@ -159,7 +166,7 @@ surface for those agents).
 
 ---
 
-## Track E — Brand & protocol logos (Plan 10)
+## Track E — Brand & protocol logos (Plan 11)
 
 Additive icon layer for recognizable brand marks (S3/Azure/SSH/WordPress) via
 Iconify, bundled offline. Deliberately does **not** touch the file-type icons
@@ -203,16 +210,64 @@ the **Track A2** scan engine (walks two trees) and its `change_signal`/`etag`
 for `--hash` mode. ⬜
 
 ## Track H — Fleet Search (Plan 7)
-Name + content search across any connection; exec `rg`/`grep` fast path on
-SSH/agent, walk fallback. Reuses the **Track A2** scan engine (and, later, a
-`faro.db` filename index). GUI + CLI + `faro_search` MCP tool. ⬜
+Name + content search across any connection; exec `rg`/`grep`/`find` fast path
+on SSH/agent, object-flat name listing on buckets, walk fallback. Reuses the
+**Track A2** scan engine (a `faro.db` filename index is a later refinement).
+
+- ✅ **Phase 1–2** — `search.rs` engine: generic name BFS (files + dirs) +
+  read-and-grep content walk, then the exec fast path (`rg --json` → `grep -rn`
+  → `find -iname`) for SSH/agent and object-flat name search, each falling back
+  to the walk with a recorded note. Content on grep-less backends (object/FTP/
+  cloud) is opt-in. Verified via the CLI against a real tree.
+- ✅ **Phase 4** — `faro-cli search` (direct) + the `faro_search` bridge/MCP tool
+  and `faro-cli agent search` upgraded to content grep.
+- ✅ **Phase 3** — GUI Fleet Search panel (streaming `SearchManager`, Name|Content
+  toggle, grouped content previews), opened from the folder context menu /
+  toolbar. ⬜ Remaining: GUI click-through on a live SSH/S3/agent backend (engine
+  verified at runtime; app boots clean).
 
 ## Track I — Fleet Skills (Plan 8)
 Reusable, parameterized, **AI-authorable** automations over the fleet, MCP-native
 (the AI composes/saves Skills, then runs them across servers). Builds on the
-bridge's existing saved-commands + `faro_exec` + approvals. Safety-gated. ⬜
+bridge's existing saved-commands + `faro_exec` + approvals. Safety-gated.
 
-## Track J — Scoped connection sharing (Plan 11) — DEFERRED
+- ✅ **Phases 1–3** — Skills store + fleet runner in `bridge.rs`: `Skill`
+  model (params/steps/targets/status) persisted in `bridge.json`, existing
+  saved commands seeded once into single-step Skills; `op_run_skill` resolves
+  targets (all / explicit, run-time override), substitutes `${params}`,
+  dry-runs, gates the whole fleet run once (only allow-all auto-approves), fans
+  out with bounded concurrency reusing `exec_core`, and aggregates per-target
+  success/fail + audit. MCP: `faro_list_skills` / `faro_run_skill` /
+  `faro_save_skill` (AI saves land as **proposals** needing one human approval)
+  plus a dynamic `skill_<name>` tool per approved skill. REST `/skills` +
+  `/skill_run`.
+- ✅ **Phase 4** — `faro-cli skill list|run` (dry-run + per-target summary) and
+  a GUI **Fleet Skills** panel (browse/author/approve, pick targets, dry-run,
+  run, watch aggregated output), opened from the command palette + the Agent
+  Bridge panel.
+- ⬜ Remaining: a live multi-server fan-out **run** (unit-verified: 15 tests
+  incl. the propose→approve safety flow; backend/CLI/frontend compile clean; a
+  live run needs the app rebuilt over the running instance + connected exec
+  targets — the maintainer's environment).
+
+## Track K — faro-cli & Agent Bridge remote-exec DX (Plan 10)
+Sharpens the daily `faro-cli agent …` / MCP remote-exec surface from real
+usage-session feedback: a **CLI version-drift check + in-app update prompt/
+auto-update** (the app and `faro-cli` ship separately, so the CLI silently lags
+after an app update), `agent script`/`--stdin` (run a local script verbatim — no
+base64/heredoc gymnastics), `agent write` (drop text to a remote file directly),
+a Git-Bash path-mangling guard, background/detached exec with a pollable job id
+(retires the `nohup`+poll loop), and an authenticated `fetch` for pages behind
+HTTP Basic Auth (reuses Plan 5's `HttpFs`). Touches `faro-cli`, `bridge.rs`,
+`faro-agentd`, and the app's settings/status surfaces; **Phase 0 (version drift)
+is the priority — a live pain point, do before the polish plans.** ✅ **All six
+phases built.** Phase 4 background jobs land on both arms — SSH (per-job
+`~/.faro/jobs/<id>` dir) and paired agents (daemon `ExecStart/Poll/Kill`, an
+additive protocol op so older daemons keep working). Verified by unit +
+end-to-end tests; live smoke tests against a real SSH box and the paired phone
+agent are the maintainer's step (single-instance lock + Android daemon redeploy).
+
+## Track J — Scoped connection sharing (Plan 12) — DEFERRED
 Share a box read-only / path-jailed / time-boxed. **Parked until a login/auth
 foundation exists** — the real use case (remote employee, link-based) needs auth
 regardless, so we hold the whole track rather than ship the LAN-only half. The
@@ -253,10 +308,14 @@ mirror.
    no OAuth, all fit the trait. Independent of the DB — can interleave anywhere.
 6. **Tracks G + H — Diff + Search.** Same scan engine, new surfaces (GUI + CLI +
    MCP `faro_diff` / `faro_search`).
-7. **Track D option (b)** — ServerKit installs `faro-agentd` as a managed
+7. **Track K — faro-cli remote-exec DX (Plan 10).** Independent of the scan
+   foundation, so it can slot in here — and its **Phase 0 (CLI version-drift
+   check + update, exec-ceiling fix) is a live pain point that can be pulled
+   forward at any time.** Ships before the polish/deferred plans (iconify #11,
+   scoped sharing #12).
+8. **Track D option (b)** — ServerKit installs `faro-agentd` as a managed
    service; every server becomes syncable via Track A.
-8. **Track C Windows on-demand** and **Track B Phase 4 OAuth clouds** — the two
-   large, later efforts.
+9. **Track C Windows on-demand** — the large, later effort.
 
 To execute any of these tracks end-to-end in a fresh session, use the local
 `docs/plans/prompt.md` runbook — set its one plan-filename knob and paste it.

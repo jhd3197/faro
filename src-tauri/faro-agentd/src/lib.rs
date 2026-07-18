@@ -7,6 +7,7 @@
 
 pub mod config;
 pub mod discovery;
+pub mod jobs;
 pub mod ops;
 pub mod server;
 pub mod service;

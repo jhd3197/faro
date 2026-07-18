@@ -29,14 +29,26 @@ import type {
   AgentExecStart,
   AgentOutput,
   SavedCommand,
+  Skill,
+  SkillRunResult,
+  SkillDryRunResult,
   DiscoveredAgent,
   AgentPairResult,
   AgentHostStatus,
+  CliStatus,
+  CliUpdateMode,
   DeepLink,
   SyncPair,
   PairView,
+  VirtualFsRootStatus,
   ScanSnapshot,
   DiskScanProgress,
+  DiffSnapshot,
+  DiffProgress,
+  SearchQuery,
+  SearchSnapshot,
+  SearchProgress,
+  SearchHitBatch,
 } from "./types";
 
 // Typed wrappers around the Tauri command surface. The string names must match
@@ -117,6 +129,13 @@ export const ipc = {
   /** Un-pin a controller by its public key. */
   agentHostRevokePeer: (publicKey: string) =>
     invoke<AgentHostStatus>("agent_host_revoke_peer", { publicKey }),
+
+  // --- CLI updater (Plan 10 Phase 0c/0d): keep faro-cli in step with the app.
+  cliUpdaterStatus: () => invoke<CliStatus>("cli_updater_status"),
+  cliUpdaterCheck: () => invoke<CliStatus>("cli_updater_check"),
+  cliUpdaterUpdate: () => invoke<CliStatus>("cli_updater_update"),
+  cliUpdaterSetMode: (mode: CliUpdateMode) =>
+    invoke<CliStatus>("cli_updater_set_mode", { mode }),
 
   listDirectory: (sessionId: SessionId, path: string) =>
     invoke<DirEntry[]>("list_directory", { sessionId, path }),
@@ -299,6 +318,24 @@ export const ipc = {
     invoke<SavedCommand[]>("bridge_save_command", { command }),
   bridgeDeleteCommand: (id: string) =>
     invoke<SavedCommand[]>("bridge_delete_command", { id }),
+  // Skills (Plan 8): fleet automations. Hand-authored skills are born approved;
+  // AI proposals are approved via bridgeApproveSkill before they can run.
+  bridgeListSkills: () => invoke<Skill[]>("bridge_list_skills"),
+  bridgeSaveSkill: (skill: Skill) => invoke<Skill[]>("bridge_save_skill", { skill }),
+  bridgeDeleteSkill: (id: string) => invoke<Skill[]>("bridge_delete_skill", { id }),
+  bridgeApproveSkill: (id: string) => invoke<Skill[]>("bridge_approve_skill", { id }),
+  bridgeRunSkill: (
+    name: string,
+    params: Record<string, string>,
+    targets: string[] | null,
+    dryRun: boolean,
+  ) =>
+    invoke<SkillRunResult | SkillDryRunResult>("bridge_run_skill", {
+      name,
+      params,
+      targets,
+      dryRun,
+    }),
   // Write the agent console text to disk (Downloads) and return the saved path.
   exportAgentLog: (content: string, name: string) =>
     invoke<string>("export_agent_log", { content, name }),
@@ -315,6 +352,16 @@ export const ipc = {
   folderSyncSyncNow: (id: string) =>
     invoke<PairView[]>("foldersync_sync_now", { id }),
 
+  // ---- On-demand virtual folders (Plan 9) ----
+  /** Whether on-demand placeholders are available (Windows + `virtualfs` build). */
+  virtualFsSupported: () => invoke<boolean>("virtualfs_supported"),
+  /** Live status of every registered on-demand sync root. */
+  virtualFsStatus: () => invoke<VirtualFsRootStatus[]>("virtualfs_status"),
+  /** Explorer-style "free up space": dehydrate a pair's hydrated files back to
+   *  placeholders. Returns the count dehydrated. */
+  virtualFsFreeUpSpace: (pairId: string) =>
+    invoke<number>("virtualfs_free_up_space", { pairId }),
+
   // ---- Disk Usage Explorer ----
   /** Kick off a recursive size scan of `path` on a session; returns a scan id. */
   diskScanStart: (sessionId: SessionId, path: string) =>
@@ -330,6 +377,41 @@ export const ipc = {
   /** Drop a finished scan from the backend (tab closed). */
   diskScanForget: (scanId: string) =>
     invoke<void>("diskscan_forget", { scanId }),
+
+  /** Start a two-tree directory diff; returns a diff id. Each side is a session
+   *  id (or LOCAL_SESSION) + a path. `hash` confirms same-size files by content. */
+  diffStart: (
+    sessionA: SessionId,
+    pathA: string,
+    sessionB: SessionId,
+    pathB: string,
+    hash: boolean
+  ) =>
+    invoke<string>("diff_start", { sessionA, pathA, sessionB, pathB, hash }),
+  /** Lightweight status (live counts while comparing). */
+  diffStatus: (diffId: string) =>
+    invoke<DiffSnapshot>("diff_status", { diffId }),
+  /** Full snapshot including the result (present once done). */
+  diffResult: (diffId: string) =>
+    invoke<DiffSnapshot>("diff_result", { diffId }),
+  diffCancel: (diffId: string) => invoke<void>("diff_cancel", { diffId }),
+  /** Drop a finished diff from the backend (view closed). */
+  diffForget: (diffId: string) => invoke<void>("diff_forget", { diffId }),
+
+  /** Start a fleet search under `path` on a session; returns a search id. */
+  searchStart: (sessionId: SessionId, path: string, query: SearchQuery) =>
+    invoke<string>("search_start", { sessionId, path, query }),
+  /** Lightweight status (live counts while searching). */
+  searchStatus: (searchId: string) =>
+    invoke<SearchSnapshot>("search_status", { searchId }),
+  /** Full snapshot including the hit list (present once done). */
+  searchResult: (searchId: string) =>
+    invoke<SearchSnapshot>("search_result", { searchId }),
+  searchCancel: (searchId: string) =>
+    invoke<void>("search_cancel", { searchId }),
+  /** Drop a finished search from the backend (panel closed). */
+  searchForget: (searchId: string) =>
+    invoke<void>("search_forget", { searchId }),
 };
 
 export async function onEditSaved(
@@ -392,6 +474,13 @@ export async function onAgentExecStart(
   return listen<AgentExecStart>("agent://exec-start", (e) => cb(e.payload));
 }
 
+/** The AI proposed a new Skill over the bridge (awaiting human approval). */
+export async function onBridgeSkillProposed(
+  cb: (skill: Skill) => void
+): Promise<UnlistenFn> {
+  return listen<Skill>("bridge://skill-proposed", (e) => cb(e.payload));
+}
+
 export async function onAgentOutput(
   cb: (event: AgentOutput) => void
 ): Promise<UnlistenFn> {
@@ -405,6 +494,13 @@ export async function onAgentHostPaired(
   return listen<{ name: string; key: string }>("agent-host://paired", (e) =>
     cb(e.payload)
   );
+}
+
+/** CLI version-drift status changed (startup check, or an update finished). */
+export async function onCliUpdaterStatus(
+  cb: (status: CliStatus) => void
+): Promise<UnlistenFn> {
+  return listen<CliStatus>("cli-updater://status", (e) => cb(e.payload));
 }
 
 /** A folder-sync pair changed (config edited, or a background sync updated its
@@ -439,6 +535,46 @@ export async function onDiskScanEvent(
     listen<ScanSnapshot>("diskscan://canceled", (e) =>
       cb("canceled", e.payload)
     ),
+  ]);
+  return () => {
+    unsubs.forEach((u) => u());
+  };
+}
+
+/** Directory-diff lifecycle. `progress` carries live file counts + phase; the
+ *  terminal events (`done`/`error`/`canceled`) carry a full DiffSnapshot. */
+export async function onDiffEvent(
+  cb: (
+    kind: "progress" | "done" | "error" | "canceled",
+    payload: DiffProgress | DiffSnapshot
+  ) => void
+): Promise<UnlistenFn> {
+  const unsubs = await Promise.all([
+    listen<DiffProgress>("diff://progress", (e) => cb("progress", e.payload)),
+    listen<DiffSnapshot>("diff://done", (e) => cb("done", e.payload)),
+    listen<DiffSnapshot>("diff://error", (e) => cb("error", e.payload)),
+    listen<DiffSnapshot>("diff://canceled", (e) => cb("canceled", e.payload)),
+  ]);
+  return () => {
+    unsubs.forEach((u) => u());
+  };
+}
+
+/** Fleet-search lifecycle. `progress` carries live counts + strategy, `hit`
+ *  streams batches of new hits, and the terminal events (`done`/`error`/
+ *  `canceled`) carry a full SearchSnapshot (fetch the hit list on `done`). */
+export async function onSearchEvent(
+  cb: (
+    kind: "progress" | "hit" | "done" | "error" | "canceled",
+    payload: SearchProgress | SearchHitBatch | SearchSnapshot
+  ) => void
+): Promise<UnlistenFn> {
+  const unsubs = await Promise.all([
+    listen<SearchProgress>("search://progress", (e) => cb("progress", e.payload)),
+    listen<SearchHitBatch>("search://hit", (e) => cb("hit", e.payload)),
+    listen<SearchSnapshot>("search://done", (e) => cb("done", e.payload)),
+    listen<SearchSnapshot>("search://error", (e) => cb("error", e.payload)),
+    listen<SearchSnapshot>("search://canceled", (e) => cb("canceled", e.payload)),
   ]);
   return () => {
     unsubs.forEach((u) => u());

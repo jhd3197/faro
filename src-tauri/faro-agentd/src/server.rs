@@ -11,6 +11,7 @@
 //!     that proves the code gets pinned, persisted, and served immediately.
 
 use crate::config::{config_path, Config};
+use crate::jobs::JobStore;
 use crate::ops;
 use anyhow::{Context, Result};
 use faro_agent_proto::{
@@ -48,6 +49,9 @@ pub struct Daemon {
     /// The only time pairing handshakes are honoured. Shared so an embedding
     /// app (or the CLI's expiry timer) can open/close it while serving.
     pairing: Arc<Mutex<Option<PairingWindow>>>,
+    /// Detached background jobs (Plan 10 Phase 4), shared across every
+    /// connection so a job started on one channel is pollable after a re-dial.
+    jobs: Arc<JobStore>,
     /// Invoked the moment a controller is pinned: `(name, public_key_b64)`.
     on_paired: Arc<dyn Fn(&str, &str) + Send + Sync>,
 }
@@ -59,6 +63,7 @@ impl Daemon {
             config: Arc::new(Mutex::new(config)),
             config_dir,
             pairing: Arc::new(Mutex::new(None)),
+            jobs: Arc::new(JobStore::new()),
             on_paired: Arc::new(|_, _| {}),
         }
     }
@@ -215,7 +220,7 @@ where
         };
         let policy = daemon.config.lock().await.policy;
         let summary = describe(&req);
-        let resp = ops::handle(req, policy).await;
+        let resp = ops::handle(req, policy, &daemon.jobs).await;
         log_op(peer_name, &summary, &resp);
         if channel.send(&resp).await.is_err() {
             break;
@@ -295,6 +300,9 @@ fn describe(req: &Request) -> String {
         Request::Rename { from, to } => format!("rename {from} -> {to}"),
         Request::Chmod { path, mode } => format!("chmod {path} {mode:o}"),
         Request::Exec { command, .. } => format!("exec: {command}"),
+        Request::ExecStart { job_id, command, .. } => format!("exec-start {job_id}: {command}"),
+        Request::ExecPoll { job_id } => format!("exec-poll {job_id}"),
+        Request::ExecKill { job_id } => format!("exec-kill {job_id}"),
     }
 }
 

@@ -9,6 +9,8 @@ import { useEditor } from "@/stores/editorStore";
 import { useTerminals } from "@/stores/terminalsStore";
 import { useLayout } from "@/stores/layoutStore";
 import { useDiskScan } from "@/stores/diskScanStore";
+import { useDiff } from "@/stores/diffStore";
+import { useSearch } from "@/stores/searchStore";
 
 // POSIX single-quote a path so a `cd` survives spaces / shell metacharacters.
 function shQuote(p: string): string {
@@ -53,6 +55,19 @@ export const tauriFileSystem: FileSystemAdapter = {
   // the scan lifecycle (progress events, cancel, drill-down); this just triggers it.
   analyzeDiskUsage: async (sessionId, path) => {
     await useDiskScan.getState().openFor(sessionId, path);
+  },
+
+  // Open the Directory Diff view with this folder as side A. The user picks side
+  // B (a connection + path) in the overlay, then runs the comparison; the diff
+  // store owns that lifecycle.
+  compareDirectory: async (sessionId, path) => {
+    useDiff.getState().openFor(sessionId, path);
+  },
+
+  // Open the Fleet Search panel rooted at this folder. The user types a name or
+  // content query and runs it; the search store owns the streaming lifecycle.
+  searchDirectory: async (sessionId, path) => {
+    useSearch.getState().openFor(sessionId, path);
   },
 
   // Image previews for the grid view. Local files only for now — the backend

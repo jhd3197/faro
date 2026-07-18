@@ -9,9 +9,12 @@ import {
   Folder,
   FolderSync,
   Loader2,
+  Cloud,
+  CloudOff,
   X,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
+import { ipc } from "@/lib/ipc";
 import { useSync } from "@/stores/syncStore";
 import { useConnections } from "@/stores/connectionsStore";
 import { relTime } from "@/lib/format";
@@ -19,6 +22,7 @@ import { cn } from "@/lib/cn";
 import type {
   PairView,
   SyncDirection,
+  SyncMode,
   SyncPair,
   SyncStrategy,
 } from "@/lib/types";
@@ -81,10 +85,23 @@ function PairRow({ pair }: { pair: PairView }) {
   const setEnabled = useSync((s) => s.setEnabled);
   const remove = useSync((s) => s.remove);
   const syncNow = useSync((s) => s.syncNow);
+  const [freeing, setFreeing] = useState(false);
 
   const profile = profiles.find((p) => p.id === pair.profileId);
   const Arrow = pair.direction === "localToRemote" ? ArrowRight : ArrowLeft;
   const syncing = pair.state === "syncing";
+  const isOnDemand = pair.mode === "onDemand";
+
+  const freeUpSpace = async () => {
+    setFreeing(true);
+    try {
+      await ipc.virtualFsFreeUpSpace(pair.id);
+    } catch {
+      // best-effort; the OS "Free up space" also works from Explorer
+    } finally {
+      setFreeing(false);
+    }
+  };
 
   return (
     <div className="rounded-lg border border-border bg-bg-subtle p-3">
@@ -106,14 +123,22 @@ function PairRow({ pair }: { pair: PairView }) {
             <span className="truncate">{pair.remoteRoot}</span>
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-[11px] text-text-dim">
-            <span className="uppercase tracking-wider">{pair.strategy}</span>
+            {isOnDemand ? (
+              <span className="flex items-center gap-1 uppercase tracking-wider text-accent">
+                <Cloud size={10} /> on-demand
+              </span>
+            ) : (
+              <span className="uppercase tracking-wider">{pair.strategy}</span>
+            )}
             {pair.exclude?.length > 0 && (
               <span title={pair.exclude.join("\n")}>
                 {pair.exclude.length} exclude
                 {pair.exclude.length === 1 ? "" : "s"}
               </span>
             )}
-            {syncing ? (
+            {isOnDemand ? (
+              <span>Hydrates on open</span>
+            ) : syncing ? (
               <span className="flex items-center gap-1 text-warning">
                 <Loader2 size={10} className="animate-spin" />
                 Syncing{pair.inFlight > 0 ? ` · ${pair.inFlight} in flight` : ""}
@@ -133,16 +158,29 @@ function PairRow({ pair }: { pair: PairView }) {
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => syncNow(pair.id)}
-            disabled={!pair.enabled || syncing}
-            title="Sync now"
-            className="flex items-center gap-1 rounded-md border border-border bg-bg-panel px-2 py-1 text-[11px] text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"
-          >
-            <RefreshCw size={11} className={cn(syncing && "animate-spin")} />
-            Sync now
-          </button>
+          {isOnDemand ? (
+            <button
+              type="button"
+              onClick={freeUpSpace}
+              disabled={!pair.enabled || freeing}
+              title="Free up space — evict downloaded files back to placeholders"
+              className="flex items-center gap-1 rounded-md border border-border bg-bg-panel px-2 py-1 text-[11px] text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"
+            >
+              <CloudOff size={11} className={cn(freeing && "animate-pulse")} />
+              Free up space
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => syncNow(pair.id)}
+              disabled={!pair.enabled || syncing}
+              title="Sync now"
+              className="flex items-center gap-1 rounded-md border border-border bg-bg-panel px-2 py-1 text-[11px] text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"
+            >
+              <RefreshCw size={11} className={cn(syncing && "animate-spin")} />
+              Sync now
+            </button>
+          )}
           <Toggle
             checked={pair.enabled}
             onChange={(v) => setEnabled(pair.id, v)}
@@ -197,10 +235,18 @@ function PairForm({ onDone }: { onDone: () => void }) {
   );
   const [direction, setDirection] = useState<SyncDirection>("localToRemote");
   const [strategy, setStrategy] = useState<SyncStrategy>("additive");
+  const [mode, setMode] = useState<SyncMode>("mirror");
+  const [vfsSupported, setVfsSupported] = useState(false);
   const [pollIntervalSecs, setPollIntervalSecs] = useState(60);
   const [excludeText, setExcludeText] = useState("");
   const [mirrorDeleteCap, setMirrorDeleteCap] = useState(100);
   const [busy, setBusy] = useState(false);
+
+  // On-demand placeholders are Windows-only (and gated behind the `virtualfs`
+  // build); only offer the mode where it actually works.
+  useEffect(() => {
+    ipc.virtualFsSupported().then(setVfsSupported).catch(() => setVfsSupported(false));
+  }, []);
 
   const pickProfile = (id: string) => {
     setProfileId(id);
@@ -237,6 +283,7 @@ function PairForm({ onDone }: { onDone: () => void }) {
       remoteRoot: remoteRoot.trim(),
       direction,
       strategy,
+      mode,
       enabled: true,
       pollIntervalSecs,
       exclude: parseExclude(excludeText),
@@ -314,6 +361,31 @@ function PairForm({ onDone }: { onDone: () => void }) {
         />
       </Field>
 
+      {vfsSupported && (
+        <Field label="Mode">
+          <Segmented<SyncMode>
+            value={mode}
+            onChange={setMode}
+            options={[
+              { value: "mirror", label: "Mirror (copy files)" },
+              { value: "onDemand", label: "On-demand (placeholders)" },
+            ]}
+          />
+          {mode === "onDemand" && (
+            <div className="mt-2 flex items-start gap-2 rounded-md border border-accent/30 bg-accent-soft/40 px-2.5 py-2 text-[11.5px] text-text-muted">
+              <Cloud size={12} className="mt-0.5 shrink-0 text-accent" />
+              <span>
+                Files show in the folder as placeholders and download only when
+                opened. Use “Free up space” to evict them back to placeholders.
+                Direction, strategy, and excludes don’t apply.
+              </span>
+            </div>
+          )}
+        </Field>
+      )}
+
+      {mode === "mirror" && (
+        <>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Direction">
           <Segmented<SyncDirection>
@@ -398,6 +470,8 @@ function PairForm({ onDone }: { onDone: () => void }) {
           <span className="text-xs text-text-dim">seconds</span>
         </div>
       </Field>
+        </>
+      )}
 
       <div className="flex items-center justify-end gap-2 pt-1">
         <button

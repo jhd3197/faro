@@ -223,6 +223,41 @@ impl AgentSession {
             other => Err(anyhow!("unexpected exec reply: {other:?}")),
         }
     }
+
+    /// Launch a detached background job (Plan 10 Phase 4). The bridge owns the
+    /// `job_id`; the daemon spawns the command and returns at once. Poll it with
+    /// [`AgentSession::exec_poll`]. A pre-Plan-10 daemon doesn't know this op, so
+    /// the request fails at the transport — the bridge phrases that as "update
+    /// the agent".
+    pub async fn exec_start(&self, job_id: &str, command: &str, max_bytes: usize) -> Result<String> {
+        match self
+            .request(Request::ExecStart {
+                job_id: job_id.to_string(),
+                command: command.to_string(),
+                max_bytes: max_bytes as u64,
+            })
+            .await?
+        {
+            Response::ExecStarted { job_id } => Ok(job_id),
+            Response::Error { message, denied } => {
+                Err(anyhow!(if denied { format!("denied: {message}") } else { message }))
+            }
+            other => Err(anyhow!("unexpected exec-start reply: {other:?}")),
+        }
+    }
+
+    /// Poll a detached job's captured output + status.
+    pub async fn exec_poll(&self, job_id: &str) -> Result<AgentJobStatus> {
+        match self.request(Request::ExecPoll { job_id: job_id.to_string() }).await? {
+            Response::ExecStatus { running, exit_code, stdout, stderr, truncated, not_found } => {
+                Ok(AgentJobStatus { running, exit_code, stdout, stderr, truncated, not_found })
+            }
+            Response::Error { message, denied } => {
+                Err(anyhow!(if denied { format!("denied: {message}") } else { message }))
+            }
+            other => Err(anyhow!("unexpected exec-poll reply: {other:?}")),
+        }
+    }
 }
 
 /// Exec result from a Faro Agent daemon (mirrors the SSH `ExecOutput` shape the
@@ -234,6 +269,18 @@ pub struct AgentExecOutput {
     pub exit_code: Option<i32>,
     pub truncated: bool,
     pub timed_out: bool,
+}
+
+/// Status of a detached background job on a Faro Agent daemon (Plan 10 Phase 4),
+/// shaped like the SSH job-poll body so the bridge maps both the same way.
+pub struct AgentJobStatus {
+    pub running: bool,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub truncated: bool,
+    /// The id was unknown (never started, pruned, or the daemon restarted).
+    pub not_found: bool,
 }
 
 async fn fetch_system_info(channel: &mut SecureChannel<TcpStream>) -> Result<SystemInfo> {

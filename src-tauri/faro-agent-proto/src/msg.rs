@@ -15,6 +15,15 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// mDNS service type the daemon advertises and the controller browses.
 pub const SERVICE_TYPE: &str = "_faro-agent._tcp.local.";
 
+/// Bounds a caller-supplied exec timeout (`Exec.timeoutMs`) is clamped to. Shared
+/// so the daemon and the Agent Bridge agree on the ceiling — otherwise a
+/// `--timeout-ms 900000` accepted by the bridge would be silently re-capped to a
+/// lower value by the daemon (the drift Plan 10 Phase 0e closes). The floor keeps
+/// a typo like `1` from insta-killing a command; the ceiling (15 min) keeps a
+/// runaway command from parking forever.
+pub const EXEC_TIMEOUT_MS_MIN: u64 = 1_000;
+pub const EXEC_TIMEOUT_MS_MAX: u64 = 900_000;
+
 /// Kind of a directory entry — mirrors Faro's `remotefs::FileKind`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -118,6 +127,27 @@ pub enum Request {
         timeout_ms: u64,
         max_bytes: u64,
     },
+    /// Launch `command` as a **detached background job** and return at once with
+    /// its `jobId` (poll with [`Request::ExecPoll`]). The daemon-target analogue
+    /// of the SSH `~/.faro/jobs` dir — retires the `nohup … & ; tail -f log` loop
+    /// for multi-minute work that would blow the exec timeout (Plan 10 Phase 4).
+    /// The caller (Agent Bridge) supplies the `job_id` so id generation lives in
+    /// one place. These three ops are **additive** — a pre-Plan-10 daemon doesn't
+    /// know them and will drop the request; the controller degrades to a clear
+    /// "update the daemon" message. Gated like [`Request::Exec`].
+    ExecStart {
+        job_id: String,
+        command: String,
+        max_bytes: u64,
+    },
+    /// Poll a detached job's captured (capped) stdout/stderr and status.
+    ExecPoll {
+        job_id: String,
+    },
+    /// Kill a running detached job (best-effort). Replies [`Response::Ok`].
+    ExecKill {
+        job_id: String,
+    },
 }
 
 /// The daemon's reply. `Error` carries a human-readable message for any request.
@@ -154,6 +184,22 @@ pub enum Response {
         exit_code: Option<i32>,
         truncated: bool,
         timed_out: bool,
+    },
+    /// A detached job was launched (reply to [`Request::ExecStart`]).
+    ExecStarted {
+        job_id: String,
+    },
+    /// A detached job's current state (reply to [`Request::ExecPoll`]): `running`
+    /// until it exits, then `exit_code`; `stdout`/`stderr` are the capped capture
+    /// so far. `not_found` means the id is unknown (never started, or pruned).
+    ExecStatus {
+        running: bool,
+        exit_code: Option<i32>,
+        stdout: String,
+        stderr: String,
+        truncated: bool,
+        #[serde(default)]
+        not_found: bool,
     },
     /// The daemon refused or failed the request. `denied` distinguishes a policy
     /// refusal (the machine's owner disallowed this class of op) from an
