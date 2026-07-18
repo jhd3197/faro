@@ -121,6 +121,18 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
     case "foldersync_sync_now":
       return [];
 
+    // ---- disk usage ----
+    // The scan finishes instantly with a canned tree: diskScanStart returns an
+    // id, and the store immediately reads diskScanTree, which reports "done".
+    case "diskscan_start":
+      return "scan-1";
+    case "diskscan_status":
+    case "diskscan_tree":
+      return data.diskScanSnapshot;
+    case "diskscan_cancel":
+    case "diskscan_forget":
+      return null;
+
     // ---- edit-in-place ----
     case "start_edit":
       return {

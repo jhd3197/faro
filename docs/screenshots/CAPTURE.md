@@ -34,8 +34,9 @@ No real servers, credentials, or network are involved.
 | `transfers.png` | Transfers panel (progress + queued/done) |
 | `sync.png` | Directory-sync plan |
 | `agent-bridge.png` | Agent Bridge panel |
-| `new-connection.png` | Profile editor |
+| `new-connection.png` | Profile editor (two-pane, grouped protocol rail) |
 | `settings.png` | Settings |
+| `disk-usage.png` | Disk Usage explorer — treemap + size-ranked list |
 | `object-storage.png` | S3 bucket browsing |
 
 ## Tweaking the shots

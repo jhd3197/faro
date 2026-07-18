@@ -39,6 +39,13 @@ And when you want an AI agent to actually *do* something on a box, the **[Agent 
 
 </details>
 
+<details open>
+<summary><strong>Disk Usage Explorer</strong> — a WinDirStat-style treemap over <em>any</em> backend, with a size-ranked list and a server-side <code>du</code>/<code>find</code> fast path</summary>
+
+![Disk Usage Explorer](docs/screenshots/disk-usage.png)
+
+</details>
+
 <details>
 <summary><strong>Server rail</strong> — Discord-style connection bubbles, with an expandable labeled mode for spotting servers fast</summary>
 

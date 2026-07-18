@@ -204,7 +204,19 @@ async function main() {
     await shot("settings");
     await closeDialog();
 
-    // 10) S3 / object storage — focus a bucket, single layout.
+    // 10) Disk Usage explorer — treemap + size-ranked list over a remote tree.
+    // A full-screen overlay; drive the store straight into a finished scan.
+    // Captured before the bucket step so no stray connect toast lingers over it
+    // (api-prod is still connected from boot — sess-p-api is live).
+    await drive(() =>
+      window.__demo.useDiskScan.getState().openFor("sess-p-api", "/var/www/api")
+    );
+    await settle(1100); // let the ResizeObserver size the canvas + paint
+    await shot("disk-usage");
+    await drive(() => window.__demo.useDiskScan.getState().close());
+    await settle(200);
+
+    // 11) S3 / object storage — focus a bucket, single layout.
     await setLayout("single");
     await focus("p-s3");
     await settle(800);

@@ -3,6 +3,8 @@
 import type {
   BridgeStatus,
   ConnectionProfile,
+  DuNode,
+  ScanSnapshot,
   SyncPlan,
   Transfer,
 } from "@/lib/types";
@@ -281,6 +283,143 @@ export function syncPlan(localRoot: string, remoteRoot: string): SyncPlan {
     totalBytes: 577_354,
   };
 }
+
+// ---- Disk Usage (a fictional scan of api-prod's /var/www/api tree) ----
+// Directory sizes are computed as the sum of their children so the treemap and
+// the size-ranked list stay internally consistent (root size = grand total).
+type DuSpec = { name: string; bytes?: number; children?: DuSpec[] };
+
+function buildDu(spec: DuSpec, parentPath: string): DuNode {
+  const path = parentPath.endsWith("/")
+    ? `${parentPath}${spec.name}`
+    : `${parentPath}/${spec.name}`;
+  if (spec.children) {
+    const children = spec.children.map((c) => buildDu(c, path));
+    return {
+      name: spec.name,
+      path,
+      kind: "directory",
+      size: children.reduce((a, c) => a + c.size, 0),
+      children,
+    };
+  }
+  return { name: spec.name, path, kind: "file", size: spec.bytes ?? 0 };
+}
+
+const DU_SPEC: DuSpec = {
+  name: "api",
+  children: [
+    {
+      name: "node_modules",
+      children: [
+        {
+          name: "typescript",
+          children: [
+            { name: "typescript.js", bytes: 31_204_000 },
+            { name: "tsserver.js", bytes: 9_112_000 },
+            { name: "tsc.js", bytes: 2_240_000 },
+            { name: "lib.es2020.full.d.ts", bytes: 612_000 },
+          ],
+        },
+        {
+          name: "@aws-sdk",
+          children: [
+            { name: "client-s3.js", bytes: 16_300_000 },
+            { name: "client-dynamodb.js", bytes: 6_100_000 },
+            { name: "smithy-client.js", bytes: 3_400_000 },
+          ],
+        },
+        {
+          name: "@next",
+          children: [
+            { name: "swc-linux-x64-gnu.node", bytes: 41_300_000 },
+            { name: "dist.js", bytes: 12_400_000 },
+          ],
+        },
+        {
+          name: "webpack",
+          children: [
+            { name: "lib.js", bytes: 18_700_000 },
+            { name: "bin.js", bytes: 900_000 },
+          ],
+        },
+        {
+          name: "react-dom",
+          children: [
+            { name: "cjs.js", bytes: 5_900_000 },
+            { name: "umd.js", bytes: 2_100_000 },
+          ],
+        },
+        { name: "rxjs.js", bytes: 6_400_000 },
+        { name: "lodash.js", bytes: 4_800_000 },
+      ],
+    },
+    {
+      name: ".next",
+      children: [
+        {
+          name: "cache",
+          children: [
+            { name: "webpack.pack", bytes: 84_200_000 },
+            { name: "swc.bin", bytes: 36_100_000 },
+          ],
+        },
+        {
+          name: "static",
+          children: [
+            { name: "chunks.js", bytes: 41_900_000 },
+            { name: "media.bin", bytes: 4_300_000 },
+          ],
+        },
+        { name: "server.js", bytes: 18_100_000 },
+      ],
+    },
+    {
+      name: "logs",
+      children: [
+        { name: "access.log", bytes: 182_300_000 },
+        { name: "access.log.1", bytes: 64_000_000 },
+        { name: "error.log", bytes: 24_700_000 },
+      ],
+    },
+    {
+      name: "public",
+      children: [
+        { name: "images", children: [{ name: "hero.png", bytes: 9_200_000 }, { name: "sprites.png", bytes: 5_000_000 }] },
+        { name: "app.css", bytes: 3_100_000 },
+      ],
+    },
+    {
+      name: "src",
+      children: [
+        { name: "handlers.ts", bytes: 210_000 },
+        { name: "models.ts", bytes: 208_000 },
+        { name: "server.ts", bytes: 96_000 },
+      ],
+    },
+    { name: "package-lock.json", bytes: 2_133_000 },
+    { name: "package.json", bytes: 1_842 },
+    { name: "server.js", bytes: 9_233 },
+    { name: "Dockerfile", bytes: 893 },
+    { name: "README.md", bytes: 4_517 },
+  ],
+};
+
+export const diskScanTree: DuNode = buildDu(DU_SPEC, "/var/www");
+
+export const diskScanSnapshot: ScanSnapshot = {
+  id: "scan-1",
+  sessionId: "sess-p-api",
+  root: "/var/www/api",
+  state: "done",
+  // api-prod is SSH, so the fast `du`/`find` path is what would run.
+  strategy: "shell",
+  dirsScanned: 1_284,
+  filesFound: 18_402,
+  totalBytes: diskScanTree.size,
+  tree: diskScanTree,
+  startedAt: (T - 6) * 1000,
+};
 
 // A short colored shell transcript emitted when a mock terminal opens.
 export const TERMINAL_TRANSCRIPT =
