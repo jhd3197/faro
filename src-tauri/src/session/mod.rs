@@ -1293,8 +1293,12 @@ pub async fn ssh_connect(
             }
         }
         AuthMethod::Key { path, passphrase } => {
-            let key = russh_keys::load_secret_key(path, passphrase.as_deref())
-                .with_context(|| format!("load key {path}"))?;
+            // Expand a leading `~` so a stored `~/.ssh/id_ed25519` (and the
+            // absolute paths the in-app key generator writes) both load —
+            // load_secret_key does no tilde expansion of its own.
+            let resolved = crate::keys::expand_tilde(path);
+            let key = russh_keys::load_secret_key(&resolved, passphrase.as_deref())
+                .with_context(|| format!("load key {}", resolved.display()))?;
             session
                 .authenticate_publickey(&profile.username, Arc::new(key))
                 .await

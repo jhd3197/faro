@@ -17,6 +17,7 @@ mod diskscan;
 mod editor;
 mod foldersync;
 pub mod importers;
+pub mod keys;
 mod known_hosts;
 pub mod oauth;
 pub mod profiles;
@@ -184,6 +185,9 @@ pub fn run() {
             commands::save_profile,
             commands::reorder_profiles,
             commands::delete_profile,
+            commands::ssh_key_defaults,
+            commands::generate_ssh_key,
+            commands::ssh_public_key_for,
             commands::connect,
             commands::disconnect,
             commands::discover_agents,

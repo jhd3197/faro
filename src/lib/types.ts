@@ -6,6 +6,45 @@ export type AuthMethod =
   | { kind: "key"; path: string; passphrase?: string }
   | { kind: "agent" };
 
+// ---- In-app SSH key generation (mirrors src-tauri/src/keys.rs) ----
+
+export type SshKeyType = "ed25519" | "rsa";
+
+/** Request to generate a new SSH keypair on disk. */
+export interface GenerateKeyRequest {
+  keyType: SshKeyType;
+  /** RSA modulus size; ignored for ed25519. Backend defaults to 4096. */
+  bits?: number;
+  /** Encrypt the private key with this passphrase. Empty/absent = unencrypted. */
+  passphrase?: string;
+  /** Where to write the private key (may start with `~`). `.pub` sits alongside. */
+  path: string;
+  /** Trailing comment on the public-key line (e.g. `user@host`). */
+  comment?: string;
+  /** Overwrite an existing key at `path` instead of erroring. Default false. */
+  overwrite?: boolean;
+}
+
+/** A generated (or derived) key, as the editor needs it. */
+export interface GeneratedKey {
+  /** Absolute path the private key was written to (`.pub` sits beside it). */
+  path: string;
+  /** Full public-key line, ready for the server's `~/.ssh/authorized_keys`. */
+  publicKey: string;
+  /** OpenSSH-style `SHA256:…` fingerprint. */
+  fingerprint: string;
+  /** Wire key type: `ssh-ed25519` or `ssh-rsa`. */
+  keyType: string;
+}
+
+/** Suggested defaults for the generator UI. */
+export interface SshKeyDefaults {
+  /** Absolute path of the user's `~/.ssh` directory. */
+  dir: string;
+  /** A ready-to-use, non-colliding private-key path under `dir`. */
+  suggestedPath: string;
+}
+
 export type Protocol =
   | "sftp"
   | "ftp"
