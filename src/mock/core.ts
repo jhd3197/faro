@@ -110,6 +110,17 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
     case "sync_execute":
       return ["t-sync"];
 
+    // ---- continuous folder sync ----
+    // The backend returns the full pair list from every mutation; mirror that
+    // with an empty list so the status-bar pill and Sync settings render. (An
+    // unhandled command would resolve to null and crash StatusBar's `.filter`.)
+    case "foldersync_list":
+    case "foldersync_upsert":
+    case "foldersync_remove":
+    case "foldersync_set_enabled":
+    case "foldersync_sync_now":
+      return [];
+
     // ---- edit-in-place ----
     case "start_edit":
       return {
