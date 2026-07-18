@@ -44,6 +44,14 @@ futures = "0.3"
 russh = "0.45"
 russh-keys = "0.45"
 russh-sftp = "2.0"
+# Native OpenSSH-format private-key writing for the in-app key generator. russh
+# can only *write* PKCS#8 PEM, which OpenSSH itself refuses to load for Ed25519
+# ("error in libcrypto") — so a key generated via russh wouldn't work with
+# ssh/ssh-keygen. ssh-key writes real `-----BEGIN OPENSSH PRIVATE KEY-----`
+# files (encrypted with bcrypt-pbkdf + aes256-ctr like ssh-keygen does), which
+# both OpenSSH and russh's own loader read back. Already in the tree as a russh
+# transitive dep; pulled directly here for the generator.
+ssh-key = { version = "0.6", features = ["ed25519", "rsa", "encryption", "getrandom"] }
 
 # Faro Agent (Faro-to-Faro remote control) — shared wire protocol + encrypted
 # channel. mdns-sd powers LAN discovery of paired daemons. faro-agentd (a lib

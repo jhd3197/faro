@@ -43,6 +43,9 @@ docs/plans/prompt.md
 # PR description drafts from the create-pr skill (local scratch, not shipped)
 .pr/
 
+# Marketing drafts / channel notes (local scratch, not shipped)
+.marketing/
+
 # Generated demo screenshots — rebuild with `npm run shots` (already covered by
 # the global *.png rule above; listed explicitly so the intent is clear).
 docs/screenshots/*.png

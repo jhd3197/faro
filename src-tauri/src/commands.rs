@@ -70,6 +70,45 @@ pub async fn delete_profile(
     state.profiles.delete(&id).await.map_err(err)
 }
 
+// ---------- SSH key generation ----------
+
+/// Suggested defaults for the in-app key generator: the `~/.ssh` dir and a
+/// non-colliding filename under it.
+#[tauri::command]
+pub fn ssh_key_defaults() -> crate::keys::SshKeyDefaults {
+    crate::keys::defaults()
+}
+
+/// Generate a new SSH keypair, write the private key (PKCS#8 PEM, encrypted when
+/// a passphrase is given) plus a `.pub` beside it, and return the public-key line
+/// to install on the server. Key generation is CPU-bound (RSA-4096 especially),
+/// so it runs on the blocking pool rather than the async runtime.
+#[tauri::command]
+pub async fn generate_ssh_key(
+    req: crate::keys::GenerateKeyRequest,
+) -> Result<crate::keys::GeneratedKey, String> {
+    tokio::task::spawn_blocking(move || crate::keys::generate(&req))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+/// Derive the public-key line + fingerprint for an existing private key path, so
+/// the user can copy it without regenerating. Needs the passphrase if the key is
+/// encrypted.
+#[tauri::command]
+pub async fn ssh_public_key_for(
+    path: String,
+    passphrase: Option<String>,
+) -> Result<crate::keys::GeneratedKey, String> {
+    tokio::task::spawn_blocking(move || {
+        crate::keys::public_key_for(&path, passphrase.as_deref())
+    })
+    .await
+    .map_err(err)?
+    .map_err(err)
+}
+
 // ---------- Sessions ----------
 
 #[tauri::command]

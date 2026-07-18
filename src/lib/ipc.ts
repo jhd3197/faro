@@ -2,6 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ConnectionProfile,
+  GenerateKeyRequest,
+  GeneratedKey,
+  SshKeyDefaults,
   DirEntry,
   Capabilities,
   EditErrorEvent,
@@ -65,6 +68,20 @@ export const ipc = {
     invoke<void>("reorder_profiles", { ids }),
 
   deleteProfile: (id: string) => invoke<void>("delete_profile", { id }),
+
+  // ---- In-app SSH key generation ----
+
+  /** Suggested `~/.ssh` dir + a non-colliding filename for a new key. */
+  sshKeyDefaults: () => invoke<SshKeyDefaults>("ssh_key_defaults"),
+
+  /** Generate a keypair, write the private key + `.pub`, return the public key. */
+  generateSshKey: (req: GenerateKeyRequest) =>
+    invoke<GeneratedKey>("generate_ssh_key", { req }),
+
+  /** Derive the public-key line for an existing private key path (needs the
+   *  passphrase if the key is encrypted). */
+  sshPublicKeyFor: (path: string, passphrase?: string) =>
+    invoke<GeneratedKey>("ssh_public_key_for", { path, passphrase }),
 
   connect: (profileId: string) =>
     invoke<SessionId>("connect", { profileId }),

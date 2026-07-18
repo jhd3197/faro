@@ -15,6 +15,8 @@ import {
   type S3Provider,
   type WebdavProvider,
   type DiscoveredAgent,
+  type GeneratedKey,
+  type SshKeyType,
 } from "@/lib/types";
 import {
   ShieldCheck,
@@ -32,8 +34,13 @@ import {
   Radar,
   Loader2,
   Link2,
+  KeyRound,
+  Copy,
+  Sparkles,
+  FolderOpen,
   X,
 } from "lucide-react";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { cn } from "@/lib/cn";
 import { generatePassword } from "@/lib/password";
 import { ipc } from "@/lib/ipc";
@@ -560,24 +567,14 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             )}
 
             {authKind === "key" && (
-              <>
-                <Field label="Key path">
-                  <input
-                    value={keyPath}
-                    onChange={(e) => setKeyPath(e.target.value)}
-                    placeholder="~/.ssh/id_ed25519"
-                    className={inputCls}
-                  />
-                </Field>
-                <Field label="Passphrase (optional)">
-                  <input
-                    type="password"
-                    value={passphrase}
-                    onChange={(e) => setPassphrase(e.target.value)}
-                    className={inputCls}
-                  />
-                </Field>
-              </>
+              <KeyAuthSection
+                keyPath={keyPath}
+                setKeyPath={setKeyPath}
+                passphrase={passphrase}
+                setPassphrase={setPassphrase}
+                username={username}
+                host={host}
+              />
             )}
           </>
         )}
@@ -644,6 +641,366 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
         </div>
       </div>
     </div>
+  );
+}
+
+/// SFTP private-key auth: the key path + passphrase, plus the "no more PuTTYgen"
+/// helpers — generate a fresh keypair in place, or copy the public half of an
+/// existing key to install on the server. Generating writes the private key (and
+/// a `.pub` beside it), points this connection at it, and surfaces the public-key
+/// line ready to paste into the server's `~/.ssh/authorized_keys`.
+function KeyAuthSection({
+  keyPath,
+  setKeyPath,
+  passphrase,
+  setPassphrase,
+  username,
+  host,
+}: {
+  keyPath: string;
+  setKeyPath: (v: string) => void;
+  passphrase: string;
+  setPassphrase: (v: string) => void;
+  username: string;
+  host: string;
+}) {
+  const [showGen, setShowGen] = useState(false);
+  // The last generated/derived public key, shown in a copyable box. `justSaved`
+  // distinguishes a key we just wrote (show the saved path) from one derived
+  // from an existing private key (copy-only).
+  const [pubKey, setPubKey] = useState<GeneratedKey | null>(null);
+  const [justSaved, setJustSaved] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [derivingBusy, setDerivingBusy] = useState(false);
+
+  // Generator form state.
+  const [genType, setGenType] = useState<SshKeyType>("ed25519");
+  const [genPass, setGenPass] = useState("");
+  const [genPath, setGenPath] = useState("");
+  const [genBusy, setGenBusy] = useState(false);
+  const [overwrite, setOverwrite] = useState(false);
+
+  // Public-key comment: mirrors ssh-keygen's `user@host` default.
+  const comment = `${username || "faro"}@${host || "faro"}`;
+
+  const toggleGenerator = useCallback(async () => {
+    setShowGen((s) => !s);
+    if (!genPath) {
+      try {
+        setGenPath((await ipc.sshKeyDefaults()).suggestedPath);
+      } catch {
+        // Non-fatal — the user can type a path.
+      }
+    }
+  }, [genPath]);
+
+  const browsePrivateKey = async () => {
+    const picked = await open({
+      title: "Select a private key file",
+      multiple: false,
+      directory: false,
+    });
+    if (typeof picked === "string") setKeyPath(picked);
+  };
+
+  const browseSaveLocation = async () => {
+    const picked = await save({
+      title: "Save new private key as",
+      defaultPath: genPath || undefined,
+    });
+    if (picked) setGenPath(picked);
+  };
+
+  const copyLine = async (line: string) => {
+    try {
+      await navigator.clipboard.writeText(line);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1200);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const doGenerate = async () => {
+    if (!genPath.trim()) return;
+    setGenBusy(true);
+    try {
+      const res = await ipc.generateSshKey({
+        keyType: genType,
+        bits: genType === "rsa" ? 4096 : undefined,
+        passphrase: genPass || undefined,
+        path: genPath.trim(),
+        comment,
+        overwrite,
+      });
+      // Point the connection at the fresh key and carry its passphrase across.
+      setKeyPath(res.path);
+      setPassphrase(genPass);
+      setPubKey(res);
+      setJustSaved(true);
+      setShowGen(false);
+      setOverwrite(false);
+      const copiedOk = await copyLine(res.publicKey);
+      toast.success(
+        copiedOk ? "Key created & public key copied" : "Key created",
+        `Saved to ${res.path}`
+      );
+    } catch (e) {
+      const msg = String(e);
+      if (/already exists/i.test(msg) && !overwrite) {
+        // Offer the overwrite escape hatch instead of a dead end.
+        setOverwrite(true);
+        toast.error(
+          "A key already exists there",
+          "Enable overwrite to replace it, or change the name."
+        );
+      } else {
+        toast.error("Key generation failed", msg);
+      }
+    } finally {
+      setGenBusy(false);
+    }
+  };
+
+  const derivePublic = async () => {
+    if (!keyPath.trim()) return;
+    setDerivingBusy(true);
+    try {
+      const res = await ipc.sshPublicKeyFor(keyPath.trim(), passphrase || undefined);
+      setPubKey(res);
+      setJustSaved(false);
+      const copiedOk = await copyLine(res.publicKey);
+      if (copiedOk)
+        toast.success("Public key copied", "Add it to the server's authorized_keys.");
+    } catch (e) {
+      const msg = String(e);
+      toast.error(
+        "Couldn't read the public key",
+        /passphrase|decrypt|password|cipher/i.test(msg)
+          ? "If the key is encrypted, enter its passphrase above first."
+          : msg
+      );
+    } finally {
+      setDerivingBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <Field label="Key path">
+        <div className="flex gap-1.5">
+          <input
+            value={keyPath}
+            onChange={(e) => setKeyPath(e.target.value)}
+            placeholder="~/.ssh/id_ed25519"
+            className={cn(inputCls, "flex-1")}
+          />
+          <button
+            type="button"
+            onClick={browsePrivateKey}
+            title="Browse for an existing private key"
+            aria-label="Browse for an existing private key"
+            className="flex shrink-0 items-center rounded-md border border-border bg-bg-subtle px-2.5 text-text-muted hover:bg-bg-hover hover:text-text"
+          >
+            <FolderOpen size={14} />
+          </button>
+        </div>
+      </Field>
+
+      <Field label="Passphrase (optional)">
+        <input
+          type="password"
+          value={passphrase}
+          onChange={(e) => setPassphrase(e.target.value)}
+          placeholder="Unlocks an encrypted key"
+          autoComplete="off"
+          className={inputCls}
+        />
+      </Field>
+
+      {/* Make a new key, or copy the public half of an existing one. */}
+      <div className="mb-3 flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={toggleGenerator}
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[11.5px] font-medium transition-colors",
+            showGen
+              ? "border-accent/40 bg-accent-soft text-accent"
+              : "border-border bg-bg-subtle text-text-muted hover:bg-bg-hover hover:text-text"
+          )}
+        >
+          <Sparkles size={12} />
+          Generate new key…
+        </button>
+        {keyPath.trim() && (
+          <button
+            type="button"
+            onClick={derivePublic}
+            disabled={derivingBusy}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-[11.5px] text-text-muted transition-colors hover:bg-bg-hover hover:text-text disabled:opacity-50"
+          >
+            {derivingBusy ? (
+              <Loader2 size={12} className="animate-spin" />
+            ) : (
+              <Copy size={12} />
+            )}
+            Copy public key
+          </button>
+        )}
+      </div>
+
+      {/* Generator panel */}
+      {showGen && (
+        <div className="mb-3 rounded-md border border-border bg-bg-subtle p-2.5">
+          <div className="mb-2 flex items-center gap-1.5 text-xs font-medium text-text">
+            <KeyRound size={13} className="text-accent" />
+            Generate a new SSH key
+          </div>
+
+          <Field label="Type">
+            <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-bg-panel p-1">
+              {(
+                [
+                  ["ed25519", "Ed25519", "Modern · recommended"],
+                  ["rsa", "RSA 4096", "Maximum compatibility"],
+                ] as const
+              ).map(([val, label, sub]) => (
+                <button
+                  key={val}
+                  type="button"
+                  onClick={() => setGenType(val)}
+                  className={cn(
+                    "flex flex-col items-start rounded-sm px-2 py-1.5 text-left transition-colors",
+                    genType === val
+                      ? "bg-accent-soft text-text ring-1 ring-inset ring-accent/40"
+                      : "text-text-muted hover:bg-bg-hover hover:text-text"
+                  )}
+                >
+                  <span className="text-[11px] font-semibold">{label}</span>
+                  <span className="text-[10px] text-text-dim">{sub}</span>
+                </button>
+              ))}
+            </div>
+          </Field>
+
+          <Field label="Save to">
+            <div className="flex gap-1.5">
+              <input
+                value={genPath}
+                onChange={(e) => setGenPath(e.target.value)}
+                placeholder="~/.ssh/faro_ed25519"
+                spellCheck={false}
+                className={cn(inputCls, "flex-1 font-mono text-[11px]")}
+              />
+              <button
+                type="button"
+                onClick={browseSaveLocation}
+                title="Choose a location"
+                aria-label="Choose a save location"
+                className="flex shrink-0 items-center rounded-md border border-border bg-bg-panel px-2.5 text-text-muted hover:bg-bg-hover hover:text-text"
+              >
+                <FolderOpen size={14} />
+              </button>
+            </div>
+          </Field>
+
+          <Field label="Passphrase (optional)">
+            <input
+              type="password"
+              value={genPass}
+              onChange={(e) => setGenPass(e.target.value)}
+              placeholder="Encrypts the private key at rest"
+              autoComplete="new-password"
+              className={inputCls}
+            />
+          </Field>
+
+          {overwrite && (
+            <label className="mb-2 flex cursor-pointer items-center gap-2 text-[11px] text-danger">
+              <input
+                type="checkbox"
+                checked={overwrite}
+                onChange={(e) => setOverwrite(e.target.checked)}
+                className="h-3.5 w-3.5 accent-[rgb(var(--accent))]"
+              />
+              Overwrite the existing key at this path
+            </label>
+          )}
+
+          <button
+            type="button"
+            onClick={doGenerate}
+            disabled={genBusy || !genPath.trim()}
+            className="btn-accent flex w-full items-center justify-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {genBusy ? (
+              <Loader2 size={14} className="animate-spin" />
+            ) : (
+              <Sparkles size={14} />
+            )}
+            {genBusy ? "Generating…" : "Generate key"}
+          </button>
+          <div className="mt-1.5 text-[11px] leading-relaxed text-text-dim">
+            Faro writes the private key here (and a{" "}
+            <span className="font-mono">.pub</span> beside it) and points this
+            connection at it. Then add the public key to the server.
+          </div>
+        </div>
+      )}
+
+      {/* Public-key result — copyable, with the "put this on the server" nudge. */}
+      {pubKey && (
+        <div className="mb-3 rounded-md border border-success/30 bg-success/5 p-2.5">
+          <div className="mb-1.5 flex items-center gap-1.5 text-[11.5px] font-medium text-text">
+            <Check size={13} className="shrink-0 text-success" />
+            <span>
+              {justSaved ? "Key created" : "Public key"} — add it to the server's{" "}
+              <span className="font-mono text-text-muted">
+                ~/.ssh/authorized_keys
+              </span>
+            </span>
+          </div>
+          <textarea
+            readOnly
+            value={pubKey.publicKey}
+            rows={3}
+            spellCheck={false}
+            onFocus={(e) => e.currentTarget.select()}
+            className={cn(
+              inputCls,
+              "resize-none break-all font-mono text-[11px] leading-snug"
+            )}
+          />
+          <div className="mt-1.5 flex items-center justify-between gap-2">
+            <span
+              className="min-w-0 truncate font-mono text-[10px] text-text-dim"
+              title={pubKey.fingerprint}
+            >
+              {pubKey.fingerprint}
+            </span>
+            <button
+              type="button"
+              onClick={() => copyLine(pubKey.publicKey)}
+              className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border bg-bg-subtle px-2 py-1 text-[11px] text-text-muted hover:bg-bg-hover hover:text-text"
+            >
+              {copied ? (
+                <Check size={11} className="text-accent" />
+              ) : (
+                <Copy size={11} />
+              )}
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+          {justSaved && (
+            <div className="mt-1.5 text-[10.5px] text-text-dim">
+              Saved to <span className="font-mono">{pubKey.path}</span>
+            </div>
+          )}
+        </div>
+      )}
+    </>
   );
 }
 
