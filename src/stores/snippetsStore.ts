@@ -91,7 +91,7 @@ export const useSnippets = create<SnippetsState>((set, get) => ({
 
   load: async () => {
     try {
-      set({ snippets: await ipc.snippetList() });
+      set({ snippets: (await ipc.snippetList()) ?? [] });
     } catch {
       // Backend not ready yet — a later openPanel() / init() retries.
     }

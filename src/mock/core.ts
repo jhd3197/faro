@@ -6,7 +6,41 @@ import { emit } from "./event";
 
 type Args = Record<string, any>;
 
-const emittedTerminals = new Set<string>();
+// Each open_terminal call gets a distinct id so split panes each render their
+// own transcript (Plan 11). The registry opens one PTY per pane.
+let terminalCounter = 0;
+
+// A tiny in-memory snippets store so the demo's Snippets panel / palette work
+// (save/delete round-trip) without the Rust backend (Plan 11 Phase 4).
+let snippets: any[] = [
+  {
+    id: "sn-tail",
+    name: "Tail nginx errors",
+    body: "sudo tail -n 100 -f /var/log/nginx/error.log",
+    folder: "nginx",
+    useCount: 6,
+    createdMs: 0,
+    updatedMs: 0,
+  },
+  {
+    id: "sn-wp",
+    name: "WP core update",
+    body: "wp core update --path=/var/www/{{site}}",
+    folder: "wordpress",
+    useCount: 3,
+    createdMs: 0,
+    updatedMs: 0,
+  },
+  {
+    id: "sn-restart",
+    name: "Restart service",
+    body: "sudo systemctl restart {{service}}",
+    folder: null,
+    useCount: 1,
+    createdMs: 0,
+    updatedMs: 0,
+  },
+];
 
 export async function invoke<T = unknown>(cmd: string, args: Args = {}): Promise<T> {
   const out = await dispatch(cmd, args);
@@ -67,19 +101,37 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
 
     // ---- terminal ----
     case "open_terminal": {
-      const id = "term-1";
-      // Push the canned transcript once the xterm is listening. Guard against
-      // StrictMode's double-mount so the transcript isn't emitted twice.
-      if (!emittedTerminals.has(id)) {
-        emittedTerminals.add(id);
-        setTimeout(() => emit("terminal://data", { terminalId: id, data: data.TERMINAL_TRANSCRIPT }), 120);
-      }
+      const id = `term-${++terminalCounter}`;
+      // Push the canned transcript once the xterm is listening.
+      setTimeout(
+        () => emit("terminal://data", { terminalId: id, data: data.TERMINAL_TRANSCRIPT }),
+        120
+      );
       return id;
     }
     case "terminal_write":
     case "terminal_resize":
     case "close_terminal":
       return null;
+
+    // ---- snippets (Plan 11 Phase 4) ----
+    case "snippet_list":
+      return snippets;
+    case "snippet_save": {
+      const s = a.snippet;
+      const i = snippets.findIndex((x) => x.id === s.id);
+      snippets = i >= 0 ? snippets.map((x) => (x.id === s.id ? s : x)) : [...snippets, s];
+      return snippets;
+    }
+    case "snippet_delete":
+      snippets = snippets.filter((x) => x.id !== a.id);
+      return snippets;
+    case "snippet_run": {
+      snippets = snippets.map((x) =>
+        x.id === a.id ? { ...x, useCount: x.useCount + 1 } : x
+      );
+      return snippets;
+    }
 
     // ---- transfers ----
     case "list_transfers":
