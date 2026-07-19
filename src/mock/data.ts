@@ -125,6 +125,7 @@ const REMOTE: Record<string, Array<Omit<DirEntry, "path">>> = {
     d("src", 3_600),
     d("dist", 1_800),
     d("logs", 600),
+    d("uploads", 1_200),
     f("package.json", 1_842, 7_200),
     f("package-lock.json", 284_117, 7_200),
     f("server.js", 9_233, 3_600, 0o644),
@@ -139,6 +140,18 @@ const REMOTE: Record<string, Array<Omit<DirEntry, "path">>> = {
     d("current", 1_200),
     f("deploy.sh", 2_140, 3_600, 0o755),
     f("nginx.conf", 3_980, 86_400, 0o644),
+  ],
+  // An image-heavy uploads folder — the exact "wp-content/uploads" case Plan 13
+  // Phase 1 targets, used by scripts/verify-previews.mjs.
+  "/var/www/api/uploads": [
+    f("hero-banner.jpg", 842_113, 3_600),
+    f("logo.png", 24_517, 7_200),
+    f("avatar-01.png", 18_204, 5_400),
+    f("screenshot.webp", 96_882, 1_800),
+    f("favicon.ico", 4_286, 90_000),
+    f("diagram.gif", 51_004, 600),
+    f("notes.txt", 1_204, 7_200),
+    f("data.json", 8_442, 600),
   ],
 };
 

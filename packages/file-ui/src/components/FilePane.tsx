@@ -30,6 +30,7 @@ import {
   LayoutGrid,
   Upload,
   Download,
+  Image as ImageIcon,
 } from "lucide-react";
 import type {
   Capabilities,
@@ -165,7 +166,23 @@ export function FilePane({
     setPaneViewMode,
     setPaneDensity,
     editorLabel,
+    remoteImagePreviews,
+    setRemoteImagePreviews,
   } = settings;
+
+  // Re-key the thumbnail loader whenever the remote-preview toggle flips, so
+  // already-mounted Thumbnails re-run their effect the moment the user clicks
+  // the toolbar toggle (off→on fetches; on→off falls back to icons) instead of
+  // waiting for the next navigation. Wrapping `fs.thumbnail` gives a fresh
+  // function identity per toggle state — the dep the Thumbnail effect watches.
+  const loadThumb = useMemo(
+    () =>
+      fs.thumbnail
+        ? (sid: SessionId, entry: DirEntry, signal?: AbortSignal) =>
+            fs.thumbnail!(sid, entry, signal)
+        : undefined,
+    [fs, remoteImagePreviews]
+  );
 
   const [entries, setEntries] = useState<DirEntry[]>([]);
   const [draftPath, setDraftPath] = useState(path);
@@ -1037,6 +1054,26 @@ export function FilePane({
           >
             <AlignJustify size={13} />
           </button>
+          {sessionId &&
+            sessionId !== LOCAL_SESSION &&
+            setRemoteImagePreviews && (
+              <button
+                onClick={() => setRemoteImagePreviews(!remoteImagePreviews)}
+                className={cn(
+                  "rounded p-1 hover:bg-bg-hover",
+                  remoteImagePreviews
+                    ? "text-accent"
+                    : "text-text-dim hover:text-text"
+                )}
+                title={
+                  remoteImagePreviews
+                    ? "Image previews on — click to turn off (fetches images to thumbnail them)"
+                    : "Image previews off — click to show remote image thumbnails"
+                }
+              >
+                <ImageIcon size={13} />
+              </button>
+            )}
         </div>
         {!editingPath && (
           <button
@@ -1161,7 +1198,7 @@ export function FilePane({
                 showModified={showModified}
                 showPermsCol={showPermsCol}
                 sessionId={sessionId}
-                loadThumb={fs.thumbnail}
+                loadThumb={loadThumb}
                 onClick={(e) => onRowClick(entry, e)}
                 onActivate={() => onRowActivate(entry)}
                 onDragStart={(e) => onRowDragStart(e, entry)}
@@ -1184,7 +1221,7 @@ export function FilePane({
               showModified={showModified}
               showPermsCol={showPermsCol}
               sessionId={sessionId}
-              loadThumb={fs.thumbnail}
+              loadThumb={loadThumb}
               onClick={(e) => onRowClick(entry, e)}
               onActivate={() => onRowActivate(entry)}
               onDragStart={(e) => onRowDragStart(e, entry)}
@@ -1325,7 +1362,11 @@ function Row({
   showModified: boolean;
   showPermsCol: boolean;
   sessionId: SessionId | null;
-  loadThumb?: (sessionId: SessionId, entry: DirEntry) => Promise<Blob | null>;
+  loadThumb?: (
+    sessionId: SessionId,
+    entry: DirEntry,
+    signal?: AbortSignal
+  ) => Promise<Blob | null>;
   onClick: (e: React.MouseEvent) => void;
   onActivate: () => void;
   onDragStart: (e: React.DragEvent) => void;
@@ -1357,8 +1398,26 @@ function Row({
       <Icon size={size} className={cn("shrink-0", iconColor)} />
     );
   const iconEl = glyph(13);
-  // Show a real image preview in the grid when the adapter can supply bytes.
+  // Show a real image preview when the adapter can supply bytes. The adapter
+  // gates the (expensive, network) remote kind on the `remoteImagePreviews`
+  // setting — when it's off it returns null fast and the icon fallback shows,
+  // so mounting Thumbnail here costs nothing extra.
   const canThumb = !!loadThumb && !!sessionId && isImage(entry);
+  // Small inline thumbnail for the list / details rows (grid uses its own,
+  // larger one below). Reuses the same lazy, cached pipeline.
+  const rowThumb =
+    canThumb && sessionId ? (
+      <Thumbnail
+        sessionId={sessionId}
+        entry={entry}
+        load={loadThumb!}
+        size={18}
+        fallback={iconEl}
+        className="shrink-0"
+      />
+    ) : (
+      iconEl
+    );
 
   if (viewMode === "grid") {
     const bigIcon = glyph(30);
@@ -1420,7 +1479,7 @@ function Row({
           sel
         )}
       >
-        {iconEl}
+        {rowThumb}
         <span className="min-w-0 flex-1 truncate">{entry.name}</span>
         <span className="shrink-0 text-xs tabular-nums text-text-dim">
           {entry.kind === "file" ? fmtSize(entry.size) : ""}
@@ -1450,7 +1509,7 @@ function Row({
       )}
     >
       <span className="flex min-w-0 items-center gap-2">
-        {iconEl}
+        {rowThumb}
         <span className="truncate">{entry.name}</span>
       </span>
       {showModified && (

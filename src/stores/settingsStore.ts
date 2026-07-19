@@ -6,6 +6,9 @@ export type SortField = "name" | "size" | "modified";
 export type SortDirection = "asc" | "desc";
 export type PaneViewMode = "list" | "details" | "grid";
 export type PaneDensity = "comfortable" | "compact";
+// Remote image previews are opt-in (default off) because a preview means a
+// download; local previews are always on and unaffected by this. See Plan 13.
+export type RemoteImagePreviews = "off" | "on";
 // "single" = one server-focused pane (default); "dual" = local + remote panes.
 export type BrowserLayout = "single" | "dual";
 export type AppTheme =
@@ -92,6 +95,9 @@ interface SettingsState {
   paneViewMode: PaneViewMode;
   paneDensity: PaneDensity;
   browserLayout: BrowserLayout;
+  /** Remote image previews: `"off"` (default) or `"on"`. Local previews are
+   *  always on; this only gates the network-fetching remote kind (Plan 13). */
+  remoteImagePreviews: RemoteImagePreviews;
   /** Expand the connection rail into a labeled list (names + addresses) instead
    *  of the compact Discord-style bubble strip. */
   railExpanded: boolean;
@@ -126,6 +132,7 @@ interface SettingsState {
   setPaneViewMode: (m: PaneViewMode) => void;
   setPaneDensity: (d: PaneDensity) => void;
   setBrowserLayout: (l: BrowserLayout) => void;
+  setRemoteImagePreviews: (v: RemoteImagePreviews) => void;
   setRailExpanded: (v: boolean) => void;
   toggleRailGroup: (name: string) => void;
   setTerminalFontSize: (n: number) => void;
@@ -177,6 +184,7 @@ type Persisted = Omit<
   | "setPaneViewMode"
   | "setPaneDensity"
   | "setBrowserLayout"
+  | "setRemoteImagePreviews"
   | "setRailExpanded"
   | "toggleRailGroup"
   | "setTerminalFontSize"
@@ -202,6 +210,7 @@ const DEFAULTS: Persisted = {
   paneViewMode: "grid",
   paneDensity: "comfortable",
   browserLayout: "single",
+  remoteImagePreviews: "off",
   railExpanded: false,
   railCollapsedGroups: [],
   terminalFontSize: 13,
@@ -288,6 +297,7 @@ export const useSettings = create<SettingsState>((set, get) => ({
   setPaneViewMode: (m) => mutate(set, get, "paneViewMode", m),
   setPaneDensity: (d) => mutate(set, get, "paneDensity", d),
   setBrowserLayout: (l) => mutate(set, get, "browserLayout", l),
+  setRemoteImagePreviews: (v) => mutate(set, get, "remoteImagePreviews", v),
   setRailExpanded: (v) => mutate(set, get, "railExpanded", v),
   toggleRailGroup: (name) => {
     const cur = get().railCollapsedGroups;

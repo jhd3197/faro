@@ -243,6 +243,12 @@ export function Settings({ onClose }: Props) {
                 ]}
               />
             </Field>
+            <ToggleField
+              label="Remote image previews"
+              help="Show thumbnails for images on remote connections (SFTP, S3, FTP, …). Off by default — previews are fetched over the network, but only for the rows you scroll to, capped and cached. Local images always preview. Toggle per connection from the file toolbar."
+              checked={s.remoteImagePreviews === "on"}
+              onChange={(v) => s.setRemoteImagePreviews(v ? "on" : "off")}
+            />
             <Field
               label="Default editor"
               help="Command used to open files for edit-in-place (e.g. code). Blank = your OS default app."

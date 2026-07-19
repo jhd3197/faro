@@ -19,10 +19,13 @@ export function FileUiBridge({ children }: { children: ReactNode }) {
         paneViewMode: s.paneViewMode,
         paneDensity: s.paneDensity,
         editorLabel: s.defaultEditor || undefined,
+        remoteImagePreviews: s.remoteImagePreviews === "on",
         setSortField: s.setSortField,
         setSortDirection: s.setSortDirection,
         setPaneViewMode: s.setPaneViewMode,
         setPaneDensity: s.setPaneDensity,
+        setRemoteImagePreviews: (on) =>
+          s.setRemoteImagePreviews(on ? "on" : "off"),
       }}
     >
       {children}

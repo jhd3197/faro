@@ -6,7 +6,11 @@ interface Props {
   sessionId: SessionId;
   entry: DirEntry;
   /** Fetch raw image bytes (the adapter's `thumbnail`). */
-  load: (sessionId: SessionId, entry: DirEntry) => Promise<Blob | null>;
+  load: (
+    sessionId: SessionId,
+    entry: DirEntry,
+    signal?: AbortSignal
+  ) => Promise<Blob | null>;
   /** Square box size in CSS px. */
   size?: number;
   /** Icon shown until a preview loads, or if none is available. */
@@ -39,10 +43,13 @@ export function Thumbnail({
 
     let cancelled = false;
     let objectUrl: string | null = null;
+    // Aborts a remote fetch the moment this row scrolls back out / unmounts, so
+    // a fast scroll never spends network on rows nobody ends up looking at.
+    const ac = new AbortController();
 
     const run = async () => {
       try {
-        const blob = await load(sessionId, entry);
+        const blob = await load(sessionId, entry, ac.signal);
         if (cancelled) return;
         if (!blob) {
           setFailed(true);
@@ -77,6 +84,7 @@ export function Thumbnail({
 
     return () => {
       cancelled = true;
+      ac.abort();
       io.disconnect();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };

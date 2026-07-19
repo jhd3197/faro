@@ -109,6 +109,10 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       return data.capabilities(a.sessionId);
     case "read_file_preview":
       throw new Error("no preview in demo mode");
+    case "preview_thumbnail":
+      // A valid 8×8 RGBA PNG so the mock harness can exercise the remote-preview
+      // UI (toggle → thumbnail render → downscale) without a real backend.
+      return "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAANElEQVR42n3EQQEAEAAEwY0jhBDe3kIIIYQQQmjFJdjHDKXfZ6jJ0JJhJMNMhpUMOxlOMh/OWKPBK+ZUdQAAAABJRU5ErkJggg==";
     case "rename_path":
     case "delete_path":
     case "create_directory":

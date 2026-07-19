@@ -166,6 +166,18 @@ export const ipc = {
   readFilePreview: (sessionId: SessionId, path: string) =>
     invoke<string>("read_file_preview", { sessionId, path }),
 
+  // Base64 of a Rust-decoded+downscaled thumbnail for a remote (or local) image
+  // (Plan 13 Phase 1). `signal` is the file's change token (an object-store ETag
+  // or "size:mtime") — it keys the disk cache so edits invalidate. Rejects for
+  // oversized/undecodable/unsupported files; the adapter maps that to "no
+  // preview" → the type icon.
+  previewThumbnail: (
+    sessionId: SessionId,
+    path: string,
+    fileSize: number,
+    signal: string
+  ) => invoke<string>("preview_thumbnail", { sessionId, path, fileSize, signal }),
+
   openTerminal: (sessionId: SessionId, cols: number, rows: number) =>
     invoke<string>("open_terminal", { sessionId, cols, rows }),
 
