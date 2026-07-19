@@ -40,6 +40,7 @@ import { useSync } from "./stores/syncStore";
 import { useSettings } from "./stores/settingsStore";
 import { onDeepLink } from "./lib/ipc";
 import { runSecretMigration, runSettingsMigration } from "./lib/secretMigration";
+import { initNotifications } from "./lib/notifications";
 import { openTerminalWindow } from "./lib/popout";
 import { toast } from "./stores/toastStore";
 import type { DeepLink, Protocol, ConnectionProfile } from "./lib/types";
@@ -110,6 +111,14 @@ export default function App() {
   useEffect(() => {
     void runSecretMigration();
     void runSettingsMigration();
+  }, []);
+
+  // Desktop notifications (Plan 16 Phase 3): OS toasts for the curated events
+  // (transfer batch done/failed, folder-sync error, edit-in-place save failure),
+  // gated by the `notifications` setting + window focus.
+  useEffect(() => {
+    const cleanup = initNotifications();
+    return cleanup;
   }, []);
 
   return (

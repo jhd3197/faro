@@ -12,6 +12,7 @@ import { useDiskScan } from "@/stores/diskScanStore";
 import { useSnippets } from "@/stores/snippetsStore";
 import { useToasts } from "@/stores/toastStore";
 import { useBindings } from "@/stores/bindingsStore";
+import { useSync } from "@/stores/syncStore";
 import { emit } from "./event";
 
 (window as any).__demo = {
@@ -25,6 +26,7 @@ import { emit } from "./event";
   useSnippets,
   useToasts,
   useBindings,
+  useSync,
   // Convenience: focus a server by profile id (connects if needed).
   focusProfile: (profileId: string) =>
     useConnections.getState().connect(profileId),

@@ -24,6 +24,10 @@ export default defineConfig(async ({ mode }) => ({
             "@tauri-apps/api/path": path.resolve(__dirname, "src/mock/path.ts"),
             "@tauri-apps/api/window": path.resolve(__dirname, "src/mock/window.ts"),
             "@tauri-apps/api/app": path.resolve(__dirname, "src/mock/app.ts"),
+            "@tauri-apps/plugin-notification": path.resolve(
+              __dirname,
+              "src/mock/notification.ts"
+            ),
           }
         : {}),
     },

@@ -71,6 +71,14 @@ export type TerminalTheme =
   | "rosepine"
   | "everforest";
 
+/** Desktop-notification preference (Plan 16 Phase 3). OS toasts for a curated
+ *  set of events, off-window by default so they don't duplicate in-app toasts. */
+export interface NotificationSettings {
+  enabled: boolean;
+  /** Only notify when Faro isn't the focused window (the default). */
+  unfocusedOnly: boolean;
+}
+
 interface SettingsState {
   // Appearance
   appTheme: AppTheme;
@@ -119,6 +127,9 @@ interface SettingsState {
   // Connections
   defaultPort: number;
 
+  // Notifications (Plan 16 Phase 3)
+  notifications: NotificationSettings;
+
   setAppTheme: (t: AppTheme) => void;
   setAccentColor: (hex: string) => void;
   setOverwritePolicy: (p: OverwritePolicy) => void;
@@ -142,6 +153,7 @@ interface SettingsState {
   setTerminalCopyOnSelect: (v: boolean) => void;
   setTerminalSuggestions: (v: boolean) => void;
   setDefaultPort: (n: number) => void;
+  setNotifications: (v: NotificationSettings) => void;
 }
 
 const STORAGE_KEY = "faro.settings.v1";
@@ -194,6 +206,7 @@ type Persisted = Omit<
   | "setTerminalCopyOnSelect"
   | "setTerminalSuggestions"
   | "setDefaultPort"
+  | "setNotifications"
 >;
 
 const DEFAULTS: Persisted = {
@@ -221,6 +234,7 @@ const DEFAULTS: Persisted = {
   terminalCopyOnSelect: true,
   terminalSuggestions: true,
   defaultPort: 22,
+  notifications: { enabled: true, unfocusedOnly: true },
 };
 
 // The persisted setting keys, in one place — also the authoritative allow-list
@@ -317,6 +331,7 @@ export const useSettings = create<SettingsState>((set, get) => ({
   setTerminalSuggestions: (v) =>
     mutate(set, get, "terminalSuggestions", v),
   setDefaultPort: (n) => mutate(set, get, "defaultPort", n),
+  setNotifications: (v) => mutate(set, get, "notifications", v),
 }));
 
 /** Reload settings from faro.db and merge them into the live store. Used by

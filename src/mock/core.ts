@@ -260,6 +260,10 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
     case "export_agent_log":
       return "C:\\Users\\demo\\Downloads\\faro-agent-console.txt";
 
+    // ---- folder sync (no pairs in the demo) ----
+    case "foldersync_list":
+      return [];
+
     // ---- one-click PATH install (Plan 16 Phase 4) ----
     case "path_status":
       return pathStatus();

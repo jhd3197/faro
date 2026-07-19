@@ -6,11 +6,14 @@ import {
   TerminalSquare,
   Plus,
   Trash2,
+  Bell,
 } from "lucide-react";
 import { ipc } from "@/lib/ipc";
 import { toast } from "@/stores/toastStore";
+import { useSettings } from "@/stores/settingsStore";
 import type { PathStatus } from "@/lib/types";
 import { getVersion } from "@tauri-apps/api/app";
+import { cn } from "@/lib/cn";
 
 /// Settings → About. The app's identity/version, plus the trust/UX fundamentals
 /// from Plan 16: the one-click "Add faro-cli to PATH" row (Phase 4). The updater
@@ -45,8 +48,92 @@ export function AboutSettings() {
         </p>
       </div>
 
+      <NotificationsRow />
+
       <PathRow />
     </div>
+  );
+}
+
+/// Desktop-notification toggles (Plan 16 Phase 3). OS toasts for a curated set of
+/// events (transfer batch done/failed, folder-sync error, edit-in-place save
+/// failure). Off-window by default so they don't double up with in-app toasts.
+function NotificationsRow() {
+  const notifications = useSettings((s) => s.notifications);
+  const setNotifications = useSettings((s) => s.setNotifications);
+
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center gap-2 text-sm font-medium text-text">
+        <Bell size={15} className="text-accent" />
+        Desktop notifications
+      </div>
+      <p className="mb-2 text-xs text-text-muted">
+        OS toasts for transfers finishing, folder-sync errors, and failed
+        edit-in-place saves — so you see them when Faro is in the background.
+      </p>
+      <div className="flex flex-col gap-2">
+        <Toggle
+          label="Enable desktop notifications"
+          checked={notifications.enabled}
+          onChange={(v) => setNotifications({ ...notifications, enabled: v })}
+        />
+        <Toggle
+          label="Only when Faro isn't focused"
+          help="Skip toasts while the window is in the foreground (in-app toasts already cover it)."
+          checked={notifications.unfocusedOnly}
+          disabled={!notifications.enabled}
+          onChange={(v) => setNotifications({ ...notifications, unfocusedOnly: v })}
+        />
+      </div>
+    </div>
+  );
+}
+
+/// A compact labeled switch matching the settings look.
+function Toggle({
+  label,
+  help,
+  checked,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  help?: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+      className={cn(
+        "flex items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-left text-sm disabled:opacity-50",
+        "hover:bg-bg-hover"
+      )}
+    >
+      <span className="min-w-0">
+        <span className="text-text">{label}</span>
+        {help && <span className="mt-0.5 block text-xs text-text-muted">{help}</span>}
+      </span>
+      <span
+        className={cn(
+          "relative h-5 w-9 shrink-0 rounded-full transition-colors",
+          checked ? "bg-accent" : "bg-border"
+        )}
+      >
+        <span
+          className={cn(
+            "absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform",
+            checked ? "translate-x-4" : "translate-x-0.5"
+          )}
+        />
+      </span>
+    </button>
   );
 }
 
