@@ -48,7 +48,7 @@ thematic detail.
 | 10 | `10_faro-cli-agent-dx` | ✅ built (live SSH-box + phone-agent smoke tests left) | faro-cli/Agent-Bridge remote exec/write DX. All six phases in: CLI version-drift + self-update, `agent script`/`--stdin`, `agent write`, MSYS path guard, background/detached jobs (SSH + agent arms), authenticated `fetch`. Independent of the scan foundation. |
 | 11 | `11_terminal-depth-and-snippets` | 🔄 Phases 1, 2, 4 built + runtime-verified (headless mock harness); Phase 3 (agent PTY) deferred — needs a paired phone | Terminal as a first-class surface: instance registry, split panes on one connection, snippets. Biggest everyday-UX win. |
 | 12 | `12_security-settings-and-portability` | ✅ built (all 4 phases, runtime-verified) | Keychain-everything (fix the localStorage API key), settings in `faro.db` + pre-paint injection, structured errors, encrypted backup. Trust fundamentals. |
-| 13 | `13_remote-previews-and-protocol-depth` | ⬜ | Lazy remote image previews (viewport-budgeted), native drag-out, SCP fallback, port forwarding, Docker SSH E2E fixtures. |
+| 13 | `13_remote-previews-and-protocol-depth` | 🔄 Phase 1 shipped + verified; Phase 3 protocol foundation landed | Lazy remote image previews (viewport-budgeted) done. Native drag-out, SCP browse/UI, port forwarding, Docker SSH E2E fixtures remain. |
 | 14 | `14_iconify-brand-icons` | ⬜ | Additive brand/protocol logos. Independent polish; do whenever. |
 | 15 | `15_scoped-connection-sharing` | 🅿️ deferred | Blocked on a login/auth foundation. |
 
@@ -339,7 +339,28 @@ and an LRU disk cache keyed by change signal — scrolling a 100k-image
 drag-out download** (the `drag` crate stages to temp; HTML5 DnD can't leave a
 webview), an **SCP fallback** for SFTP-less servers, **port forwarding** with
 persisted rules + presets, and **Docker SSH E2E fixtures** (bastion / SCP-only
-/ sudo) to finally retire the roadmap's "compile-verified only" refrain. ⬜
+/ sudo) to finally retire the roadmap's "compile-verified only" refrain.
+
+- ✅ **Phase 1 — lazy remote image previews.** `preview.rs` PreviewManager +
+  `preview_thumbnail`: a bounded per-`Session` `read_head` (SFTP/object/FTP/
+  WebDAV/HTTP/agent/local, capped at 25 MiB), Rust decode+downscale (`image`),
+  and an LRU disk cache (`thumb_cache` in faro.db, 256 MiB budget, keyed by
+  change signal so edits invalidate). Frontend: default-off `remoteImagePreviews`
+  setting + a per-pane toolbar toggle, an AbortSignal from the row's
+  IntersectionObserver (scroll-away cancels before dispatch) + a per-connection
+  concurrency limiter, raster/size guards; grid **and** list/detail rows preview.
+  Backend unit-tested; the full UI flow runtime-verified headlessly
+  (`scripts/verify-previews.mjs`): off→icons, toggle→thumbnails for on-screen
+  image rows in grid+list, non-images stay icons, toggle-off reverts.
+- 🔄 **Phase 3 — SCP fallback (protocol foundation).** `scp.rs` wire protocol
+  (`download_to`/`upload_from` over a generic `AsyncRead+AsyncWrite`,
+  unit-tested via `tokio::io::duplex`) + `SshSession::scp_download_to`/
+  `scp_upload_from`/`sftp_available`. ⬜ Remaining: an ScpFs that browses via the
+  shell, a New-Connection "SCP mode" toggle, and routing SSH transfers through
+  it when SFTP is off — best verified against the Phase 5 busybox fixture.
+- ⬜ **Phase 2** — native drag-out download (the `drag` crate stages to temp).
+- ⬜ **Phase 4** — port forwarding (persisted `forward_rules` + DB presets).
+- ⬜ **Phase 5** — Docker SSH E2E fixtures (bastion / SCP-only busybox / sudo).
 
 ## Track J — Scoped connection sharing (Plan 15) — DEFERRED
 Share a box read-only / path-jailed / time-boxed. **Parked until a login/auth
