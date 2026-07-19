@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { X, Palette, ArrowDownUp, FolderTree, TerminalSquare, Plug, Radio, Bot, Ban, Check, Info, MonitorSmartphone, FolderSync, ShieldAlert, Loader2 } from "lucide-react";
+import { X, Palette, ArrowDownUp, FolderTree, TerminalSquare, Plug, Radio, Bot, Ban, Check, Info, MonitorSmartphone, FolderSync, ShieldAlert, Loader2, Keyboard } from "lucide-react";
 import { useDialog } from "@/hooks/useDialog";
 import { ACCENTS } from "@/lib/accent";
 import {
@@ -25,6 +25,7 @@ import { cn } from "@/lib/cn";
 import { RemoteControlSettings } from "./RemoteControlSettings";
 import { SyncSettings } from "./SyncSettings";
 import { CliUpdaterSettings } from "./CliUpdaterSettings";
+import { KeyboardSettings } from "./KeyboardSettings";
 
 interface Props {
   onClose: () => void;
@@ -35,6 +36,7 @@ type SectionId =
   | "transfers"
   | "panes"
   | "terminal"
+  | "keyboard"
   | "connections"
   | "remoteControl"
   | "sync"
@@ -48,6 +50,7 @@ const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
   { id: "transfers", label: "Transfers", icon: <ArrowDownUp size={14} /> },
   { id: "panes", label: "File panes", icon: <FolderTree size={14} /> },
   { id: "terminal", label: "Terminal", icon: <TerminalSquare size={14} /> },
+  { id: "keyboard", label: "Keyboard", icon: <Keyboard size={14} /> },
   { id: "connections", label: "Connections", icon: <Plug size={14} /> },
   { id: "remoteControl", label: "Remote control", icon: <MonitorSmartphone size={14} /> },
   { id: "sync", label: "Folder Sync", icon: <FolderSync size={14} /> },
@@ -428,6 +431,9 @@ export function Settings({ onClose }: Props) {
             </Help>
           </>
         );
+
+      case "keyboard":
+        return <KeyboardSettings />;
 
       case "backup":
         return <BackupSettings />;
