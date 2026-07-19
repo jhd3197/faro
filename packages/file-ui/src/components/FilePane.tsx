@@ -47,6 +47,11 @@ import { cn } from "../lib/cn";
 import { fmtSize, fmtMtime, formatMode } from "../lib/format";
 import { isImage, type FileIconSpec } from "../lib/fileIcons";
 import { materialIconUrl } from "../lib/materialIcons";
+import {
+  DEFAULT_FILE_BROWSER_KEYBINDINGS,
+  comboFromEvent,
+  type FileBrowserAction,
+} from "../lib/keys";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { PromptModal } from "./PromptModal";
 import { ConfirmModal } from "./ConfirmModal";
@@ -168,7 +173,22 @@ export function FilePane({
     editorLabel,
     remoteImagePreviews,
     setRemoteImagePreviews,
+    keyBindings,
   } = settings;
+
+  // Effective in-pane key combos: host overrides layered over the built-in
+  // defaults, indexed combo→action so the keydown handler is a single lookup.
+  // Memoized on the combo values (not object identity) so a host that rebuilds
+  // the settings object each render doesn't thrash the listener.
+  const comboToAction = useMemo(() => {
+    const merged = { ...DEFAULT_FILE_BROWSER_KEYBINDINGS, ...keyBindings };
+    const map: Record<string, FileBrowserAction> = {};
+    for (const [action, combo] of Object.entries(merged)) {
+      if (combo) map[combo] = action as FileBrowserAction;
+    }
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify({ ...DEFAULT_FILE_BROWSER_KEYBINDINGS, ...keyBindings })]);
 
   // Re-key the thumbnail loader whenever the remote-preview toggle flips, so
   // already-mounted Thumbnails re-run their effect the moment the user clicks
@@ -300,6 +320,8 @@ export function FilePane({
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+    const anchorItem = () =>
+      anchor ? visible.find((v) => v.path === anchor) ?? null : null;
     const handler = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       const typing =
@@ -308,7 +330,8 @@ export function FilePane({
           target.tagName === "TEXTAREA" ||
           target.isContentEditable);
       if (e.key === "Escape") {
-        // Filter first, then selection — least-surprising unwind order.
+        // Filter first, then selection — least-surprising unwind order. Escape
+        // is intentionally not remappable (it's the universal cancel key).
         if (filter) {
           setFilter("");
           if (typing) (target as HTMLInputElement).blur();
@@ -321,16 +344,64 @@ export function FilePane({
       if (typing) return; // don't hijack keys while editing text
       // Only run list nav when the pane/list area is focused, not a toolbar btn.
       if (target && target.closest('button, a, [role="button"]')) return;
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
-        e.preventDefault();
-        setSelected(new Set(visible.map((x) => x.path)));
-        return;
+
+      // Remappable in-pane actions (F2/Enter/Delete/Backspace/mod+A/Space/
+      // mod+shift+N/F5, all overridable by the host). One combo → one action.
+      const action = comboToAction[comboFromEvent(e)];
+      if (action) {
+        switch (action) {
+          case "selectAll":
+            e.preventDefault();
+            setSelected(new Set(visible.map((x) => x.path)));
+            return;
+          case "delete": {
+            const items = visible.filter((v) => selected.has(v.path));
+            if (items.length > 0) setModal({ type: "delete", entries: items });
+            return;
+          }
+          case "rename": {
+            const item = anchorItem();
+            if (item) {
+              e.preventDefault();
+              setModal({ type: "rename", entry: item });
+            }
+            return;
+          }
+          case "quickInfo": {
+            const item = anchorItem();
+            if (item) {
+              e.preventDefault();
+              setModal({ type: "props", entry: item });
+            }
+            return;
+          }
+          case "newFolder":
+            if (sessionId && caps?.hasDirectories !== false) {
+              e.preventDefault();
+              setModal({ type: "mkdir" });
+            }
+            return;
+          case "refresh":
+            if (sessionId) {
+              e.preventDefault();
+              load(path);
+            }
+            return;
+          case "open": {
+            const item = anchorItem();
+            if (item) {
+              e.preventDefault();
+              onRowActivate(item);
+            }
+            return;
+          }
+          case "parentDir":
+            e.preventDefault();
+            goUp();
+            return;
+        }
       }
-      if (e.key === "Delete" && selected.size > 0) {
-        const items = visible.filter((v) => selected.has(v.path));
-        if (items.length > 0) setModal({ type: "delete", entries: items });
-        return;
-      }
+
       if (e.ctrlKey || e.metaKey || e.altKey) return; // leave app shortcuts alone
 
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -346,19 +417,6 @@ export function FilePane({
           setAnchor(targetItem.path);
           scrollToIdx(next);
         }
-        return;
-      }
-      if (e.key === "Enter" && anchor) {
-        const item = visible.find((v) => v.path === anchor);
-        if (item) {
-          e.preventDefault();
-          onRowActivate(item);
-        }
-        return;
-      }
-      if (e.key === "Backspace") {
-        e.preventDefault();
-        goUp();
         return;
       }
       // Type-ahead: jump to the first item matching the recently-typed run.
@@ -379,7 +437,7 @@ export function FilePane({
     };
     el.addEventListener("keydown", handler);
     return () => el.removeEventListener("keydown", handler);
-  }, [visible, selected, filter, anchor]);
+  }, [visible, selected, filter, anchor, comboToAction, caps, path, sessionId]);
 
   // Watch this pane's width and pick a column tier. Content-driven, not
   // viewport-driven: only re-renders when crossing a threshold, not per pixel.

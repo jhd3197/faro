@@ -1,6 +1,7 @@
 import { type ReactNode } from "react";
 import { FileUiProvider } from "@faro/file-ui";
 import { useSettings } from "@/stores/settingsStore";
+import { useFileBrowserKeyBindings } from "@/lib/fileBrowserKeys";
 import { tauriFileSystem } from "@/lib/fileUiAdapter";
 
 // Bridges Faro's zustand settings store + Tauri adapter into the @faro/file-ui
@@ -9,6 +10,7 @@ import { tauriFileSystem } from "@/lib/fileUiAdapter";
 // state (sort / view-mode / density) stays live as the user changes it.
 export function FileUiBridge({ children }: { children: ReactNode }) {
   const s = useSettings();
+  const keyBindings = useFileBrowserKeyBindings();
   return (
     <FileUiProvider
       fs={tauriFileSystem}
@@ -20,6 +22,7 @@ export function FileUiBridge({ children }: { children: ReactNode }) {
         paneDensity: s.paneDensity,
         editorLabel: s.defaultEditor || undefined,
         remoteImagePreviews: s.remoteImagePreviews === "on",
+        keyBindings,
         setSortField: s.setSortField,
         setSortDirection: s.setSortDirection,
         setPaneViewMode: s.setPaneViewMode,
