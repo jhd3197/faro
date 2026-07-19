@@ -82,6 +82,20 @@ const MIGRATIONS: &[&str] = &[
         value      TEXT NOT NULL,
         updated_ms INTEGER NOT NULL
     ) WITHOUT ROWID;",
+    // v5 — remote image thumbnail cache index (Plan 13 Phase 1). One row per
+    // cached thumbnail file. `key` is the hex hash of
+    // (session_id, path, dim, change-signal) and also names the `<key>.png` file
+    // in the thumbnails cache dir; including the change-signal means a re-uploaded
+    // file yields a fresh key, so edits invalidate. `bytes` + `used_ms` drive the
+    // LRU eviction that keeps the cache under its disk budget. `session_id` lets a
+    // disconnected/removed connection's thumbnails be dropped wholesale.
+    "CREATE TABLE thumb_cache (
+        key        TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        bytes      INTEGER NOT NULL,
+        created_ms INTEGER NOT NULL,
+        used_ms    INTEGER NOT NULL
+    ) WITHOUT ROWID;",
 ];
 
 /// A persisted per-file sync record — what the source looked like the last time
@@ -365,6 +379,84 @@ impl Db {
         Ok(())
     }
 
+    // ---- Remote thumbnail cache index (Plan 13 Phase 1) ----
+
+    /// True if a live cache row exists for `key`, bumping its `used_ms` so the LRU
+    /// keeps recently-viewed thumbnails. The caller still confirms the `<key>.png`
+    /// file is on disk before trusting a `true` (index and files can drift if the
+    /// cache dir is cleared out-of-band).
+    pub fn thumb_touch(&self, key: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "UPDATE thumb_cache SET used_ms = ?2 WHERE key = ?1",
+            rusqlite::params![key, now_ms()],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Record a freshly-written thumbnail, then evict least-recently-used rows
+    /// until the total cached bytes fall under `budget_bytes`. Returns the `key`s
+    /// whose files the caller must delete from disk (the index row is already
+    /// gone). The just-inserted row is never evicted — it's the most-recently-used.
+    pub fn thumb_record(
+        &self,
+        key: &str,
+        session_id: &str,
+        bytes: u64,
+        budget_bytes: u64,
+    ) -> Result<Vec<String>> {
+        let now = now_ms();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO thumb_cache (key, session_id, bytes, created_ms, used_ms)
+             VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(key) DO UPDATE SET bytes = excluded.bytes, used_ms = excluded.used_ms",
+            rusqlite::params![key, session_id, bytes as i64, now],
+        )?;
+
+        let total: i64 = conn
+            .query_row("SELECT COALESCE(SUM(bytes), 0) FROM thumb_cache", [], |r| r.get(0))?;
+        if (total as u64) <= budget_bytes {
+            return Ok(Vec::new());
+        }
+
+        // Evict oldest-used first, but never the row we just wrote.
+        let mut over = total as u64 - budget_bytes;
+        let mut evicted = Vec::new();
+        let mut stmt = conn.prepare(
+            "SELECT key, bytes FROM thumb_cache WHERE key != ?1 ORDER BY used_ms ASC",
+        )?;
+        let victims: Vec<(String, i64)> = stmt
+            .query_map([key], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        for (k, b) in victims {
+            if over == 0 {
+                break;
+            }
+            conn.execute("DELETE FROM thumb_cache WHERE key = ?1", [&k])?;
+            over = over.saturating_sub(b as u64);
+            evicted.push(k);
+        }
+        Ok(evicted)
+    }
+
+    /// Drop the index rows for a session's thumbnails, returning their `key`s so
+    /// the caller can delete the files. Used when a connection is removed.
+    pub fn thumb_clear_session(&self, session_id: &str) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let keys: Vec<String> = {
+            let mut stmt =
+                conn.prepare("SELECT key FROM thumb_cache WHERE session_id = ?1")?;
+            let rows = stmt
+                .query_map([session_id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        conn.execute("DELETE FROM thumb_cache WHERE session_id = ?1", [session_id])?;
+        Ok(keys)
+    }
+
     /// Bulk-upsert settings in one transaction (the one-time localStorage import).
     pub fn settings_set_many(&self, entries: &[(String, String)]) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
@@ -546,6 +638,38 @@ mod tests {
         assert_eq!(all["appTheme"], "\"tokyo\"");
         assert_eq!(all["accentColor"], "\"#ff0000\"");
         assert_eq!(all["terminalFontSize"], "13");
+    }
+
+    #[test]
+    fn thumb_cache_touch_record_and_lru_evict() {
+        // `used_ms` has millisecond resolution; space the ordered operations out
+        // so the LRU tiebreak is deterministic (real views are seconds apart).
+        let gap = || std::thread::sleep(std::time::Duration::from_millis(2));
+        let db = Db::open_in_memory().unwrap();
+        // Nothing cached yet.
+        assert!(!db.thumb_touch("k1").unwrap());
+
+        // Budget of 100 bytes. Three 40-byte thumbnails overflow it.
+        assert!(db.thumb_record("k1", "s1", 40, 100).unwrap().is_empty());
+        gap();
+        assert!(db.thumb_record("k2", "s1", 40, 100).unwrap().is_empty());
+        gap();
+
+        // Touch k1 so it's more-recently-used than k2 — k2 becomes the LRU victim.
+        assert!(db.thumb_touch("k1").unwrap());
+        gap();
+        let evicted = db.thumb_record("k3", "s1", 40, 100).unwrap();
+        assert_eq!(evicted, vec!["k2".to_string()], "least-recently-used is evicted first");
+        // The just-written row is never a victim.
+        assert!(db.thumb_touch("k3").unwrap());
+        assert!(db.thumb_touch("k1").unwrap());
+        assert!(!db.thumb_touch("k2").unwrap());
+
+        // Clearing a session returns its surviving keys and empties the index.
+        let mut cleared = db.thumb_clear_session("s1").unwrap();
+        cleared.sort();
+        assert_eq!(cleared, vec!["k1".to_string(), "k3".to_string()]);
+        assert!(!db.thumb_touch("k1").unwrap());
     }
 
     #[test]

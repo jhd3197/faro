@@ -98,6 +98,15 @@ tokio-util = { version = "0.7", features = ["io"] }
 # Decode percent-encoded WebDAV PROPFIND href paths back into file names.
 percent-encoding = "2"
 
+# Remote image thumbnails (Plan 13 Phase 1): decode a bounded read of a remote
+# image and downscale it to a small cached PNG in Rust. `default-features = false`
+# keeps out the codecs that need system libs (avif/dav1d); the enabled set covers
+# the web-common raster formats we gate previews to. `rayon` parallelises the
+# resize across cores.
+image = { version = "0.25", default-features = false, features = [
+    "jpeg", "png", "gif", "webp", "bmp", "ico", "tiff",
+] }
+
 # Filesystem watcher — powers the right-click "Edit with…" flow that
 # downloads a remote file to a tempfile, opens it in the user's editor, and
 # uploads it back on every save.

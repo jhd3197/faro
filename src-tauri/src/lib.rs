@@ -23,6 +23,7 @@ pub mod importers;
 pub mod keys;
 mod known_hosts;
 pub mod oauth;
+mod preview;
 pub mod profiles;
 pub mod remotefs;
 pub mod scan;
@@ -58,6 +59,9 @@ pub struct AppState {
     /// Shared `faro.db` — the per-connection index (sync_state today; scan/search
     /// caches later). See `db.rs`.
     pub db: Arc<db::Db>,
+    /// Remote image thumbnail previews (Plan 13 Phase 1) — bounded reads, a
+    /// per-connection concurrency cap, and an LRU disk cache. See `preview.rs`.
+    pub preview: Arc<preview::PreviewManager>,
 }
 
 /// Build the pre-paint JS injected into the main window (Plan 12 Phase 2). It
@@ -176,6 +180,16 @@ pub fn run() {
                 std::fs::create_dir_all(&dir).ok();
                 Arc::new(db::Db::open(&dir.join("faro.db")).expect("failed to open faro.db"))
             };
+            // Remote thumbnail cache lives under the app data dir alongside faro.db
+            // (the codebase keeps everything under app_data_dir; there's no
+            // app_cache_dir convention here).
+            let preview = {
+                let dir = handle
+                    .path()
+                    .app_data_dir()
+                    .expect("resolving app_data_dir for thumbnail cache");
+                Arc::new(preview::PreviewManager::new(dir.join("thumbnails")))
+            };
 
             // Create the main window ourselves (it's no longer in
             // tauri.conf.json) so we can inject a pre-paint script that reads the
@@ -227,6 +241,7 @@ pub fn run() {
                 diff: Arc::new(diff::DiffManager::new()),
                 search: Arc::new(search::SearchManager::new()),
                 db,
+                preview,
             };
             app.manage(state);
 
@@ -350,6 +365,7 @@ pub fn run() {
             commands::list_directory,
             commands::capabilities,
             commands::read_file_preview,
+            preview::preview_thumbnail,
             commands::open_terminal,
             commands::terminal_write,
             commands::terminal_resize,
