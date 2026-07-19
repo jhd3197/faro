@@ -1,7 +1,8 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { Search } from "lucide-react";
 import { useLayout } from "@/stores/layoutStore";
-import { useCommands, type Command } from "@/lib/commands";
+import { type Command } from "@/lib/commands";
+import { useResolvedCommands } from "@/lib/keybindings";
 import { useDialog } from "@/hooks/useDialog";
 import { fuzzyMatch } from "@/lib/fuzzy";
 import { formatCombo } from "@/lib/shortcuts";
@@ -16,7 +17,7 @@ interface Ranked {
 export function CommandPalette() {
   const open = useLayout((s) => s.paletteOpen);
   const setOpen = useLayout((s) => s.setPaletteOpen);
-  const commands = useCommands();
+  const commands = useResolvedCommands();
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);

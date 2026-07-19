@@ -30,6 +30,8 @@ import {
 import { useSettings } from "@/stores/settingsStore";
 import { useLayout } from "@/stores/layoutStore";
 import { useTransfers } from "@/stores/transfersStore";
+import { useResolvedCommands } from "@/lib/keybindings";
+import { formatCombo } from "@/lib/shortcuts";
 import { cn } from "@/lib/cn";
 
 const APP_VERSION = "v1.3";
@@ -49,6 +51,14 @@ export function TitleBar() {
   const setShortcutsOpen = useLayout((s) => s.setShortcutsOpen);
   const togglePanel = useTransfers((s) => s.togglePanel);
   const [maximized, setMaximized] = useState(false);
+
+  // Menu shortcut labels read the same effective (override-aware) combos as the
+  // palette and cheat-sheet, so a remap in Settings shows up here too.
+  const commands = useResolvedCommands();
+  const comboOf = (id: string) => {
+    const c = commands.find((x) => x.id === id);
+    return c?.combo ? formatCombo(c.combo) : undefined;
+  };
 
   // Track window state so the maximize icon flips to "restore" when needed.
   useEffect(() => {
@@ -76,7 +86,7 @@ export function TitleBar() {
         {
           label: "New connection",
           icon: <Plus size={11} />,
-          shortcut: "Ctrl+N",
+          shortcut: comboOf("new-connection"),
           onClick: () => openDialog("newConnection"),
         },
         {
@@ -98,14 +108,14 @@ export function TitleBar() {
         {
           label: "Preferences…",
           icon: <SettingsIcon size={11} />,
-          shortcut: "Ctrl+,",
+          shortcut: comboOf("settings"),
           onClick: () => openDialog("settings"),
         },
         { kind: "sep" },
         {
           label: "Reload window",
           icon: <RefreshCw size={11} />,
-          shortcut: "Ctrl+R",
+          shortcut: comboOf("reload"),
           onClick: () => window.location.reload(),
         },
       ],
@@ -116,20 +126,20 @@ export function TitleBar() {
         {
           label: "Command palette…",
           icon: <CommandIcon size={11} />,
-          shortcut: "Ctrl+K",
+          shortcut: formatCombo("mod+k"),
           onClick: togglePalette,
         },
         { kind: "sep" },
         {
           label: "Toggle terminal",
           icon: <TerminalSquare size={11} />,
-          shortcut: "Ctrl+`",
+          shortcut: comboOf("toggle-terminal"),
           onClick: toggleTerminal,
         },
         {
           label: "Toggle transfer queue",
           icon: <ArrowDownUp size={11} />,
-          shortcut: "Ctrl+T",
+          shortcut: comboOf("toggle-transfers"),
           onClick: togglePanel,
         },
         { kind: "sep" },
@@ -142,7 +152,7 @@ export function TitleBar() {
         {
           label: appTheme === "light" ? "Switch to dark theme" : "Switch to light theme",
           icon: appTheme === "light" ? <Moon size={11} /> : <Sun size={11} />,
-          shortcut: "Ctrl+Shift+T",
+          shortcut: comboOf("switch-theme"),
           onClick: switchTheme,
         },
       ],
@@ -153,7 +163,7 @@ export function TitleBar() {
         {
           label: "Keyboard shortcuts",
           icon: <Keyboard size={11} />,
-          shortcut: "Ctrl+/",
+          shortcut: comboOf("shortcuts"),
           onClick: () => setShortcutsOpen(true),
         },
         {
