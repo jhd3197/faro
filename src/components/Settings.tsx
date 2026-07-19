@@ -26,6 +26,7 @@ import { RemoteControlSettings } from "./RemoteControlSettings";
 import { SyncSettings } from "./SyncSettings";
 import { CliUpdaterSettings } from "./CliUpdaterSettings";
 import { KeyboardSettings } from "./KeyboardSettings";
+import { AboutSettings } from "./AboutSettings";
 
 interface Props {
   onClose: () => void;
@@ -43,7 +44,8 @@ type SectionId =
   | "bridge"
   | "cli"
   | "agent"
-  | "backup";
+  | "backup"
+  | "about";
 
 const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
   { id: "appearance", label: "Appearance", icon: <Palette size={14} /> },
@@ -58,6 +60,7 @@ const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
   { id: "cli", label: "faro-cli", icon: <TerminalSquare size={14} /> },
   { id: "agent", label: "Chat", icon: <Bot size={14} /> },
   { id: "backup", label: "Backup", icon: <ShieldAlert size={14} /> },
+  { id: "about", label: "About", icon: <Info size={14} /> },
 ];
 
 export function Settings({ onClose }: Props) {
@@ -437,6 +440,9 @@ export function Settings({ onClose }: Props) {
 
       case "backup":
         return <BackupSettings />;
+
+      case "about":
+        return <AboutSettings />;
     }
   };
 

@@ -200,6 +200,23 @@ export interface CliStatus {
   message: string | null;
 }
 
+/** One-click "Add faro-cli to PATH" status (Plan 16 Phase 4; mirrors Rust's
+ *  PathStatus). Per-user only — never needs admin. */
+export interface PathStatus {
+  /** The app-owned bin dir Faro manages (where the CLI is downloaded). */
+  binDir: string;
+  /** Whether a faro-cli binary actually exists in binDir (else: install first). */
+  binHasCli: boolean;
+  /** Whether faro-cli resolves on PATH right now, and where. */
+  onPath: boolean;
+  cliLocation: string | null;
+  /** Whether Faro's own managed entry is present (its bin dir on the Windows
+   *  per-user Path, or the ~/.local/bin symlink on macOS/Linux). */
+  managed: boolean;
+  /** Short platform note after an add/remove ("Open a new terminal…"). */
+  detail: string | null;
+}
+
 /** A parsed faro:// deep link forwarded from Rust (mirrors DeepLink there).
  *  Every field optional; never carries a password. */
 export interface DeepLink {

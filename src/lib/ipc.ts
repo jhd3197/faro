@@ -41,6 +41,7 @@ import type {
   AgentHostStatus,
   CliStatus,
   CliUpdateMode,
+  PathStatus,
   DeepLink,
   SyncPair,
   PairView,
@@ -155,6 +156,11 @@ export const ipc = {
   cliUpdaterUpdate: () => invoke<CliStatus>("cli_updater_update"),
   cliUpdaterSetMode: (mode: CliUpdateMode) =>
     invoke<CliStatus>("cli_updater_set_mode", { mode }),
+
+  // ---- One-click "Add faro-cli to PATH" (Plan 16 Phase 4): per-user, no admin.
+  pathStatus: () => invoke<PathStatus>("path_status"),
+  pathAdd: () => invoke<PathStatus>("path_add"),
+  pathRemove: () => invoke<PathStatus>("path_remove"),
 
   listDirectory: (sessionId: SessionId, path: string) =>
     invoke<DirEntry[]>("list_directory", { sessionId, path }),

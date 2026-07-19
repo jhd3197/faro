@@ -42,6 +42,22 @@ let snippets: any[] = [
   },
 ];
 
+// Mock PATH-integration state (Plan 16 Phase 4). `managed` flips on add/remove so
+// the About tab's Add ⇄ Remove flow round-trips without the Rust backend.
+let pathManaged = false;
+function pathStatus() {
+  return {
+    binDir: "C:\\Users\\demo\\AppData\\Roaming\\com.juandenis.faro\\bin",
+    binHasCli: true,
+    onPath: pathManaged,
+    cliLocation: pathManaged
+      ? "C:\\Users\\demo\\AppData\\Roaming\\com.juandenis.faro\\bin\\faro-cli.exe"
+      : null,
+    managed: pathManaged,
+    detail: null as string | null,
+  };
+}
+
 export async function invoke<T = unknown>(cmd: string, args: Args = {}): Promise<T> {
   const out = await dispatch(cmd, args);
   return out as T;
@@ -243,6 +259,16 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       return { content: "The API service is healthy — 37 days uptime, load 0.08." };
     case "export_agent_log":
       return "C:\\Users\\demo\\Downloads\\faro-agent-console.txt";
+
+    // ---- one-click PATH install (Plan 16 Phase 4) ----
+    case "path_status":
+      return pathStatus();
+    case "path_add":
+      pathManaged = true;
+      return { ...pathStatus(), detail: "Added to your account's PATH." };
+    case "path_remove":
+      pathManaged = false;
+      return { ...pathStatus(), detail: "Removed from your account's PATH." };
 
     default:
       return null;
