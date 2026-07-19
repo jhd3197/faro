@@ -27,6 +27,7 @@ mod preview;
 pub mod profiles;
 pub mod remotefs;
 pub mod scan;
+pub mod scp;
 pub mod search;
 pub mod session;
 pub mod sync;

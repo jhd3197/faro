@@ -606,6 +606,58 @@ impl SshSession {
             .await
     }
 
+    /// Whether the SFTP subsystem can be opened on this host. Hosts that disable
+    /// it (busybox appliances, locked-down boxes) return `false`, which is the
+    /// cue to fall back to SCP transfers (Plan 13 Phase 3). Best-effort: a
+    /// transport hiccup also reads as unavailable.
+    pub async fn sftp_available(&self) -> bool {
+        self.ensure_sftp().await.is_ok()
+    }
+
+    /// Download `remote_path` over the SCP wire protocol, streaming its bytes into
+    /// `out` and returning the parsed header. For hosts whose SFTP subsystem is
+    /// disabled but whose shell still runs `scp` (Plan 13 Phase 3). See
+    /// [`crate::scp`] for the wire details (unit-tested over an in-memory duplex).
+    pub async fn scp_download_to<W>(
+        &self,
+        remote_path: &str,
+        out: &mut W,
+    ) -> Result<crate::scp::ScpHeader>
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        let channel = self
+            .open_exec_channel(&crate::scp::source_command(remote_path))
+            .await?;
+        let mut stream = channel.into_stream();
+        crate::scp::download_to(&mut stream, out).await
+    }
+
+    /// Upload `size` bytes from `data` to `remote_path` over the SCP wire
+    /// protocol. `mode` is the POSIX mode to request for the created file.
+    pub async fn scp_upload_from<R>(
+        &self,
+        remote_path: &str,
+        mode: u32,
+        size: u64,
+        data: &mut R,
+    ) -> Result<()>
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        let name = remote_path
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(remote_path)
+            .to_string();
+        let channel = self
+            .open_exec_channel(&crate::scp::sink_command(remote_path))
+            .await?;
+        let mut stream = channel.into_stream();
+        let header = crate::scp::ScpHeader { mode, size, name };
+        crate::scp::upload_from(&mut stream, &header, data).await
+    }
+
     /// Like `exec`, but bounds total captured output to `max_bytes` and the
     /// whole run to `timeout` (so `tail -f`, `top`, or a huge dump can't hang
     /// the bridge or balloon memory). If `stream` is set, stdout/stderr chunks
