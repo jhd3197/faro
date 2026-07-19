@@ -24,8 +24,11 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ## Iconify brand & protocol logos (Plan 14)
 
 Recognizable brand/protocol marks on connections (AWS S3, Azure, Google Cloud,
-Dropbox, OneDrive, Google Drive, Box, an SSH glyph, the Faro lighthouse) come
-from [Iconify](https://iconify.design). Faro bundles only the handful of icons it
+Dropbox, OneDrive, Google Drive, Box, an SSH glyph, the Faro lighthouse), plus
+cloud-storage vendor marks on the New-Connection provider presets (Cloudflare,
+Backblaze, DigitalOcean, Wasabi, MinIO, Hetzner, Scaleway, Oracle, IBM, Supabase,
+Nextcloud, ownCloud), come from
+[Iconify](https://iconify.design). Faro bundles only the handful of icons it
 references (extracted offline by `scripts/gen-brand-icons.mjs` into
 `src/lib/brandIconData.ts`) — it makes **no** network calls to the Iconify API.
 Only permissively-licensed sets are used:

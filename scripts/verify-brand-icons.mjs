@@ -180,6 +180,64 @@ async function main() {
     check("picker's S3 entry uses the colour AWS logo", picker.s3colour);
     await shot("3-picker");
 
+    // ---- 6b. S3 provider preset buttons carry real vendor logos (Phase 3) ----
+    await drive(() => {
+      const dlg = document.querySelector('[role="dialog"]');
+      const s3 = [...dlg.querySelectorAll("nav button")].find(
+        (b) => b.textContent.trim() === "S3"
+      );
+      s3 && s3.click();
+    });
+    await page.waitForFunction(
+      () =>
+        [...document.querySelectorAll('[role="dialog"] .grid button')].some((b) =>
+          /Cloudflare/.test(b.textContent)
+        ),
+      { timeout: 8_000 }
+    );
+    await sleep(400);
+    const s3Providers = await drive(() => {
+      const grid = [
+        ...document.querySelectorAll('[role="dialog"] .grid'),
+      ].find((g) => /Cloudflare/.test(g.textContent));
+      const logos = grid ? grid.querySelectorAll("svg.brand-icon").length : -1;
+      const r2 = grid &&
+        [...grid.querySelectorAll("button")].find((b) => /Cloudflare/.test(b.textContent));
+      const r2colour =
+        r2 && /#[0-9a-fA-F]{3,6}/.test(r2.querySelector("svg.brand-icon")?.outerHTML || "");
+      return { logos, r2colour: !!r2colour };
+    });
+    // 13 S3 presets; 11 have a bundled vendor mark (Storj + generic fall back).
+    check("S3 provider presets show vendor logos", s3Providers.logos >= 11, `svg.brand-icon=${s3Providers.logos}`);
+    check("R2 preset uses the colour Cloudflare logo", s3Providers.r2colour);
+    await shot("4-s3-providers");
+
+    // ---- 6c. WebDAV provider preset buttons carry real vendor logos ----
+    await drive(() => {
+      const dlg = document.querySelector('[role="dialog"]');
+      const wd = [...dlg.querySelectorAll("nav button")].find(
+        (b) => b.textContent.trim() === "WebDAV"
+      );
+      wd && wd.click();
+    });
+    await page.waitForFunction(
+      () =>
+        [...document.querySelectorAll('[role="dialog"] .grid button')].some((b) =>
+          /Nextcloud/.test(b.textContent)
+        ),
+      { timeout: 8_000 }
+    );
+    await sleep(400);
+    const wdProviders = await drive(() => {
+      const grid = [
+        ...document.querySelectorAll('[role="dialog"] .grid'),
+      ].find((g) => /Nextcloud/.test(g.textContent));
+      return grid ? grid.querySelectorAll("svg.brand-icon").length : -1;
+    });
+    // 4 WebDAV presets; 3 have a bundled mark (generic falls back).
+    check("WebDAV provider presets show vendor logos", wdProviders >= 3, `svg.brand-icon=${wdProviders}`);
+    await shot("5-webdav-providers");
+
     // ---- 7. Zero network calls to the Iconify API (fully offline) ----
     check(
       "no requests to iconify.design (offline)",

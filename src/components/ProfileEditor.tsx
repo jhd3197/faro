@@ -94,6 +94,29 @@ const PROTOCOL_GROUPS: { label: string; items: Protocol[] }[] = [
   { label: "Machine", items: ["faro-agent"] },
 ];
 
+// Real vendor marks for the provider preset buttons (Plan 14 Phase 3). A
+// provider with no bundled logo (Storj, the "generic"/self-hosted presets)
+// falls back to the neutral lucide glyph in the button.
+const S3_PROVIDER_ICON: Partial<Record<S3Provider, string>> = {
+  aws: "logos:aws-s3",
+  r2: "logos:cloudflare",
+  b2: "simple-icons:backblaze",
+  wasabi: "simple-icons:wasabi",
+  spaces: "logos:digital-ocean",
+  minio: "simple-icons:minio",
+  hetzner: "simple-icons:hetzner",
+  scaleway: "simple-icons:scaleway",
+  oci: "logos:oracle",
+  ibm: "logos:ibm",
+  supabase: "logos:supabase-icon",
+};
+
+const WEBDAV_PROVIDER_ICON: Partial<Record<WebdavProvider, string>> = {
+  nextcloud: "simple-icons:nextcloud",
+  owncloud: "simple-icons:owncloud",
+  storagebox: "simple-icons:hetzner",
+};
+
 export function ProfileEditor({ profile, prefill, onClose }: Props) {
   const saveProfile = useConnections((s) => s.saveProfile);
   const connectProfile = useConnections((s) => s.connect);
@@ -1507,7 +1530,18 @@ function WebdavSection({
                 }
               >
                 <span className="flex items-center gap-1 text-[11px] font-semibold">
-                  <Globe size={11} className={provider === p ? "text-accent" : ""} />
+                  <span
+                    className={cn(
+                      "flex h-3.5 w-3.5 shrink-0 items-center justify-center",
+                      provider === p ? "text-accent" : "text-text-dim"
+                    )}
+                  >
+                    {WEBDAV_PROVIDER_ICON[p] ? (
+                      <BrandIcon icon={WEBDAV_PROVIDER_ICON[p]!} size={13} />
+                    ) : (
+                      <Globe size={11} />
+                    )}
+                  </span>
                   {data.label}
                 </span>
                 <span className="text-[10px] text-text-dim">{data.vendor}</span>
@@ -1697,7 +1731,18 @@ function S3Section({
                 }
               >
                 <span className="flex items-center gap-1 text-[11px] font-semibold">
-                  <Cloud size={11} className={provider === p ? "text-accent" : ""} />
+                  <span
+                    className={cn(
+                      "flex h-3.5 w-3.5 shrink-0 items-center justify-center",
+                      provider === p ? "text-accent" : "text-text-dim"
+                    )}
+                  >
+                    {S3_PROVIDER_ICON[p] ? (
+                      <BrandIcon icon={S3_PROVIDER_ICON[p]!} size={13} />
+                    ) : (
+                      <Cloud size={11} />
+                    )}
+                  </span>
                   {data.label}
                 </span>
                 <span className="text-[10px] text-text-dim">{data.vendor}</span>

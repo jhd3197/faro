@@ -47,6 +47,21 @@ const CURATED = [
   "logos:microsoft-onedrive", // onedrive
   "logos:google-drive", // gdrive
   "simple-icons:box", // box
+  // Vendor marks for the S3 / WebDAV provider preset buttons (Phase 3). Where a
+  // provider has no icon (Storj, the generic presets), the button falls back to
+  // the neutral lucide glyph — protocolIcon() never maps to these.
+  "logos:cloudflare", // s3: Cloudflare R2
+  "simple-icons:backblaze", // s3: Backblaze B2
+  "simple-icons:wasabi", // s3: Wasabi
+  "logos:digital-ocean", // s3: DigitalOcean Spaces
+  "simple-icons:minio", // s3: MinIO
+  "simple-icons:hetzner", // s3: Hetzner / WebDAV Storage Box
+  "simple-icons:scaleway", // s3: Scaleway
+  "logos:oracle", // s3: Oracle OCI
+  "logos:ibm", // s3: IBM COS
+  "logos:supabase-icon", // s3: Supabase
+  "simple-icons:nextcloud", // webdav: Nextcloud
+  "simple-icons:owncloud", // webdav: ownCloud
 ];
 
 // Drop transformation fields that equal the Iconify defaults, to keep the
