@@ -352,6 +352,19 @@ impl Db {
         Ok(())
     }
 
+    /// Write a consistent, fully-checkpointed snapshot of the database to
+    /// `dest` (Plan 12 Phase 4 backup). `VACUUM INTO` folds any WAL into the
+    /// copy, so the snapshot reflects all committed data even while the live DB
+    /// is open in WAL mode. `dest` must not already exist.
+    pub fn snapshot_to(&self, dest: &std::path::Path) -> Result<()> {
+        let _ = std::fs::remove_file(dest);
+        let escaped = dest.to_string_lossy().replace('\'', "''");
+        let conn = self.conn.lock().unwrap();
+        conn.execute_batch(&format!("VACUUM INTO '{escaped}'"))
+            .with_context(|| format!("VACUUM INTO {}", dest.display()))?;
+        Ok(())
+    }
+
     /// Bulk-upsert settings in one transaction (the one-time localStorage import).
     pub fn settings_set_many(&self, entries: &[(String, String)]) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();

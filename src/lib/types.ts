@@ -960,3 +960,12 @@ export interface Transfer {
   error?: string;
   startedAt: number;
 }
+
+/** What an encrypted backup contains (Plan 12 Phase 4). */
+export interface BackupSummary {
+  profiles: number;
+  credentials: number;
+  hasBridge: boolean;
+  hasSync: boolean;
+  dbBytes: number;
+}

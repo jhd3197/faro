@@ -1563,6 +1563,50 @@ pub async fn settings_set_all(
     state.db.settings_set_many(&entries).map_err(err)
 }
 
+// ---------- Encrypted backup / restore (Plan 12 Phase 4) ----------
+
+fn app_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, FaroError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| FaroError::other(format!("resolving app data dir: {e}")))
+}
+
+/// Export an encrypted backup (profiles + faro.db + configs + all keychain
+/// credentials) to `path`, protected by `password`.
+#[tauri::command]
+pub async fn backup_export(
+    path: String,
+    password: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::backup::BackupSummary, FaroError> {
+    let dir = app_data_dir(&app)?;
+    crate::backup::export(&dir, &state.db, &password, Path::new(&path)).map_err(FaroError::from)
+}
+
+/// Decrypt a backup and report what's inside — without applying it (the UI's
+/// "what's inside" confirmation before restoring).
+#[tauri::command]
+pub async fn backup_inspect(
+    path: String,
+    password: String,
+) -> Result<crate::backup::BackupSummary, FaroError> {
+    crate::backup::inspect(&password, Path::new(&path)).map_err(FaroError::from)
+}
+
+/// Restore a backup: stage its files (applied on next launch) and inject its
+/// keychain credentials now. The frontend prompts the user to restart.
+#[tauri::command]
+pub async fn backup_import(
+    path: String,
+    password: String,
+    app: AppHandle,
+) -> Result<crate::backup::BackupSummary, FaroError> {
+    let dir = app_data_dir(&app)?;
+    // defer = true: the GUI has files open, so stage + swap on next startup.
+    crate::backup::import(&dir, &password, Path::new(&path), true).map_err(FaroError::from)
+}
+
 /// Send a message to the built-in Agent chat. The backend calls Anthropic's
 /// API with the Faro bridge tools and returns the assistant's final response.
 #[tauri::command]

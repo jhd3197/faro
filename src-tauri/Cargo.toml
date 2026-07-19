@@ -108,6 +108,15 @@ notify = "6"
 # no dbus/secret-service build dependency.
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 
+# Encrypted backup/restore container (Plan 12 Phase 4): an Argon2id-derived key
+# over a user password, AES-256-GCM over a gzipped archive of profiles + faro.db
+# + configs + all keychain credentials. All pure-Rust, no system crypto dep.
+# (aes-gcm / flate2 / rand were already in the tree transitively.)
+argon2 = "0.5"
+aes-gcm = "0.10"
+flate2 = "1"
+rand = "0.8"
+
 # Windows-only: registry access for the PuTTY sessions importer, plus the
 # Cloud Filter API (`cldapi.dll`) that powers on-demand virtual folders (Plan 9)
 # via the safe `cloud-filter` wrapper crate. It's optional — only pulled when the

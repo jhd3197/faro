@@ -5,6 +5,7 @@ use tauri::Manager;
 // crate, so they need to be `pub` rather than `mod`. None of them expose
 // secrets directly — credentials live in profiles::ConnectionProfile, which
 // the CLI deliberately redacts in `profiles show`.
+pub mod backup;
 pub mod bridge;
 pub mod commands;
 pub mod agent;
@@ -154,6 +155,15 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let handle = app.handle().clone();
+
+            // Apply a pending encrypted-backup restore (Plan 12 Phase 4) before
+            // anything opens profiles.json / faro.db, so a restore staged by a
+            // previous run swaps in atomically on this launch.
+            if let Ok(data_dir) = handle.path().app_data_dir() {
+                std::fs::create_dir_all(&data_dir).ok();
+                backup::apply_pending_restore(&data_dir);
+            }
+
             let profile_store = Arc::new(
                 profiles::ProfileStore::load_or_create(&handle)
                     .expect("failed to initialise profile store"),
@@ -373,6 +383,9 @@ pub fn run() {
             commands::settings_get_all,
             commands::settings_set,
             commands::settings_set_all,
+            commands::backup_export,
+            commands::backup_inspect,
+            commands::backup_import,
             commands::agent_chat_cmd,
             commands::respond_to_bridge_approval,
             commands::bridge_activity,

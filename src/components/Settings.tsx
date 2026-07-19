@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { X, Palette, ArrowDownUp, FolderTree, TerminalSquare, Plug, Radio, Bot, Ban, Check, Info, MonitorSmartphone, FolderSync } from "lucide-react";
+import { X, Palette, ArrowDownUp, FolderTree, TerminalSquare, Plug, Radio, Bot, Ban, Check, Info, MonitorSmartphone, FolderSync, ShieldAlert, Loader2 } from "lucide-react";
 import { useDialog } from "@/hooks/useDialog";
 import { ACCENTS } from "@/lib/accent";
 import {
@@ -17,7 +17,10 @@ import {
 } from "@/stores/settingsStore";
 import { useBridge } from "@/stores/bridgeStore";
 import { ipc } from "@/lib/ipc";
-import { open } from "@tauri-apps/plugin-dialog";
+import { toast } from "@/stores/toastStore";
+import { toastError } from "@/lib/errors";
+import type { BackupSummary } from "@/lib/types";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { cn } from "@/lib/cn";
 import { RemoteControlSettings } from "./RemoteControlSettings";
 import { SyncSettings } from "./SyncSettings";
@@ -37,7 +40,8 @@ type SectionId =
   | "sync"
   | "bridge"
   | "cli"
-  | "agent";
+  | "agent"
+  | "backup";
 
 const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
   { id: "appearance", label: "Appearance", icon: <Palette size={14} /> },
@@ -50,6 +54,7 @@ const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
   { id: "bridge", label: "Agent Bridge", icon: <Radio size={14} /> },
   { id: "cli", label: "faro-cli", icon: <TerminalSquare size={14} /> },
   { id: "agent", label: "Chat", icon: <Bot size={14} /> },
+  { id: "backup", label: "Backup", icon: <ShieldAlert size={14} /> },
 ];
 
 export function Settings({ onClose }: Props) {
@@ -417,6 +422,9 @@ export function Settings({ onClose }: Props) {
             </Help>
           </>
         );
+
+      case "backup":
+        return <BackupSettings />;
     }
   };
 
@@ -676,6 +684,224 @@ function ApiKeyField() {
         )}
       </div>
     </Field>
+  );
+}
+
+// Encrypted backup / restore (Plan 12 Phase 4). Export writes a single
+// password-protected container carrying profiles, faro.db, subsystem configs,
+// and all keychain credentials; restore stages it for the next launch.
+function BackupSettings() {
+  const [exportPw, setExportPw] = useState("");
+  const [exportPw2, setExportPw2] = useState("");
+  const [exporting, setExporting] = useState(false);
+
+  const [importPath, setImportPath] = useState<string | null>(null);
+  const [importPw, setImportPw] = useState("");
+  const [pending, setPending] = useState<BackupSummary | null>(null);
+  const [importing, setImporting] = useState(false);
+
+  const btn =
+    "rounded-md border border-border px-3 py-1.5 text-sm text-text transition-colors hover:bg-bg-hover disabled:opacity-50";
+  const input =
+    "w-full rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-sm outline-none focus:border-accent";
+  const danger =
+    "rounded-md border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-sm text-red-400 transition-colors hover:bg-red-500/20 disabled:opacity-50";
+
+  const doExport = async () => {
+    if (exportPw.length < 8) {
+      toast.warning("Weak password", "Use at least 8 characters.");
+      return;
+    }
+    if (exportPw !== exportPw2) {
+      toast.warning("Passwords don't match");
+      return;
+    }
+    const path = await save({
+      title: "Save Faro backup",
+      defaultPath: "faro-backup.farobak",
+      filters: [{ name: "Faro backup", extensions: ["farobak"] }],
+    });
+    if (!path) return;
+    setExporting(true);
+    try {
+      const s = await ipc.backupExport(path, exportPw);
+      setExportPw("");
+      setExportPw2("");
+      toast.success(
+        "Backup created",
+        `${s.profiles} profile${s.profiles === 1 ? "" : "s"}, ${s.credentials} credential${
+          s.credentials === 1 ? "" : "s"
+        }, and app state — encrypted.`
+      );
+    } catch (e) {
+      toastError(e, "Backup failed");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const chooseFile = async () => {
+    const path = await open({
+      title: "Choose a Faro backup",
+      multiple: false,
+      filters: [{ name: "Faro backup", extensions: ["farobak"] }],
+    });
+    if (typeof path === "string") {
+      setImportPath(path);
+      setPending(null);
+    }
+  };
+
+  // Step 1: decrypt + preview ("what's inside") — also validates the password.
+  const doInspect = async () => {
+    if (!importPath || !importPw) return;
+    setImporting(true);
+    try {
+      const s = await ipc.backupInspect(importPath, importPw);
+      setPending(s);
+    } catch (e) {
+      toastError(e, "Couldn't open backup");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  // Step 2: apply it (staged for next launch; credentials injected now).
+  const doImport = async () => {
+    if (!importPath || !importPw) return;
+    setImporting(true);
+    try {
+      await ipc.backupImport(importPath, importPw);
+      setPending(null);
+      setImportPw("");
+      setImportPath(null);
+      toast.success(
+        "Backup restored",
+        "Restart Faro to finish applying it — your connections and secrets are ready."
+      );
+    } catch (e) {
+      toastError(e, "Restore failed");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-5">
+      {/* Export */}
+      <div>
+        <div className="mb-1 text-sm font-medium">Create an encrypted backup</div>
+        <Help>
+          One password-protected file with your connection profiles, their saved
+          secrets (SSH passwords, cloud tokens, the AI API key), app settings, and
+          sync pairs. Argon2id + AES-256-GCM — useless without the password, so
+          store it somewhere safe.
+        </Help>
+        <div className="mt-2 flex flex-col gap-2">
+          <input
+            type="password"
+            value={exportPw}
+            onChange={(e) => setExportPw(e.target.value)}
+            placeholder="Backup password"
+            className={input}
+            autoComplete="new-password"
+          />
+          <input
+            type="password"
+            value={exportPw2}
+            onChange={(e) => setExportPw2(e.target.value)}
+            placeholder="Confirm password"
+            className={input}
+            autoComplete="new-password"
+          />
+          <div>
+            <button type="button" className={btn} onClick={doExport} disabled={exporting}>
+              {exporting ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <Loader2 size={13} className="animate-spin" /> Exporting…
+                </span>
+              ) : (
+                "Export backup…"
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="h-px bg-border" />
+
+      {/* Restore */}
+      <div>
+        <div className="mb-1 flex items-center gap-1.5 text-sm font-medium text-red-400">
+          <ShieldAlert size={14} /> Restore from a backup
+        </div>
+        <Help>
+          Replaces this machine's profiles, settings, and saved secrets with the
+          backup's. Takes effect after you restart Faro.
+        </Help>
+        <div className="mt-2 flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <button type="button" className={btn} onClick={chooseFile} disabled={importing}>
+              Choose backup file…
+            </button>
+            {importPath && (
+              <span className="truncate text-xs text-text-dim" title={importPath}>
+                {importPath.split(/[\\/]/).pop()}
+              </span>
+            )}
+          </div>
+          {importPath && (
+            <input
+              type="password"
+              value={importPw}
+              onChange={(e) => {
+                setImportPw(e.target.value);
+                setPending(null);
+              }}
+              placeholder="Backup password"
+              className={input}
+              autoComplete="off"
+            />
+          )}
+          {importPath && !pending && (
+            <div>
+              <button
+                type="button"
+                className={btn}
+                onClick={doInspect}
+                disabled={importing || !importPw}
+              >
+                {importing ? "Checking…" : "Preview contents"}
+              </button>
+            </div>
+          )}
+          {pending && (
+            <div className="rounded-md border border-border bg-bg-subtle p-3 text-sm">
+              <div className="mb-1.5 font-medium">This backup contains</div>
+              <ul className="mb-2.5 list-inside list-disc text-text-muted">
+                <li>
+                  {pending.profiles} connection profile
+                  {pending.profiles === 1 ? "" : "s"}
+                </li>
+                <li>
+                  {pending.credentials} saved credential
+                  {pending.credentials === 1 ? "" : "s"} (keychain)
+                </li>
+                <li>app settings + state {pending.hasSync ? "+ sync pairs" : ""}</li>
+              </ul>
+              <button
+                type="button"
+                className={danger}
+                onClick={doImport}
+                disabled={importing}
+              >
+                {importing ? "Restoring…" : "Restore & overwrite current data"}
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 

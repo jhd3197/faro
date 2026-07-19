@@ -53,6 +53,7 @@ import type {
   SearchSnapshot,
   SearchProgress,
   SearchHitBatch,
+  BackupSummary,
 } from "./types";
 
 // Typed wrappers around the Tauri command surface. The string names must match
@@ -350,6 +351,17 @@ export const ipc = {
   /** Bulk-upsert (the one-time localStorage import). */
   settingsSetAll: (values: Record<string, string>) =>
     invoke<void>("settings_set_all", { values }),
+
+  // ---- Encrypted backup / restore (Plan 12 Phase 4) ----
+  /** Write an encrypted backup to `path`, protected by `password`. */
+  backupExport: (path: string, password: string) =>
+    invoke<BackupSummary>("backup_export", { path, password }),
+  /** Decrypt + report what's inside a backup, without applying it. */
+  backupInspect: (path: string, password: string) =>
+    invoke<BackupSummary>("backup_inspect", { path, password }),
+  /** Restore a backup (staged for next launch; credentials injected now). */
+  backupImport: (path: string, password: string) =>
+    invoke<BackupSummary>("backup_import", { path, password }),
 
   agentChat: (req: {
     sessionId: string | null;
