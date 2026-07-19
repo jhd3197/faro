@@ -46,7 +46,7 @@ thematic detail.
 | 8 | `8_fleet-skills` | ✅ built (live multi-server fan-out run left) | AI-authored fleet automations over the bridge. Independent. |
 | 9 | `9_on-demand-virtual-folders` | 🔄 Windows provider built (feature-flagged); Explorer verify left | OneDrive-style placeholders (Plan 2 Phase 3). Large, per-OS, Windows-first. |
 | 10 | `10_faro-cli-agent-dx` | ✅ built (live SSH-box + phone-agent smoke tests left) | faro-cli/Agent-Bridge remote exec/write DX. All six phases in: CLI version-drift + self-update, `agent script`/`--stdin`, `agent write`, MSYS path guard, background/detached jobs (SSH + agent arms), authenticated `fetch`. Independent of the scan foundation. |
-| 11 | `11_terminal-depth-and-snippets` | ⬜ | Terminal as a first-class surface: instance registry, split panes on one connection, snippets. Biggest everyday-UX win. |
+| 11 | `11_terminal-depth-and-snippets` | 🔄 Phases 1, 2, 4 built + runtime-verified (headless mock harness); Phase 3 (agent PTY) deferred — needs a paired phone | Terminal as a first-class surface: instance registry, split panes on one connection, snippets. Biggest everyday-UX win. |
 | 12 | `12_security-settings-and-portability` | ⬜ | Keychain-everything (fix the localStorage API key), settings in `faro.db` + pre-paint injection, structured errors, encrypted backup. Trust fundamentals. |
 | 13 | `13_remote-previews-and-protocol-depth` | ⬜ | Lazy remote image previews (viewport-budgeted), native drag-out, SCP fallback, port forwarding, Docker SSH E2E fixtures. |
 | 14 | `14_iconify-brand-icons` | ⬜ | Additive brand/protocol logos. Independent polish; do whenever. |
@@ -277,7 +277,26 @@ remounts/popouts/HMR), **split panes** opening extra PTY channels on the same
 pooled SSH connection (Cmd+D family, layout tree), terminal-over-agent as an
 additive protocol op (stretch), and **command snippets** (`faro.db` table,
 `{{variable}}` templates, Cmd+K insert into the shell — the everyday
-low-friction counterpart to Fleet Skills). ⬜
+low-friction counterpart to Fleet Skills).
+
+- ✅ **Phase 1 — instance registry** (`src/lib/terminalRegistry.ts`): xterm
+  instances + their DOM nodes live outside React; leaves attach/detach the cached
+  node, disposal is store-driven, HMR-safe. Scrollback survives tab switches,
+  dock toggles, splits, popouts.
+- ✅ **Phase 2 — split panes**: each tab owns a layout tree (leaf | split), split
+  right/down open a new PTY channel on the same pooled SSH connection, with
+  draggable dividers, zoom, close-pane, and `mod+shift+D/E/Enter/W` chords
+  (palette + cheat-sheet; xterm swallows them so bare Ctrl+D stays EOF).
+- ✅ **Phase 4 — command snippets**: `snippets` table in `faro.db` (v2 migration)
+  + `snippet_list/save/delete/run`, a Snippets panel, a Cmd+K section, a terminal
+  toolbar quick-insert, and a `{{variable}}` fill-in dialog (never auto-submits;
+  multi-line warns). Backend unit-tested; the whole UI verified end-to-end in a
+  headless browser via the mock harness (`scripts/verify-terminal.mjs`).
+- ⬜ **Phase 3 — terminal over the Faro Agent** (stretch, deferred): additive
+  `faro-agent-proto` PTY op + `faro-agentd` + `supportsTerminal =
+  sftp || agent(supports_pty)`. Left for a session with a paired phone + rebuilt
+  daemon — its verification (interactive `top`/`vi`) can't be reached from the
+  dev box or the mock harness.
 
 ## Track M — Security, settings & portability (Plan 12)
 Trust fundamentals: **keychain-everything
