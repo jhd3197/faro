@@ -1,4 +1,4 @@
-# Plan 12 — Scoped, time-boxed connection sharing
+# Plan 15 — Scoped, time-boxed connection sharing
 
 > **Status: DEFERRED — blocked on a login/auth foundation.** The target use case
 > (share a box with a remote employee via a link, over the internet) needs

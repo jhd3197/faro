@@ -46,8 +46,11 @@ thematic detail.
 | 8 | `8_fleet-skills` | ✅ built (live multi-server fan-out run left) | AI-authored fleet automations over the bridge. Independent. |
 | 9 | `9_on-demand-virtual-folders` | 🔄 Windows provider built (feature-flagged); Explorer verify left | OneDrive-style placeholders (Plan 2 Phase 3). Large, per-OS, Windows-first. |
 | 10 | `10_faro-cli-agent-dx` | ✅ built (live SSH-box + phone-agent smoke tests left) | faro-cli/Agent-Bridge remote exec/write DX. All six phases in: CLI version-drift + self-update, `agent script`/`--stdin`, `agent write`, MSYS path guard, background/detached jobs (SSH + agent arms), authenticated `fetch`. Independent of the scan foundation. |
-| 11 | `11_iconify-brand-icons` | ⬜ | Additive brand/protocol logos. Independent polish; do whenever. |
-| 12 | `12_scoped-connection-sharing` | 🅿️ deferred | Blocked on a login/auth foundation. |
+| 11 | `11_terminal-depth-and-snippets` | ⬜ | Terminal as a first-class surface: instance registry, split panes on one connection, snippets. Biggest everyday-UX win. |
+| 12 | `12_security-settings-and-portability` | ⬜ | Keychain-everything (fix the localStorage API key), settings in `faro.db` + pre-paint injection, structured errors, encrypted backup. Trust fundamentals. |
+| 13 | `13_remote-previews-and-protocol-depth` | ⬜ | Lazy remote image previews (viewport-budgeted), native drag-out, SCP fallback, port forwarding, Docker SSH E2E fixtures. |
+| 14 | `14_iconify-brand-icons` | ⬜ | Additive brand/protocol logos. Independent polish; do whenever. |
+| 15 | `15_scoped-connection-sharing` | 🅿️ deferred | Blocked on a login/auth foundation. |
 
 Cross-project **Track D** (ServerKit ↔ Faro) has no plan file — it's a
 convergence effort tracked only in the Track section below.
@@ -166,7 +169,7 @@ surface for those agents).
 
 ---
 
-## Track E — Brand & protocol logos (Plan 11)
+## Track E — Brand & protocol logos (Plan 14)
 
 Additive icon layer for recognizable brand marks (S3/Azure/SSH/WordPress) via
 Iconify, bundled offline. Deliberately does **not** touch the file-type icons
@@ -267,7 +270,37 @@ additive protocol op so older daemons keep working). Verified by unit +
 end-to-end tests; live smoke tests against a real SSH box and the paired phone
 agent are the maintainer's step (single-instance lock + Android daemon redeploy).
 
-## Track J — Scoped connection sharing (Plan 12) — DEFERRED
+## Track L — Terminal depth & snippets (Plan 11)
+Makes the terminal a first-class surface:
+an xterm **instance registry** decoupled from React (scrollback survives
+remounts/popouts/HMR), **split panes** opening extra PTY channels on the same
+pooled SSH connection (Cmd+D family, layout tree), terminal-over-agent as an
+additive protocol op (stretch), and **command snippets** (`faro.db` table,
+`{{variable}}` templates, Cmd+K insert into the shell — the everyday
+low-friction counterpart to Fleet Skills). ⬜
+
+## Track M — Security, settings & portability (Plan 12)
+Trust fundamentals: **keychain-everything
+credentials** (the Anthropic API key leaves plaintext localStorage; the
+frontend never sees secrets — Rust fetches at use time), settings moved from
+localStorage into **`faro.db` with pre-paint window injection** (one source of
+truth, no theme flash), **structured `{kind, message}` errors** across IPC so
+toasts pattern-match instead of regexing strings, and **encrypted
+backup/restore** (Argon2id + AES-256-GCM container carrying profiles,
+`faro.db`, and all keychain credentials). ⬜
+
+## Track N — Remote previews & protocol depth (Plan 13)
+Headlined by **lazy remote image previews** (a real user ask): global +
+per-connection setting (default off for remote), IntersectionObserver-driven
+fetching with a hard concurrency cap, cancellation on scroll-away, size guards
+and an LRU disk cache keyed by change signal — scrolling a 100k-image
+`wp-content/uploads` costs only the rows you actually see. Plus **native
+drag-out download** (the `drag` crate stages to temp; HTML5 DnD can't leave a
+webview), an **SCP fallback** for SFTP-less servers, **port forwarding** with
+persisted rules + presets, and **Docker SSH E2E fixtures** (bastion / SCP-only
+/ sudo) to finally retire the roadmap's "compile-verified only" refrain. ⬜
+
+## Track J — Scoped connection sharing (Plan 15) — DEFERRED
 Share a box read-only / path-jailed / time-boxed. **Parked until a login/auth
 foundation exists** — the real use case (remote employee, link-based) needs auth
 regardless, so we hold the whole track rather than ship the LAN-only half. The
@@ -311,11 +344,18 @@ mirror.
 7. **Track K — faro-cli remote-exec DX (Plan 10).** Independent of the scan
    foundation, so it can slot in here — and its **Phase 0 (CLI version-drift
    check + update, exec-ceiling fix) is a live pain point that can be pulled
-   forward at any time.** Ships before the polish/deferred plans (iconify #11,
-   scoped sharing #12).
-8. **Track D option (b)** — ServerKit installs `faro-agentd` as a managed
+   forward at any time.** Ships before the polish/deferred plans (iconify #14,
+   scoped sharing #15).
+8. **Track M — Security, settings & portability (Plan 12).** Trust
+   fundamentals; the localStorage API-key fix is small and should land early.
+9. **Track L — Terminal depth & snippets (Plan 11).** The biggest everyday-UX
+   win; independent of the scan foundation and of Plan 12.
+10. **Track N — Remote previews & protocol depth (Plan 13).** Phase 1 (lazy
+    previews) is the user-facing headline; its E2E fixtures phase then serves
+    the whole roadmap's live-verification backlog.
+11. **Track D option (b)** — ServerKit installs `faro-agentd` as a managed
    service; every server becomes syncable via Track A.
-9. **Track C Windows on-demand** — the large, later effort.
+12. **Track C Windows on-demand** — the large, later effort.
 
 To execute any of these tracks end-to-end in a fresh session, use the local
 `docs/plans/prompt.md` runbook — set its one plan-filename knob and paste it.

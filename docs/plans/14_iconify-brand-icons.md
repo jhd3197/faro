@@ -1,4 +1,4 @@
-# Plan 11 — Iconify for brand & protocol logos
+# Plan 14 — Iconify for brand & protocol logos
 
 ## Context
 
