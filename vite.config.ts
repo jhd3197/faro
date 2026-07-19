@@ -28,6 +28,8 @@ export default defineConfig(async ({ mode }) => ({
               __dirname,
               "src/mock/notification.ts"
             ),
+            "@tauri-apps/plugin-updater": path.resolve(__dirname, "src/mock/updater.ts"),
+            "@tauri-apps/plugin-process": path.resolve(__dirname, "src/mock/process.ts"),
           }
         : {}),
     },

@@ -7,13 +7,19 @@ import {
   Plus,
   Trash2,
   Bell,
+  RefreshCw,
+  ArrowUpCircle,
+  Download,
 } from "lucide-react";
 import { ipc } from "@/lib/ipc";
 import { toast } from "@/stores/toastStore";
 import { useSettings } from "@/stores/settingsStore";
+import { useUpdater } from "@/stores/updaterStore";
 import type { PathStatus } from "@/lib/types";
 import { getVersion } from "@tauri-apps/api/app";
 import { cn } from "@/lib/cn";
+
+const RELEASES_URL = "https://github.com/jhd3197/Faro/releases";
 
 /// Settings → About. The app's identity/version, plus the trust/UX fundamentals
 /// from Plan 16: the one-click "Add faro-cli to PATH" row (Phase 4). The updater
@@ -48,9 +54,105 @@ export function AboutSettings() {
         </p>
       </div>
 
+      <UpdaterCard />
+
       <NotificationsRow />
 
       <PathRow />
+    </div>
+  );
+}
+
+/// In-app updater (Plan 16 Phase 1/2). Manual "Check for updates", the current
+/// status, and the download → restart flow. The launch check + the prompt bar
+/// live in UpdatePrompt; this is the on-demand surface.
+function UpdaterCard() {
+  const status = useUpdater((s) => s.status);
+  const version = useUpdater((s) => s.version);
+  const downloaded = useUpdater((s) => s.downloaded);
+  const total = useUpdater((s) => s.total);
+  const error = useUpdater((s) => s.error);
+  const check = useUpdater((s) => s.check);
+  const download = useUpdater((s) => s.downloadAndInstall);
+  const restart = useUpdater((s) => s.restart);
+
+  const busy = status === "checking" || status === "downloading";
+  const pct =
+    total && total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : null;
+
+  return (
+    <div>
+      <div className="mb-1.5 flex items-center gap-2 text-sm font-medium text-text">
+        <ArrowUpCircle size={15} className="text-accent" />
+        Updates
+      </div>
+
+      <div className="rounded-lg border border-border bg-bg-subtle/50 p-3 text-sm">
+        {status === "available" || status === "downloading" || status === "ready" ? (
+          <div className="flex items-start gap-2">
+            <ArrowUpCircle size={15} className="mt-0.5 shrink-0 text-accent" />
+            <div className="min-w-0">
+              {status === "available" && (
+                <div className="text-text">Faro {version} is available.</div>
+              )}
+              {status === "downloading" && (
+                <div className="text-text">
+                  Downloading update{pct !== null ? ` — ${pct}%` : "…"}
+                </div>
+              )}
+              {status === "ready" && (
+                <div className="text-text">
+                  Update downloaded — restart Faro to finish installing.
+                </div>
+              )}
+            </div>
+          </div>
+        ) : status === "error" ? (
+          <div className="text-text-muted">{error ?? "Update check failed."}</div>
+        ) : status === "checking" ? (
+          <div className="flex items-center gap-2 text-text-muted">
+            <Loader2 size={15} className="animate-spin" /> Checking…
+          </div>
+        ) : (
+          <div className="flex items-start gap-2">
+            <CheckCircle2 size={15} className="mt-0.5 shrink-0 text-emerald-500" />
+            <div className="text-text">You're on the latest version.</div>
+          </div>
+        )}
+
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {status === "available" ? (
+            <button
+              onClick={() => void download()}
+              className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/90"
+            >
+              <Download size={13} /> Download &amp; install
+            </button>
+          ) : status === "ready" ? (
+            <button
+              onClick={() => void restart()}
+              className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/90"
+            >
+              <RefreshCw size={13} /> Restart now
+            </button>
+          ) : (
+            <button
+              onClick={() => void check(false)}
+              disabled={busy}
+              className="inline-flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent/90 disabled:opacity-60"
+            >
+              {busy ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+              Check for updates
+            </button>
+          )}
+          <button
+            onClick={() => window.open(RELEASES_URL, "_blank", "noopener,noreferrer")}
+            className="rounded-md border border-border px-3 py-1.5 text-xs text-text-muted hover:bg-bg-hover hover:text-text"
+          >
+            Release notes
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
