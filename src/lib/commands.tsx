@@ -14,12 +14,14 @@ import {
   SunMoon,
   Radio,
   Wand2,
+  Braces,
 } from "lucide-react";
 import { useConnections } from "@/stores/connectionsStore";
 import { useTransfers } from "@/stores/transfersStore";
 import { useLayout } from "@/stores/layoutStore";
 import { useSettings, APP_THEMES } from "@/stores/settingsStore";
 import { useSkills } from "@/stores/skillsStore";
+import { useSnippets } from "@/stores/snippetsStore";
 
 export interface Command {
   id: string;
@@ -49,6 +51,7 @@ export function useCommands(): Command[] {
   const openDialog = useLayout((s) => s.openDialog);
   const setShortcutsOpen = useLayout((s) => s.setShortcutsOpen);
   const openSkills = useSkills((s) => s.openPanel);
+  const snippets = useSnippets((s) => s.snippets);
 
   const appTheme = useSettings((s) => s.appTheme);
   const setAppTheme = useSettings((s) => s.setAppTheme);
@@ -103,6 +106,14 @@ export function useCommands(): Command[] {
       icon: <Wand2 size={14} />,
       keywords: "skill skills fleet automation run command multi server mcp agent",
       run: () => openSkills(),
+    },
+    {
+      id: "snippets",
+      title: "Snippets…",
+      group: "General",
+      icon: <Braces size={14} />,
+      keywords: "snippet snippets command template variable insert manage terminal",
+      run: () => useSnippets.getState().openPanel(),
     },
     {
       id: "agent-console",
@@ -186,6 +197,20 @@ export function useCommands(): Command[] {
       icon: <Palette size={14} />,
       enabled: appTheme !== t.value,
       run: () => setAppTheme(t.value),
+    });
+  }
+
+  // Snippet insert commands — only actionable when a shell is available. The
+  // insert targets the focused terminal; the store toasts if there's none.
+  for (const s of snippets) {
+    cmds.push({
+      id: `snippet:${s.id}`,
+      title: `Insert snippet: ${s.name}`,
+      group: "Snippets",
+      icon: <Braces size={14} />,
+      keywords: `snippet ${s.folder ?? ""} ${s.body}`,
+      enabled: !!activeSessionId && supportsTerminal,
+      run: () => useSnippets.getState().requestInsert(s),
     });
   }
 

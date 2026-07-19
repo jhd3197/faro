@@ -3,12 +3,14 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { SerializeAddon } from "@xterm/addon-serialize";
-import { Plus, X, TerminalSquare, PictureInPicture2 } from "lucide-react";
+import { Plus, X, TerminalSquare, PictureInPicture2, Braces, Settings2 } from "lucide-react";
 import { ipc, onTerminalData, onTerminalExit } from "@/lib/ipc";
 import type { SessionId } from "@/lib/types";
 import { attachSuggestions } from "@/lib/termSuggest";
+import { registerTerminalPane, noteTerminalFocus } from "@/lib/termInput";
 import { useSettings, TERMINAL_THEMES } from "@/stores/settingsStore";
 import { useConnections } from "@/stores/connectionsStore";
+import { useSnippets } from "@/stores/snippetsStore";
 import { useTerminals, type TerminalTab } from "@/stores/terminalsStore";
 import { openTerminalWindow, popoutBufferKey } from "@/lib/popout";
 import { toast } from "@/stores/toastStore";
@@ -47,9 +49,37 @@ export function TerminalDock({
   const closeTab = useTerminals((s) => s.closeTab);
   const setActive = useTerminals((s) => s.setActive);
   const renameTab = useTerminals((s) => s.renameTab);
+  const snippets = useSnippets((s) => s.snippets);
+  const requestInsert = useSnippets((s) => s.requestInsert);
+  const openSnippets = useSnippets((s) => s.openPanel);
   const [menu, setMenu] = useState<{ x: number; y: number; items: MenuItem[] } | null>(
     null
   );
+
+  // The toolbar snippet button opens a quick-insert menu of saved snippets
+  // (capped) plus a "Manage snippets…" escape hatch to the full panel.
+  const openSnippetMenu = (e: React.MouseEvent) => {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const items: MenuItem[] = [];
+    if (snippets.length === 0) {
+      items.push({ label: "No snippets yet", disabled: true, onClick: () => {} });
+    } else {
+      snippets.slice(0, 12).forEach((s, i, arr) => {
+        items.push({
+          label: s.name || "(unnamed)",
+          icon: <Braces size={12} />,
+          onClick: () => requestInsert(s),
+          separatorAfter: i === arr.length - 1,
+        });
+      });
+    }
+    items.push({
+      label: "Manage snippets…",
+      icon: <Settings2 size={12} />,
+      onClick: () => openSnippets(),
+    });
+    setMenu({ x: r.left, y: r.bottom + 4, items });
+  };
 
   // Move a tab's shell into its own window: hand the live PTY over (scrollback
   // serialized through localStorage) and drop the in-app tab. The popped-out
@@ -150,6 +180,15 @@ export function TerminalDock({
             </button>
           )}
         </div>
+        {sessionId && (
+          <button
+            onClick={openSnippetMenu}
+            title="Insert snippet"
+            className="ml-1 flex h-6 shrink-0 items-center justify-center rounded-md px-1.5 text-text-muted hover:bg-bg-hover hover:text-text"
+          >
+            <Braces size={13} />
+          </button>
+        )}
       </div>
       <div className="relative flex-1 overflow-hidden">
         {/* Every tab across all sessions stays mounted; only the focused
@@ -310,6 +349,16 @@ function TerminalPane({
       getTerminalId: () => terminalIdRef.current,
     });
 
+    // Register with the terminal-input bus so app surfaces (snippets palette,
+    // Snippets panel, toolbar) can inject text into whichever pane is focused.
+    const unregisterInput = registerTerminalPane(tab.id, {
+      write: (data) => {
+        const id = terminalIdRef.current;
+        if (id) ipc.terminalWrite(id, data).catch(() => {});
+      },
+      focus: () => termRef.current?.focus(),
+    });
+
     // History is keyed by profile, not session, so suggestions survive
     // reconnects to the same server.
     const historyKey =
@@ -393,6 +442,7 @@ function TerminalPane({
     return () => {
       disposed = true;
       paneHandles.delete(tab.id);
+      unregisterInput();
       window.removeEventListener("resize", onWindowResize);
       suggest.dispose();
       dataDisposable.dispose();
@@ -425,9 +475,11 @@ function TerminalPane({
         fit.fit();
       } catch {}
       term.focus();
+      // The visible/active pane is the snippet-insertion target.
+      noteTerminalFocus(tab.id);
     });
     return () => cancelAnimationFrame(raf);
-  }, [visible]);
+  }, [visible, tab.id]);
 
   // Live-apply font/theme changes without recreating the term.
   useEffect(() => {
@@ -456,7 +508,10 @@ function TerminalPane({
     >
       <div
         ref={containerRef}
-        onMouseDown={() => termRef.current?.focus()}
+        onMouseDown={() => {
+          termRef.current?.focus();
+          noteTerminalFocus(tab.id);
+        }}
         className="h-full w-full flex-1 overflow-hidden"
         style={{ background: theme.background }}
       />

@@ -54,6 +54,7 @@ import { DiskUsageHost } from "./components/DiskUsage";
 import { DirectoryDiffHost } from "./components/DirectoryDiff";
 import { FleetSearchHost } from "./components/FleetSearch";
 import { SkillsHost } from "./components/SkillsPanel";
+import { SnippetsHost } from "./components/SnippetsPanel";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { relTime } from "./lib/format";
 import { cn } from "./lib/cn";
@@ -127,6 +128,7 @@ export default function App() {
       <DirectoryDiffHost />
       <FleetSearchHost />
       <SkillsHost />
+      <SnippetsHost />
       <CommandPalette />
       <KeyboardShortcutsDialog />
       <div className="flex flex-1 overflow-hidden">

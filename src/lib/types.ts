@@ -811,6 +811,21 @@ export interface SavedCommand {
   description: string;
 }
 
+// ---- Command snippets (Plan 11 Phase 4): the low-friction, single-session
+// counterpart to Fleet Skills — a saved command line with optional {{variable}}
+// placeholders, inserted into a live shell with one keystroke. ----
+export interface Snippet {
+  id: string;
+  name: string;
+  body: string;
+  /** Optional grouping label shown in the panel. */
+  folder: string | null;
+  /** Times inserted — drives palette ordering (most-used first). */
+  useCount: number;
+  createdMs: number;
+  updatedMs: number;
+}
+
 // ---- Skills (Plan 8): parameterized, fleet-targetable, AI-authorable) ----
 
 export type SkillStatus = "approved" | "proposed";

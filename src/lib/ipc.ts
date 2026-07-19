@@ -32,6 +32,7 @@ import type {
   AgentExecStart,
   AgentOutput,
   SavedCommand,
+  Snippet,
   Skill,
   SkillRunResult,
   SkillDryRunResult,
@@ -175,6 +176,15 @@ export const ipc = {
 
   closeTerminal: (terminalId: string) =>
     invoke<void>("close_terminal", { terminalId }),
+
+  // ---- Command snippets (Plan 11 Phase 4) ----
+  // Every mutation returns the full, re-ordered list (most-used first).
+  snippetList: () => invoke<Snippet[]>("snippet_list"),
+  snippetSave: (snippet: Snippet) =>
+    invoke<Snippet[]>("snippet_save", { snippet }),
+  snippetDelete: (id: string) => invoke<Snippet[]>("snippet_delete", { id }),
+  /** Record one insertion so the snippet floats up the ordering. */
+  snippetRun: (id: string) => invoke<Snippet[]>("snippet_run", { id }),
 
   startDownload: (
     sessionId: SessionId,
