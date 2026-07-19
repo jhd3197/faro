@@ -39,7 +39,7 @@ import { useBridge } from "./stores/bridgeStore";
 import { useSync } from "./stores/syncStore";
 import { useSettings } from "./stores/settingsStore";
 import { onDeepLink } from "./lib/ipc";
-import { runSecretMigration } from "./lib/secretMigration";
+import { runSecretMigration, runSettingsMigration } from "./lib/secretMigration";
 import { openTerminalWindow } from "./lib/popout";
 import { toast } from "./stores/toastStore";
 import type { DeepLink, Protocol, ConnectionProfile } from "./lib/types";
@@ -105,9 +105,11 @@ export default function App() {
     };
   }, []);
 
-  // One-time migration of any pre-keychain plaintext secrets (Plan 12 Phase 1).
+  // One-time migrations off localStorage (Plan 12): the plaintext API key into
+  // the OS keychain (Phase 1), and app settings into faro.db (Phase 2).
   useEffect(() => {
     void runSecretMigration();
+    void runSettingsMigration();
   }, []);
 
   return (

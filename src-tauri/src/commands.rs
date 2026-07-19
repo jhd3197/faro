@@ -1524,6 +1524,38 @@ pub async fn api_key_status(purpose: String) -> Result<bool, String> {
     Ok(crate::credentials::has_secret(&purpose))
 }
 
+// ---------- Settings (Plan 12 Phase 2) ----------
+
+/// Every persisted setting as `key -> raw JSON value`. The frontend store seeds
+/// itself from the pre-paint injection when it can; this is the async fallback
+/// (popout windows, or reconciling after a background write).
+#[tauri::command]
+pub async fn settings_get_all(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    state.db.settings_get_all().map_err(err)
+}
+
+/// Upsert one setting. `value` is a raw JSON string (the frontend stringifies).
+#[tauri::command]
+pub async fn settings_set(
+    key: String,
+    value: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.db.settings_set(&key, &value).map_err(err)
+}
+
+/// Bulk-upsert settings in one transaction — the one-time localStorage import.
+#[tauri::command]
+pub async fn settings_set_all(
+    values: std::collections::HashMap<String, String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let entries: Vec<(String, String)> = values.into_iter().collect();
+    state.db.settings_set_many(&entries).map_err(err)
+}
+
 /// Send a message to the built-in Agent chat. The backend calls Anthropic's
 /// API with the Faro bridge tools and returns the assistant's final response.
 #[tauri::command]

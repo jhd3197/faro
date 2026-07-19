@@ -340,6 +340,17 @@ export const ipc = {
   apiKeyStatus: (purpose: string) =>
     invoke<boolean>("api_key_status", { purpose }),
 
+  // ---- Settings (Plan 12 Phase 2): faro.db is the source of truth ----
+  /** Every setting as `key -> raw JSON value`. */
+  settingsGetAll: () =>
+    invoke<Record<string, string>>("settings_get_all"),
+  /** Upsert one setting (`value` is a JSON-stringified value). */
+  settingsSet: (key: string, value: string) =>
+    invoke<void>("settings_set", { key, value }),
+  /** Bulk-upsert (the one-time localStorage import). */
+  settingsSetAll: (values: Record<string, string>) =>
+    invoke<void>("settings_set_all", { values }),
+
   agentChat: (req: {
     sessionId: string | null;
     prompt: string;

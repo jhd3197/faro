@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { ipc } from "@/lib/ipc";
 
 export type OverwritePolicy = "overwrite" | "skip" | "rename";
 export type SortField = "name" | "size" | "modified";
@@ -213,70 +214,60 @@ const DEFAULTS: Persisted = {
   defaultPort: 22,
 };
 
-const VIEW_MIGRATION_KEY = "faro.viewModeDefaultV2";
+// The persisted setting keys, in one place — also the authoritative allow-list
+// the localStorage→faro.db migration filters against.
+export const SETTINGS_KEYS = Object.keys(DEFAULTS) as (keyof Persisted)[];
 
-function load(): Persisted {
+/** Read the pre-paint snapshot Rust injected on `window.__FARO_SETTINGS__`
+ *  (Plan 12 Phase 2) — present in the main window, absent in JS-spawned
+ *  popouts and mock builds. */
+function readInjected(): Partial<Persisted> | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEFAULTS;
-    const parsed = JSON.parse(raw) as Partial<Persisted>;
-    const merged = { ...DEFAULTS, ...parsed };
-    // One-time migration: the default file view moved from "details" to "grid".
-    // Flip existing installs that were still on the old default once, then
-    // respect whatever the user picks afterward.
-    if (localStorage.getItem(VIEW_MIGRATION_KEY) !== "done") {
-      if (merged.paneViewMode === "details") merged.paneViewMode = "grid";
-      localStorage.setItem(VIEW_MIGRATION_KEY, "done");
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
-    }
-    return merged;
-  } catch {
-    return DEFAULTS;
-  }
-}
-
-function persist(s: Persisted) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+    const inj = (globalThis as { __FARO_SETTINGS__?: unknown }).__FARO_SETTINGS__;
+    if (inj && typeof inj === "object") return inj as Partial<Persisted>;
   } catch {
     // ignore
   }
+  return null;
+}
+
+/** Keep only recognised setting keys from an arbitrary object. */
+function pickKnown(obj: Partial<Persisted>): Partial<Persisted> {
+  const out: Partial<Persisted> = {};
+  for (const k of SETTINGS_KEYS) {
+    const v = (obj as Record<string, unknown>)[k];
+    if (v !== undefined) (out as Record<string, unknown>)[k] = v;
+  }
+  return out;
+}
+
+function load(): Persisted {
+  const injected = readInjected();
+  if (injected) return { ...DEFAULTS, ...pickKnown(injected) };
+  // No injection (popout / mock / first paint before the script ran) — start
+  // from defaults; `hydrateFromDb()` below reconciles from faro.db async.
+  return DEFAULTS;
+}
+
+/** Persist one setting to faro.db — the single source of truth (Plan 12 Phase
+ *  2). Fire-and-forget: a missing backend (mock) just skips the write, the
+ *  in-memory value still applies for the session. */
+function persistKey<K extends keyof Persisted>(key: K, value: Persisted[K]) {
+  ipc.settingsSet(String(key), JSON.stringify(value)).catch(() => {
+    // no backend — ignore
+  });
 }
 
 const initial = load();
 
 function mutate<K extends keyof Persisted>(
   set: (fn: (s: SettingsState) => Partial<SettingsState>) => void,
-  get: () => SettingsState,
+  _get: () => SettingsState,
   key: K,
   value: Persisted[K]
 ) {
   set(() => ({ [key]: value }) as Partial<SettingsState>);
-  const s = get();
-  persist({
-    appTheme: s.appTheme,
-    accentColor: s.accentColor,
-    overwritePolicy: s.overwritePolicy,
-    promptOnOverwrite: s.promptOnOverwrite,
-    autoOpenTransferPanel: s.autoOpenTransferPanel,
-    defaultDownloadFolder: s.defaultDownloadFolder,
-    defaultEditor: s.defaultEditor,
-    showHiddenFiles: s.showHiddenFiles,
-    sortField: s.sortField,
-    sortDirection: s.sortDirection,
-    paneViewMode: s.paneViewMode,
-    paneDensity: s.paneDensity,
-    browserLayout: s.browserLayout,
-    railExpanded: s.railExpanded,
-    railCollapsedGroups: s.railCollapsedGroups,
-    terminalFontSize: s.terminalFontSize,
-    terminalFontFamily: s.terminalFontFamily,
-    terminalTheme: s.terminalTheme,
-    terminalScrollback: s.terminalScrollback,
-    terminalCopyOnSelect: s.terminalCopyOnSelect,
-    terminalSuggestions: s.terminalSuggestions,
-    defaultPort: s.defaultPort,
-  });
+  persistKey(key, value);
 }
 
 export const useSettings = create<SettingsState>((set, get) => ({
@@ -317,6 +308,38 @@ export const useSettings = create<SettingsState>((set, get) => ({
     mutate(set, get, "terminalSuggestions", v),
   setDefaultPort: (n) => mutate(set, get, "defaultPort", n),
 }));
+
+/** Reload settings from faro.db and merge them into the live store. Used by
+ *  windows that didn't get the pre-paint injection (popouts) and to reflect a
+ *  freshly-completed localStorage→faro.db migration in the current session. */
+export async function hydrateFromDb(): Promise<void> {
+  try {
+    const raw = await ipc.settingsGetAll();
+    const parsed: Partial<Persisted> = {};
+    for (const k of SETTINGS_KEYS) {
+      const v = raw[k as string];
+      if (v !== undefined) {
+        try {
+          (parsed as Record<string, unknown>)[k] = JSON.parse(v);
+        } catch {
+          // skip a corrupt row
+        }
+      }
+    }
+    const known = pickKnown(parsed);
+    if (Object.keys(known).length) {
+      useSettings.setState(known as Partial<SettingsState>);
+    }
+  } catch {
+    // no backend — ignore
+  }
+}
+
+// Popped-out terminal windows and mock builds never receive the Rust pre-paint
+// injection, so seed them from faro.db right after boot.
+if (!readInjected()) {
+  void hydrateFromDb();
+}
 
 export const TERMINAL_THEMES: Record<
   TerminalTheme,

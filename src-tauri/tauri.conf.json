@@ -10,19 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "title": "Faro",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 900,
-        "minHeight": 600,
-        "decorations": false,
-        "transparent": false,
-        "resizable": true,
-        "shadow": true
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }

@@ -13,13 +13,19 @@ if (import.meta.env.VITE_MOCK) {
   await import("./mock/demo");
 }
 
-// Apply the persisted theme as early as possible to avoid a FOUC. No crossfade
-// on first paint — only on later switches.
-document.documentElement.setAttribute(
-  "data-theme",
-  useSettings.getState().appTheme
-);
-// Apply any saved accent override on top of the theme's own accent.
+// The main window's theme is set pre-paint by Rust's initialization script,
+// which reads faro.db and sets `data-theme` before this bundle even loads
+// (Plan 12 Phase 2) — so there's no FOUC. This is only a deterministic
+// safety net: windows spawned from JS (popped-out terminals) get no injection,
+// so set `data-theme` from the seeded store if it isn't already present.
+if (!document.documentElement.getAttribute("data-theme")) {
+  document.documentElement.setAttribute(
+    "data-theme",
+    useSettings.getState().appTheme
+  );
+}
+// Apply any saved accent override on top of the theme's own accent. (Accent
+// isn't part of the pre-paint injection; the store seeds it synchronously.)
 applyAccent(useSettings.getState().accentColor || null);
 
 // Keep the html data-theme in sync with the setting store. On an actual theme

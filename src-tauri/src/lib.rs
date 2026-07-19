@@ -58,6 +58,76 @@ pub struct AppState {
     pub db: Arc<db::Db>,
 }
 
+/// Build the pre-paint JS injected into the main window (Plan 12 Phase 2). It
+/// reads every setting from `faro.db`, exposes them on `window.__FARO_SETTINGS__`
+/// for the frontend store to seed from, and sets `data-theme` on `<html>` before
+/// the first paint so there's no theme flash on reload.
+fn build_settings_init_script(db: &db::Db) -> String {
+    let mut map = db.settings_get_all().unwrap_or_default();
+    // A fresh install has no rows yet — default the theme so the window still
+    // paints dark (matching the frontend DEFAULTS), not the bare CSS default.
+    map.entry("appTheme".to_string())
+        .or_insert_with(|| "\"dark\"".to_string());
+
+    // Build a JS object literal `{ "key": <rawJson>, ... }`. Each stored value is
+    // already a JSON string; skip any that don't parse so one bad row can't break
+    // the whole injection (which would leave the window unthemed).
+    let mut pairs: Vec<String> = Vec::new();
+    for (k, v) in &map {
+        if serde_json::from_str::<serde_json::Value>(v).is_ok() {
+            if let Ok(key) = serde_json::to_string(k) {
+                pairs.push(format!("{key}:{v}"));
+            }
+        }
+    }
+    let obj = format!("{{{}}}", pairs.join(","));
+
+    format!(
+        "(function(){{try{{\
+           var s={obj};\
+           window.__FARO_SETTINGS__=s;\
+           var el=document.documentElement;\
+           if(el&&typeof s.appTheme==='string'){{el.setAttribute('data-theme',s.appTheme);}}\
+         }}catch(e){{}}}})();"
+    )
+}
+
+#[cfg(test)]
+mod init_script_tests {
+    use super::*;
+
+    #[test]
+    fn injects_theme_and_snapshot() {
+        let db = db::Db::open_in_memory().unwrap();
+        db.settings_set("appTheme", "\"nord\"").unwrap();
+        db.settings_set("terminalFontSize", "15").unwrap();
+        let script = build_settings_init_script(&db);
+        assert!(script.contains("window.__FARO_SETTINGS__"));
+        assert!(script.contains("setAttribute('data-theme'"));
+        assert!(script.contains("\"appTheme\":\"nord\""));
+        assert!(script.contains("\"terminalFontSize\":15"));
+    }
+
+    #[test]
+    fn defaults_theme_to_dark_on_empty_db() {
+        let db = db::Db::open_in_memory().unwrap();
+        let script = build_settings_init_script(&db);
+        assert!(script.contains("\"appTheme\":\"dark\""));
+    }
+
+    #[test]
+    fn skips_corrupt_rows_without_breaking() {
+        let db = db::Db::open_in_memory().unwrap();
+        // A value that isn't valid JSON must be dropped, not emitted raw (which
+        // would break the whole object literal and leave the window unthemed).
+        db.settings_set("appTheme", "\"dracula\"").unwrap();
+        db.settings_set("broken", "not json").unwrap();
+        let script = build_settings_init_script(&db);
+        assert!(script.contains("\"appTheme\":\"dracula\""));
+        assert!(!script.contains("not json"));
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -95,6 +165,28 @@ pub fn run() {
                 std::fs::create_dir_all(&dir).ok();
                 Arc::new(db::Db::open(&dir.join("faro.db")).expect("failed to open faro.db"))
             };
+
+            // Create the main window ourselves (it's no longer in
+            // tauri.conf.json) so we can inject a pre-paint script that reads the
+            // theme from faro.db and sets `data-theme` on <html> before the first
+            // paint — killing the dark→light flash structurally, not by timing
+            // luck (Plan 12 Phase 2). The script also stashes the full settings
+            // snapshot on `window.__FARO_SETTINGS__` so the frontend store seeds
+            // itself synchronously instead of an async round-trip.
+            {
+                let init_script = build_settings_init_script(&db);
+                tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+                    .title("Faro")
+                    .inner_size(1280.0, 800.0)
+                    .min_inner_size(900.0, 600.0)
+                    .decorations(false)
+                    .resizable(true)
+                    .shadow(true)
+                    .initialization_script(&init_script)
+                    .build()
+                    .expect("failed to create main window");
+            }
+
             let state = AppState {
                 sessions: Arc::new(session::SessionManager::new()),
                 ptys: Arc::new(terminal::PtyManager::new()),
@@ -277,6 +369,9 @@ pub fn run() {
             commands::bridge_register_mcp,
             commands::set_api_key,
             commands::api_key_status,
+            commands::settings_get_all,
+            commands::settings_set,
+            commands::settings_set_all,
             commands::agent_chat_cmd,
             commands::respond_to_bridge_approval,
             commands::bridge_activity,
