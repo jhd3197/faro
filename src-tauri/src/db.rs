@@ -18,9 +18,20 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+
+/// Milliseconds since the Unix epoch — the timestamp unit every `faro.db` row
+/// uses. Monotonic enough for ordering; not security-sensitive.
+pub fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// Forward-only schema migrations. Index = target `user_version - 1`; appending
 /// a statement is the *only* supported schema change. Never edit or reorder an
@@ -39,6 +50,19 @@ const MIGRATIONS: &[&str] = &[
         state          TEXT    NOT NULL DEFAULT 'synced',
         PRIMARY KEY (pair_id, rel_path)
     ) WITHOUT ROWID;",
+    // v2 — command snippets (Plan 11 Phase 4). The low-friction, single-session
+    // counterpart to Fleet Skills: a saved command line with optional
+    // `{{variable}}` placeholders, insertable into a live shell with one
+    // keystroke. `folder` groups them; `use_count` feeds palette ordering.
+    "CREATE TABLE snippets (
+        id         TEXT    PRIMARY KEY,
+        name       TEXT    NOT NULL,
+        body       TEXT    NOT NULL,
+        folder     TEXT,
+        use_count  INTEGER NOT NULL DEFAULT 0,
+        created_ms INTEGER NOT NULL,
+        updated_ms INTEGER NOT NULL
+    );",
 ];
 
 /// A persisted per-file sync record — what the source looked like the last time
@@ -50,6 +74,25 @@ pub struct SyncStateRow {
     pub mtime: i64,
     pub remote_signal: Option<String>,
     pub last_synced_ms: i64,
+}
+
+/// A saved command snippet (Plan 11 Phase 4). `body` may contain `{{variable}}`
+/// placeholders the UI resolves before inserting into a shell. Serialized to the
+/// frontend as-is; `id` is a client-minted UUID.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Snippet {
+    pub id: String,
+    pub name: String,
+    pub body: String,
+    #[serde(default)]
+    pub folder: Option<String>,
+    #[serde(default)]
+    pub use_count: i64,
+    #[serde(default)]
+    pub created_ms: i64,
+    #[serde(default)]
+    pub updated_ms: i64,
 }
 
 pub struct Db {
@@ -145,6 +188,80 @@ impl Db {
         conn.execute("DELETE FROM sync_state WHERE pair_id = ?1", [pair_id])?;
         Ok(())
     }
+
+    // ---- Command snippets (Plan 11 Phase 4) ----
+
+    /// Every snippet, most-used first (ties broken by most-recently-edited).
+    /// The palette and panel both consume this ordering directly.
+    pub fn list_snippets(&self) -> Result<Vec<Snippet>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, body, folder, use_count, created_ms, updated_ms
+               FROM snippets
+              ORDER BY use_count DESC, updated_ms DESC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Snippet {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                body: r.get(2)?,
+                folder: r.get(3)?,
+                use_count: r.get(4)?,
+                created_ms: r.get(5)?,
+                updated_ms: r.get(6)?,
+            })
+        })?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    /// Insert or update a snippet. An update preserves `use_count`/`created_ms`
+    /// (they're the snippet's history, not part of the edit) and refreshes
+    /// `updated_ms`. Returns the full, re-ordered list so callers stay in sync.
+    pub fn upsert_snippet(
+        &self,
+        id: &str,
+        name: &str,
+        body: &str,
+        folder: Option<&str>,
+    ) -> Result<Vec<Snippet>> {
+        let now = now_ms();
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO snippets (id, name, body, folder, use_count, created_ms, updated_ms)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?5)
+                 ON CONFLICT(id) DO UPDATE SET
+                     name = excluded.name,
+                     body = excluded.body,
+                     folder = excluded.folder,
+                     updated_ms = excluded.updated_ms",
+                rusqlite::params![id, name, body, folder, now],
+            )?;
+        }
+        self.list_snippets()
+    }
+
+    /// Delete one snippet; returns the surviving list.
+    pub fn delete_snippet(&self, id: &str) -> Result<Vec<Snippet>> {
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute("DELETE FROM snippets WHERE id = ?1", [id])?;
+        }
+        self.list_snippets()
+    }
+
+    /// Record one use of a snippet (its text was inserted into a shell) so it
+    /// floats up the ordering. Returns the re-ordered list.
+    pub fn touch_snippet(&self, id: &str) -> Result<Vec<Snippet>> {
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE snippets SET use_count = use_count + 1 WHERE id = ?1",
+                [id],
+            )?;
+        }
+        self.list_snippets()
+    }
 }
 
 /// Apply every migration whose index is `>= user_version`, bumping the pragma in
@@ -198,6 +315,40 @@ mod tests {
         assert_eq!(db.load_sync_state("p2").unwrap().len(), 1);
         db.clear_pair("p2").unwrap();
         assert!(db.load_sync_state("p2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn snippets_crud_and_ordering() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(db.list_snippets().unwrap().is_empty());
+
+        db.upsert_snippet("a", "List sites", "ls {{dir}}", Some("wp"))
+            .unwrap();
+        let list = db
+            .upsert_snippet("b", "Restart nginx", "sudo systemctl restart nginx", None)
+            .unwrap();
+        assert_eq!(list.len(), 2);
+
+        // Using `a` twice floats it above `b` — use_count is the primary sort key.
+        db.touch_snippet("a").unwrap();
+        let list = db.touch_snippet("a").unwrap();
+        assert_eq!(list[0].id, "a");
+        assert_eq!(list[0].use_count, 2);
+
+        // Editing preserves use_count and created_ms, refreshes body.
+        let created = list[0].created_ms;
+        let list = db
+            .upsert_snippet("a", "List a dir", "ls -la {{dir}}", Some("wp"))
+            .unwrap();
+        let a = list.iter().find(|s| s.id == "a").unwrap();
+        assert_eq!(a.use_count, 2, "edit must not reset usage");
+        assert_eq!(a.created_ms, created, "edit must not reset created_ms");
+        assert_eq!(a.body, "ls -la {{dir}}");
+        assert_eq!(a.name, "List a dir");
+
+        let list = db.delete_snippet("b").unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].id, "a");
     }
 
     #[test]

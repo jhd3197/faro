@@ -542,6 +542,55 @@ pub async fn close_terminal(
     state.ptys.close(&terminal_id).await.map_err(err)
 }
 
+// ---------- Command snippets (Plan 11 Phase 4) ----------
+//
+// The low-friction, single-session counterpart to Fleet Skills: saved command
+// lines with optional `{{variable}}` placeholders, inserted into a live shell
+// with one keystroke. Backed by the `snippets` table in `faro.db`; every
+// mutation returns the fresh, re-ordered list (most-used first) so the store
+// stays in lockstep — the same shape the saved-commands / skills IPC uses.
+
+#[tauri::command]
+pub async fn snippet_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::Snippet>, String> {
+    state.db.list_snippets().map_err(err)
+}
+
+#[tauri::command]
+pub async fn snippet_save(
+    snippet: crate::db::Snippet,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::Snippet>, String> {
+    state
+        .db
+        .upsert_snippet(
+            &snippet.id,
+            &snippet.name,
+            &snippet.body,
+            snippet.folder.as_deref().filter(|s| !s.is_empty()),
+        )
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn snippet_delete(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::Snippet>, String> {
+    state.db.delete_snippet(&id).map_err(err)
+}
+
+/// Record that a snippet's text was inserted into a shell (bumps its use count
+/// so it floats up the palette ordering). Returns the re-ordered list.
+#[tauri::command]
+pub async fn snippet_run(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::Snippet>, String> {
+    state.db.touch_snippet(&id).map_err(err)
+}
+
 // ---------- Transfers ----------
 
 #[tauri::command]
