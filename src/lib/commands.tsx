@@ -15,6 +15,10 @@ import {
   Radio,
   Wand2,
   Braces,
+  SplitSquareHorizontal,
+  SplitSquareVertical,
+  Maximize2,
+  X,
 } from "lucide-react";
 import { useConnections } from "@/stores/connectionsStore";
 import { useTransfers } from "@/stores/transfersStore";
@@ -22,6 +26,8 @@ import { useLayout } from "@/stores/layoutStore";
 import { useSettings, APP_THEMES } from "@/stores/settingsStore";
 import { useSkills } from "@/stores/skillsStore";
 import { useSnippets } from "@/stores/snippetsStore";
+import { useTerminals } from "@/stores/terminalsStore";
+import { TERMINAL_CHORDS } from "@/lib/terminalChords";
 
 export interface Command {
   id: string;
@@ -47,6 +53,7 @@ export function useCommands(): Command[] {
   const togglePanel = useTransfers((s) => s.togglePanel);
 
   const toggleTerminal = useLayout((s) => s.toggleTerminal);
+  const terminalOpen = useLayout((s) => s.terminalOpen);
   const toggleConsole = useLayout((s) => s.toggleConsole);
   const openDialog = useLayout((s) => s.openDialog);
   const setShortcutsOpen = useLayout((s) => s.setShortcutsOpen);
@@ -164,6 +171,65 @@ export function useCommands(): Command[] {
       run: () => setAppTheme(appTheme === "light" ? "dark" : "light"),
     },
   ];
+
+  // Terminal split controls — only while a terminal is on screen. They act on
+  // the active tab's active pane; the chords are swallowed by xterm (see
+  // terminalChords) so they never reach the shell.
+  const terminalActive = terminalOpen && supportsTerminal && !!activeSessionId;
+  const activeTab = () => {
+    const t = useTerminals.getState();
+    return t.tabs.find((x) => x.id === t.activeId) ?? null;
+  };
+  cmds.push(
+    {
+      id: "term-split-right",
+      title: "Terminal: Split right",
+      group: "Terminal",
+      icon: <SplitSquareHorizontal size={14} />,
+      combo: TERMINAL_CHORDS.splitRight,
+      enabled: terminalActive,
+      run: () => {
+        const tab = activeTab();
+        if (tab) useTerminals.getState().splitActivePane(tab.id, "row");
+      },
+    },
+    {
+      id: "term-split-down",
+      title: "Terminal: Split down",
+      group: "Terminal",
+      icon: <SplitSquareVertical size={14} />,
+      combo: TERMINAL_CHORDS.splitDown,
+      enabled: terminalActive,
+      run: () => {
+        const tab = activeTab();
+        if (tab) useTerminals.getState().splitActivePane(tab.id, "col");
+      },
+    },
+    {
+      id: "term-zoom-pane",
+      title: "Terminal: Zoom / unzoom pane",
+      group: "Terminal",
+      icon: <Maximize2 size={14} />,
+      combo: TERMINAL_CHORDS.zoom,
+      enabled: terminalActive,
+      run: () => {
+        const tab = activeTab();
+        if (tab) useTerminals.getState().toggleZoom(tab.id);
+      },
+    },
+    {
+      id: "term-close-pane",
+      title: "Terminal: Close pane",
+      group: "Terminal",
+      icon: <X size={14} />,
+      combo: TERMINAL_CHORDS.closePane,
+      enabled: terminalActive,
+      run: () => {
+        const tab = activeTab();
+        if (tab) useTerminals.getState().closePane(tab.id, tab.activePaneId);
+      },
+    }
+  );
 
   if (activeSessionId) {
     cmds.push({

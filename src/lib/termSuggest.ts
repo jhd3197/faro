@@ -65,9 +65,15 @@ export interface SuggestHandle {
  *  handle must be disposed before the terminal is. */
 export function attachSuggestions(
   term: XTerm,
-  opts: { historyKey: string; send: (data: string) => void }
+  opts: {
+    historyKey: string;
+    send: (data: string) => void;
+    /** App-level chord? Return true to make xterm ignore the key (so it never
+     *  reaches the shell) and let it bubble to the app shortcut handler. */
+    swallowKey?: (ev: KeyboardEvent) => boolean;
+  }
 ): SuggestHandle {
-  const { historyKey, send } = opts;
+  const { historyKey, send, swallowKey } = opts;
 
   /** Best guess of the shell's current input line (cursor assumed at end). */
   let line = "";
@@ -201,6 +207,9 @@ export function attachSuggestions(
   const writeDisposable = term.onWriteParsed(scheduleRender);
 
   term.attachCustomKeyEventHandler((ev) => {
+    // App-level chords (terminal splits/zoom/close) must not leak into the
+    // shell: tell xterm to ignore them so they bubble to the app handler.
+    if (swallowKey?.(ev)) return false;
     if (
       ev.type === "keydown" &&
       ev.key === "ArrowRight" &&
