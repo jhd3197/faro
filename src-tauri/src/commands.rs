@@ -1490,6 +1490,40 @@ pub async fn bridge_set_active_session(
     Ok(())
 }
 
+// ---------- Service credentials (Plan 12 Phase 1) ----------
+
+/// Store (or clear, if `value` is empty) a service credential in the OS
+/// keychain, keyed by `purpose`. **One-way** — there is deliberately no command
+/// that reads the value back; Rust fetches it at the point of use. Also updates
+/// the `faro.db` keychain manifest so the encrypted backup can enumerate it.
+#[tauri::command]
+pub async fn set_api_key(
+    purpose: String,
+    value: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    crate::credentials::set_secret(&purpose, &value).map_err(err)?;
+    if value.is_empty() {
+        state
+            .db
+            .forget_keychain(crate::credentials::SERVICE, &purpose)
+            .map_err(err)?;
+    } else {
+        state
+            .db
+            .record_keychain(crate::credentials::SERVICE, &purpose)
+            .map_err(err)?;
+    }
+    Ok(())
+}
+
+/// Whether a credential exists for `purpose`. The only credential state the
+/// frontend gets — enough to render a Set/••••/Clear affordance.
+#[tauri::command]
+pub async fn api_key_status(purpose: String) -> Result<bool, String> {
+    Ok(crate::credentials::has_secret(&purpose))
+}
+
 /// Send a message to the built-in Agent chat. The backend calls Anthropic's
 /// API with the Faro bridge tools and returns the assistant's final response.
 #[tauri::command]

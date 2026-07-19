@@ -329,8 +329,18 @@ export const ipc = {
     invoke<void>("bridge_set_active_session", { sessionId }),
   bridgeRegisterMcp: (url: string, token: string) =>
     invoke<string>("bridge_register_mcp", { url, token }),
+  // ---- Service credentials (Plan 12 Phase 1) ----
+  // Secrets never cross IPC as readable values: the frontend writes (one-way)
+  // and asks whether one exists, but never reads the value back. Rust fetches
+  // it from the OS keychain at the point of use.
+  /** Store (or clear, if `value` is "") a service credential by purpose. */
+  setApiKey: (purpose: string, value: string) =>
+    invoke<void>("set_api_key", { purpose, value }),
+  /** Whether a credential exists for `purpose` (for the Set/••••/Clear UI). */
+  apiKeyStatus: (purpose: string) =>
+    invoke<boolean>("api_key_status", { purpose }),
+
   agentChat: (req: {
-    apiKey: string;
     sessionId: string | null;
     prompt: string;
     history: Array<{ role: "user" | "assistant"; content: string }>;

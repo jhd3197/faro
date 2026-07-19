@@ -10,6 +10,7 @@ pub mod commands;
 pub mod agent;
 mod agent_host;
 mod cli_updater;
+pub mod credentials;
 pub mod db;
 mod deeplink;
 pub mod diff;
@@ -274,6 +275,8 @@ pub fn run() {
             commands::bridge_set_policy,
             commands::bridge_set_active_session,
             commands::bridge_register_mcp,
+            commands::set_api_key,
+            commands::api_key_status,
             commands::agent_chat_cmd,
             commands::respond_to_bridge_approval,
             commands::bridge_activity,

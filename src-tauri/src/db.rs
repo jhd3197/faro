@@ -63,6 +63,25 @@ const MIGRATIONS: &[&str] = &[
         created_ms INTEGER NOT NULL,
         updated_ms INTEGER NOT NULL
     );",
+    // v3 — keychain manifest (Plan 12 Phase 1). The OS keychain (Windows DPAPI /
+    // macOS Keychain) can't *enumerate* its entries, so Faro records every
+    // service-credential it writes here (service + account). The encrypted
+    // backup (Phase 4) reads this to know which secrets to pull. OAuth tokens
+    // are derived from profiles instead, so this table only holds the app's own
+    // service keys (the Anthropic API key today).
+    "CREATE TABLE keychain_manifest (
+        service TEXT NOT NULL,
+        account TEXT NOT NULL,
+        PRIMARY KEY (service, account)
+    ) WITHOUT ROWID;",
+    // v4 — settings (Plan 12 Phase 2). One row per key; value is JSON. The
+    // single source of truth for app preferences, replacing the webview-private
+    // localStorage blob. `updated_ms` lets a later surface reconcile writes.
+    "CREATE TABLE settings (
+        key        TEXT PRIMARY KEY,
+        value      TEXT NOT NULL,
+        updated_ms INTEGER NOT NULL
+    ) WITHOUT ROWID;",
 ];
 
 /// A persisted per-file sync record — what the source looked like the last time
@@ -262,6 +281,92 @@ impl Db {
         }
         self.list_snippets()
     }
+
+    // ---- Keychain manifest (Plan 12 Phase 1) ----
+
+    /// Remember that a `(service, account)` keychain entry exists (idempotent).
+    pub fn record_keychain(&self, service: &str, account: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO keychain_manifest (service, account) VALUES (?1, ?2)",
+            rusqlite::params![service, account],
+        )?;
+        Ok(())
+    }
+
+    /// Forget a `(service, account)` entry (its secret was cleared).
+    pub fn forget_keychain(&self, service: &str, account: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM keychain_manifest WHERE service = ?1 AND account = ?2",
+            rusqlite::params![service, account],
+        )?;
+        Ok(())
+    }
+
+    /// Every recorded `(service, account)` — the list of app service-credentials
+    /// the backup should pull from the keychain.
+    pub fn list_keychain(&self) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT service, account FROM keychain_manifest ORDER BY service, account")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    }
+
+    // ---- Settings (Plan 12 Phase 2) ----
+
+    /// Every setting as `key -> raw JSON value`. Seeds the frontend store on boot.
+    pub fn settings_get_all(&self) -> Result<HashMap<String, String>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (k, v) = row?;
+            out.insert(k, v);
+        }
+        Ok(out)
+    }
+
+    /// One setting's raw JSON value, or `None`. Used by the pre-paint injector
+    /// to read theme/accent before the window's first paint.
+    pub fn settings_get(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let v = conn
+            .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+                r.get::<_, String>(0)
+            })
+            .ok();
+        Ok(v)
+    }
+
+    /// Upsert one setting (`value` is a raw JSON string).
+    pub fn settings_set(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_ms) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_ms = excluded.updated_ms",
+            rusqlite::params![key, value, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Bulk-upsert settings in one transaction (the one-time localStorage import).
+    pub fn settings_set_many(&self, entries: &[(String, String)]) -> Result<()> {
+        let mut conn = self.conn.lock().unwrap();
+        let now = now_ms();
+        let tx = conn.transaction()?;
+        for (k, v) in entries {
+            tx.execute(
+                "INSERT INTO settings (key, value, updated_ms) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_ms = excluded.updated_ms",
+                rusqlite::params![k, v, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 /// Apply every migration whose index is `>= user_version`, bumping the pragma in
@@ -375,6 +480,59 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("db-wal"));
         let _ = std::fs::remove_file(path.with_extension("db-shm"));
+    }
+
+    #[test]
+    fn keychain_manifest_round_trips() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(db.list_keychain().unwrap().is_empty());
+
+        db.record_keychain("com.faro.credentials", "anthropic-api-key")
+            .unwrap();
+        // Idempotent: a second record of the same pair is a no-op.
+        db.record_keychain("com.faro.credentials", "anthropic-api-key")
+            .unwrap();
+        db.record_keychain("com.faro.credentials", "openai-api-key")
+            .unwrap();
+        let list = db.list_keychain().unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.contains(&(
+            "com.faro.credentials".to_string(),
+            "anthropic-api-key".to_string()
+        )));
+
+        db.forget_keychain("com.faro.credentials", "anthropic-api-key")
+            .unwrap();
+        let list = db.list_keychain().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].1, "openai-api-key");
+    }
+
+    #[test]
+    fn settings_round_trip_and_bulk_import() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(db.settings_get_all().unwrap().is_empty());
+        assert!(db.settings_get("appTheme").unwrap().is_none());
+
+        db.settings_set("appTheme", "\"dracula\"").unwrap();
+        db.settings_set("terminalFontSize", "13").unwrap();
+        assert_eq!(db.settings_get("appTheme").unwrap().as_deref(), Some("\"dracula\""));
+
+        // Upsert replaces in place.
+        db.settings_set("appTheme", "\"nord\"").unwrap();
+        assert_eq!(db.settings_get("appTheme").unwrap().as_deref(), Some("\"nord\""));
+
+        // Bulk import merges/overwrites.
+        db.settings_set_many(&[
+            ("appTheme".into(), "\"tokyo\"".into()),
+            ("accentColor".into(), "\"#ff0000\"".into()),
+        ])
+        .unwrap();
+        let all = db.settings_get_all().unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all["appTheme"], "\"tokyo\"");
+        assert_eq!(all["accentColor"], "\"#ff0000\"");
+        assert_eq!(all["terminalFontSize"], "13");
     }
 
     #[test]

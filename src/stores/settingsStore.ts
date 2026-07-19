@@ -112,10 +112,6 @@ interface SettingsState {
   // Connections
   defaultPort: number;
 
-  // Agent
-  /** Anthropic API key for the built-in Agent chat. Stored locally only. */
-  anthropicApiKey: string;
-
   setAppTheme: (t: AppTheme) => void;
   setAccentColor: (hex: string) => void;
   setOverwritePolicy: (p: OverwritePolicy) => void;
@@ -138,10 +134,32 @@ interface SettingsState {
   setTerminalCopyOnSelect: (v: boolean) => void;
   setTerminalSuggestions: (v: boolean) => void;
   setDefaultPort: (n: number) => void;
-  setAnthropicApiKey: (s: string) => void;
 }
 
 const STORAGE_KEY = "faro.settings.v1";
+
+// Legacy secret capture (Plan 12 Phase 1). The Anthropic API key used to live in
+// this same localStorage blob. Grab it *synchronously at module load* — before
+// any persist() below can strip it — so it can be migrated into the OS keychain
+// (see `runSecretMigration` in lib/secretMigration.ts). Reading it here does not
+// leave it in the store; the field is gone from SettingsState entirely.
+let legacyAnthropicKey: string | null = null;
+try {
+  const raw = localStorage.getItem(STORAGE_KEY);
+  if (raw) {
+    const k = (JSON.parse(raw)?.anthropicApiKey ?? "").trim();
+    if (k) legacyAnthropicKey = k;
+  }
+} catch {
+  // ignore
+}
+
+/** Take (and forget) any pre-keychain Anthropic key found in localStorage. */
+export function takeLegacyAnthropicKey(): string | null {
+  const k = legacyAnthropicKey;
+  legacyAnthropicKey = null;
+  return k;
+}
 
 type Persisted = Omit<
   SettingsState,
@@ -167,7 +185,6 @@ type Persisted = Omit<
   | "setTerminalCopyOnSelect"
   | "setTerminalSuggestions"
   | "setDefaultPort"
-  | "setAnthropicApiKey"
 >;
 
 const DEFAULTS: Persisted = {
@@ -194,7 +211,6 @@ const DEFAULTS: Persisted = {
   terminalCopyOnSelect: true,
   terminalSuggestions: true,
   defaultPort: 22,
-  anthropicApiKey: "",
 };
 
 const VIEW_MIGRATION_KEY = "faro.viewModeDefaultV2";
@@ -260,7 +276,6 @@ function mutate<K extends keyof Persisted>(
     terminalCopyOnSelect: s.terminalCopyOnSelect,
     terminalSuggestions: s.terminalSuggestions,
     defaultPort: s.defaultPort,
-    anthropicApiKey: s.anthropicApiKey,
   });
 }
 
@@ -301,7 +316,6 @@ export const useSettings = create<SettingsState>((set, get) => ({
   setTerminalSuggestions: (v) =>
     mutate(set, get, "terminalSuggestions", v),
   setDefaultPort: (n) => mutate(set, get, "defaultPort", n),
-  setAnthropicApiKey: (s) => mutate(set, get, "anthropicApiKey", s),
 }));
 
 export const TERMINAL_THEMES: Record<

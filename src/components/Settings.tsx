@@ -16,6 +16,7 @@ import {
   type TerminalTheme,
 } from "@/stores/settingsStore";
 import { useBridge } from "@/stores/bridgeStore";
+import { ipc } from "@/lib/ipc";
 import { open } from "@tauri-apps/plugin-dialog";
 import { cn } from "@/lib/cn";
 import { RemoteControlSettings } from "./RemoteControlSettings";
@@ -408,18 +409,11 @@ export function Settings({ onClose }: Props) {
       case "agent":
         return (
           <>
-            <Field label="Anthropic API key">
-              <input
-                type="password"
-                value={s.anthropicApiKey}
-                onChange={(e) => s.setAnthropicApiKey(e.target.value)}
-                placeholder="sk-ant-api03-..."
-                className="w-full rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-sm outline-none focus:border-accent"
-              />
-            </Field>
+            <ApiKeyField />
             <Help>
-              Used only by the built-in AI chat. Stored locally; never sent
-              to Faro's servers.
+              Used only by the built-in AI chat. Stored in your operating
+              system's keychain — never in the app's settings, never sent to
+              Faro's servers, and never read back into this window.
             </Help>
           </>
         );
@@ -574,6 +568,115 @@ function Field({
 
 function Help({ children }: { children: React.ReactNode }) {
   return <div className="mt-1 w-full text-xs text-text-dim">{children}</div>;
+}
+
+const ANTHROPIC_PURPOSE = "anthropic-api-key";
+
+// Keychain-backed API-key affordance (Plan 12 Phase 1). The value never crosses
+// IPC as a readable string: we ask whether one is set, write a new one (one-way),
+// or clear it. When one is configured we show a masked "Set" state with Replace /
+// Clear, mirroring how OS credential managers present stored secrets.
+function ApiKeyField() {
+  const [hasKey, setHasKey] = useState<boolean | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    ipc
+      .apiKeyStatus(ANTHROPIC_PURPOSE)
+      .then((v) => !cancelled && setHasKey(v))
+      .catch(() => !cancelled && setHasKey(false));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const save = async () => {
+    const v = value.trim();
+    if (!v) return;
+    setBusy(true);
+    try {
+      await ipc.setApiKey(ANTHROPIC_PURPOSE, v);
+      setHasKey(true);
+      setEditing(false);
+      setValue("");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clear = async () => {
+    setBusy(true);
+    try {
+      await ipc.setApiKey(ANTHROPIC_PURPOSE, "");
+      setHasKey(false);
+      setEditing(false);
+      setValue("");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const inputClass =
+    "w-full rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-sm outline-none focus:border-accent";
+  const btnClass =
+    "rounded-md border border-border px-2.5 py-1.5 text-sm text-text-muted transition-colors hover:bg-bg-hover hover:text-text disabled:opacity-50";
+
+  // Configured + not replacing: show the masked state with actions.
+  if (hasKey && !editing) {
+    return (
+      <Field label="Anthropic API key">
+        <div className="flex items-center gap-2">
+          <div className="flex flex-1 items-center gap-2 rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-sm text-text-muted">
+            <Check size={14} className="text-emerald-500" />
+            <span className="font-mono tracking-widest">••••••••••••</span>
+            <span className="text-xs text-text-dim">stored in keychain</span>
+          </div>
+          <button type="button" className={btnClass} onClick={() => setEditing(true)} disabled={busy}>
+            Replace
+          </button>
+          <button type="button" className={btnClass} onClick={clear} disabled={busy}>
+            Clear
+          </button>
+        </div>
+      </Field>
+    );
+  }
+
+  // Unset, still loading, or replacing: show the entry field.
+  return (
+    <Field label="Anthropic API key">
+      <div className="flex items-center gap-2">
+        <input
+          type="password"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void save();
+          }}
+          placeholder={hasKey === null ? "Loading…" : "sk-ant-api03-..."}
+          disabled={hasKey === null || busy}
+          className={inputClass}
+          autoComplete="off"
+        />
+        <button
+          type="button"
+          className={btnClass}
+          onClick={save}
+          disabled={busy || !value.trim()}
+        >
+          Save
+        </button>
+        {editing && (
+          <button type="button" className={btnClass} onClick={() => setEditing(false)} disabled={busy}>
+            Cancel
+          </button>
+        )}
+      </div>
+    </Field>
+  );
 }
 
 function ToggleField({
