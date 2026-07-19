@@ -80,6 +80,7 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
     case "settings_get_all":
       return {};
     case "settings_set":
+    case "settings_delete":
     case "settings_set_all":
     case "set_api_key":
       return null;

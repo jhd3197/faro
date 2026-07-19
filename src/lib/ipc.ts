@@ -360,6 +360,9 @@ export const ipc = {
   /** Upsert one setting (`value` is a JSON-stringified value). */
   settingsSet: (key: string, value: string) =>
     invoke<void>("settings_set", { key, value }),
+  /** Delete one setting row (reset-to-default, e.g. clearing a shortcut override). */
+  settingsDelete: (key: string) =>
+    invoke<void>("settings_delete", { key }),
   /** Bulk-upsert (the one-time localStorage import). */
   settingsSetAll: (values: Record<string, string>) =>
     invoke<void>("settings_set_all", { values }),

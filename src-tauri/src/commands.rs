@@ -1553,6 +1553,15 @@ pub async fn settings_set(
     state.db.settings_set(&key, &value).map_err(err)
 }
 
+/// Delete one setting row (reset-to-default for shortcut overrides & friends).
+#[tauri::command]
+pub async fn settings_delete(
+    key: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.db.settings_delete(&key).map_err(err)
+}
+
 /// Bulk-upsert settings in one transaction — the one-time localStorage import.
 #[tauri::command]
 pub async fn settings_set_all(

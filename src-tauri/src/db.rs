@@ -366,6 +366,15 @@ impl Db {
         Ok(())
     }
 
+    /// Delete one setting row. Used by "reset to default" flows (e.g. clearing a
+    /// keyboard-shortcut override so the built-in binding applies again). Removing
+    /// the row is what makes "default" distinct from an explicit stored value.
+    pub fn settings_delete(&self, key: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+        Ok(())
+    }
+
     /// Write a consistent, fully-checkpointed snapshot of the database to
     /// `dest` (Plan 12 Phase 4 backup). `VACUUM INTO` folds any WAL into the
     /// copy, so the snapshot reflects all committed data even while the live DB

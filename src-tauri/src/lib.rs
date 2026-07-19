@@ -399,6 +399,7 @@ pub fn run() {
             commands::api_key_status,
             commands::settings_get_all,
             commands::settings_set,
+            commands::settings_delete,
             commands::settings_set_all,
             commands::backup_export,
             commands::backup_inspect,
