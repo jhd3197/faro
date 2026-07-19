@@ -19,12 +19,9 @@ import {
   type SshKeyType,
 } from "@/lib/types";
 import {
-  ShieldCheck,
   ShieldOff,
-  Terminal as TerminalIcon,
   Cloud,
   Globe,
-  Download,
   Box,
   Eye,
   EyeOff,
@@ -42,6 +39,7 @@ import {
 } from "lucide-react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { cn } from "@/lib/cn";
+import { BrandIcon, protocolIcon } from "@/lib/brandIcons";
 import { generatePassword } from "@/lib/password";
 import { ipc } from "@/lib/ipc";
 import { toast } from "@/stores/toastStore";
@@ -95,6 +93,29 @@ const PROTOCOL_GROUPS: { label: string; items: Protocol[] }[] = [
   { label: "Cloud drives", items: ["dropbox", "onedrive", "gdrive", "box"] },
   { label: "Machine", items: ["faro-agent"] },
 ];
+
+// Real vendor marks for the provider preset buttons (Plan 14 Phase 3). A
+// provider with no bundled logo (Storj, the "generic"/self-hosted presets)
+// falls back to the neutral lucide glyph in the button.
+const S3_PROVIDER_ICON: Partial<Record<S3Provider, string>> = {
+  aws: "logos:aws-s3",
+  r2: "logos:cloudflare",
+  b2: "simple-icons:backblaze",
+  wasabi: "simple-icons:wasabi",
+  spaces: "logos:digital-ocean",
+  minio: "simple-icons:minio",
+  hetzner: "simple-icons:hetzner",
+  scaleway: "simple-icons:scaleway",
+  oci: "logos:oracle",
+  ibm: "logos:ibm",
+  supabase: "logos:supabase-icon",
+};
+
+const WEBDAV_PROVIDER_ICON: Partial<Record<WebdavProvider, string>> = {
+  nextcloud: "simple-icons:nextcloud",
+  owncloud: "simple-icons:owncloud",
+  storagebox: "simple-icons:hetzner",
+};
 
 export function ProfileEditor({ profile, prefill, onClose }: Props) {
   const saveProfile = useConnections((s) => s.saveProfile);
@@ -354,6 +375,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
                     key={p}
                     active={protocol === p}
                     onClick={() => onProtocolChange(p)}
+                    protocol={p}
                     label={PROTOCOL_LABEL[p]}
                   />
                 ))}
@@ -1508,7 +1530,18 @@ function WebdavSection({
                 }
               >
                 <span className="flex items-center gap-1 text-[11px] font-semibold">
-                  <Globe size={11} className={provider === p ? "text-accent" : ""} />
+                  <span
+                    className={cn(
+                      "flex h-3.5 w-3.5 shrink-0 items-center justify-center",
+                      provider === p ? "text-accent" : "text-text-dim"
+                    )}
+                  >
+                    {WEBDAV_PROVIDER_ICON[p] ? (
+                      <BrandIcon icon={WEBDAV_PROVIDER_ICON[p]!} size={13} />
+                    ) : (
+                      <Globe size={11} />
+                    )}
+                  </span>
                   {data.label}
                 </span>
                 <span className="text-[10px] text-text-dim">{data.vendor}</span>
@@ -1698,7 +1731,18 @@ function S3Section({
                 }
               >
                 <span className="flex items-center gap-1 text-[11px] font-semibold">
-                  <Cloud size={11} className={provider === p ? "text-accent" : ""} />
+                  <span
+                    className={cn(
+                      "flex h-3.5 w-3.5 shrink-0 items-center justify-center",
+                      provider === p ? "text-accent" : "text-text-dim"
+                    )}
+                  >
+                    {S3_PROVIDER_ICON[p] ? (
+                      <BrandIcon icon={S3_PROVIDER_ICON[p]!} size={13} />
+                    ) : (
+                      <Cloud size={11} />
+                    )}
+                  </span>
                   {data.label}
                 </span>
                 <span className="text-[10px] text-text-dim">{data.vendor}</span>
@@ -1791,13 +1835,14 @@ function protocolHint(p: Protocol): string {
 function ProtocolButton({
   active,
   onClick,
+  protocol,
   label,
 }: {
   active: boolean;
   onClick: () => void;
+  protocol: Protocol;
   label: string;
 }) {
-  const Icon = protocolIcon(label);
   return (
     <button
       type="button"
@@ -1810,24 +1855,21 @@ function ProtocolButton({
           : "text-text-muted hover:bg-bg-hover hover:text-text")
       }
     >
-      <Icon size={14} className={active ? "text-accent" : "text-text-dim"} />
+      {/* Real brand/protocol logo. Colour marks (S3/Azure/Dropbox…) keep their
+          own palette; monochrome glyphs (SSH/FTP/HTTP/lighthouse) follow the
+          button's text colour via currentColor. Fixed 16px slot keeps labels
+          aligned regardless of each mark's aspect ratio. */}
+      <span
+        className={cn(
+          "flex h-4 w-4 shrink-0 items-center justify-center",
+          active ? "text-accent" : "text-text-dim"
+        )}
+      >
+        <BrandIcon icon={protocolIcon(protocol)} size={15} />
+      </span>
       <span className="truncate">{label}</span>
     </button>
   );
-}
-
-function protocolIcon(label: string) {
-  if (label === "FTPS") return ShieldCheck;
-  if (label === "FTP") return ShieldOff;
-  if (label === "S3" || label === "Azure" || label === "GCS") return Cloud;
-  if (label === "WebDAV") return Globe;
-  if (label === "HTTP") return Download;
-  if (label === "Dropbox") return Box;
-  if (label === "OneDrive") return Cloud;
-  if (label === "Google Drive") return Cloud;
-  if (label === "Box") return Box;
-  if (label === "Faro Agent") return MonitorSmartphone;
-  return TerminalIcon;
 }
 
 function Hint({

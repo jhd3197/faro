@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { ipc, onDiskScanEvent } from "@/lib/ipc";
 import { toast } from "./toastStore";
+import { toastError } from "@/lib/errors";
 import type {
   DuNode,
   ScanSnapshot,
@@ -225,7 +226,9 @@ export const useDiskScan = create<DiskScanStoreState>((set, get) => ({
     try {
       await ipc.deletePath(sessionId, node.path, node.kind === "directory");
     } catch (e) {
-      toast.error("Delete failed", String(e));
+      // `deletePath` rejects with a structured {kind, message} error (Plan 12
+      // Phase 3) — toast keyed off the kind.
+      toastError(e, "Delete failed");
       return;
     }
     set({ tree: pruneNode(tree, node.path) });

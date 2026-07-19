@@ -11,6 +11,7 @@ import type {
   SortField,
 } from "./types";
 import { fileIcon, type FileIconSpec } from "./lib/fileIcons";
+import type { FileBrowserAction } from "./lib/keys";
 
 // ---------------------------------------------------------------------------
 // The transport contract. This is the whole point of the package: the UI never
@@ -38,8 +39,18 @@ export interface FileSystemAdapter {
    * isn't available (too large, remote backend without read, not an image…).
    * The package handles laziness, downscaling, and object-URL cleanup — the
    * adapter only has to hand back bytes. Omit it entirely to keep icons only.
+   *
+   * `signal` aborts when the row scrolls back out of view before the fetch
+   * finishes — a remote adapter should check it before dispatching a request (so
+   * a queued-but-not-yet-sent fetch is cancelled) and reject/return null once
+   * aborted, keeping a fast scroll from spending network on rows nobody's looking
+   * at.
    */
-  thumbnail?(sessionId: SessionId, entry: DirEntry): Promise<Blob | null>;
+  thumbnail?(
+    sessionId: SessionId,
+    entry: DirEntry,
+    signal?: AbortSignal
+  ): Promise<Blob | null>;
   /**
    * Optional: make a copy of a file/folder alongside the original (the host
    * picks a non-colliding name like "foo copy"). Omit it and the pane doesn't
@@ -95,10 +106,25 @@ export interface PaneSettings {
   paneDensity: PaneDensity;
   /** Display name for the external-editor action, e.g. "VS Code". */
   editorLabel?: string;
+  /**
+   * Whether remote image previews are on. Local previews are always on; this
+   * gates the network-fetching kind. When a `setRemoteImagePreviews` is supplied,
+   * the pane shows a toolbar toggle for remote sessions.
+   */
+  remoteImagePreviews?: boolean;
+  /**
+   * Optional per-action combo overrides for the in-pane keyboard shortcuts
+   * (rename/open/delete/parent/select-all/quick-info/new-folder/refresh). A
+   * missing action falls back to `DEFAULT_FILE_BROWSER_KEYBINDINGS`. Combos use
+   * the same "mod+shift+key" spelling as `comboFromEvent`.
+   */
+  keyBindings?: Partial<Record<FileBrowserAction, string>>;
   setSortField(field: SortField): void;
   setSortDirection(dir: SortDirection): void;
   setPaneViewMode(mode: PaneViewMode): void;
   setPaneDensity(density: PaneDensity): void;
+  /** Optional: flip remote image previews from the pane toolbar. */
+  setRemoteImagePreviews?(on: boolean): void;
 }
 
 export interface FileUiValue {

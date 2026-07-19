@@ -2,7 +2,9 @@ import {
   LOCAL_SESSION,
   isImage,
   imageMime,
+  type DirEntry,
   type FileSystemAdapter,
+  type SessionId,
 } from "@faro/file-ui";
 import { ipc } from "./ipc";
 import { useEditor } from "@/stores/editorStore";
@@ -11,10 +13,109 @@ import { useLayout } from "@/stores/layoutStore";
 import { useDiskScan } from "@/stores/diskScanStore";
 import { useDiff } from "@/stores/diffStore";
 import { useSearch } from "@/stores/searchStore";
+import { useSettings } from "@/stores/settingsStore";
 
 // POSIX single-quote a path so a `cd` survives spaces / shell metacharacters.
 function shQuote(p: string): string {
   return `'${p.replace(/'/g, `'\\''`)}'`;
+}
+
+// ---- Remote image previews (Plan 13 Phase 1) ----------------------------------
+// Raster formats the Rust `image` decoder handles without system libs. SVG/AVIF
+// are intentionally excluded from *remote* previews (SVG stays a local-only
+// passthrough); a non-match falls back to the type icon.
+const REMOTE_PREVIEW_EXTS = new Set([
+  "png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "tif", "tiff",
+]);
+// Mirror of the backend's file-size guard — skip before dispatching a request.
+const MAX_REMOTE_PREVIEW_BYTES = 25 * 1024 * 1024;
+// Concurrent remote preview fetches per connection. The Thumbnail's viewport
+// observer already bounds requests to on-screen rows; this queue keeps a whole
+// screenful scrolling in at once from firing dozens of IPC calls simultaneously,
+// and — crucially — lets a row that scrolls back out cancel *before* dispatch.
+const PER_SESSION_LIMIT = 4;
+
+interface Gate {
+  active: number;
+  queue: Array<() => void>;
+}
+const previewGates = new Map<SessionId, Gate>();
+
+/** Acquire a per-session slot, resolving to a release fn. Rejects if `signal`
+ *  aborts while still queued — so the request is never dispatched. */
+function acquirePreviewSlot(
+  sessionId: SessionId,
+  signal?: AbortSignal
+): Promise<() => void> {
+  let gate = previewGates.get(sessionId);
+  if (!gate) {
+    gate = { active: 0, queue: [] };
+    previewGates.set(sessionId, gate);
+  }
+  const g = gate;
+  return new Promise((resolve, reject) => {
+    const start = () => {
+      g.active++;
+      let released = false;
+      resolve(() => {
+        if (released) return;
+        released = true;
+        g.active--;
+        g.queue.shift()?.();
+      });
+    };
+    if (signal?.aborted) {
+      reject(new DOMException("aborted", "AbortError"));
+      return;
+    }
+    if (g.active < PER_SESSION_LIMIT) {
+      start();
+      return;
+    }
+    const runQueued = () => {
+      signal?.removeEventListener("abort", onAbort);
+      start();
+    };
+    const onAbort = () => {
+      const i = g.queue.indexOf(runQueued);
+      if (i >= 0) g.queue.splice(i, 1);
+      reject(new DOMException("aborted", "AbortError"));
+    };
+    g.queue.push(runQueued);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/** Fetch a remote thumbnail through the backend cache/decode pipeline, gated by
+ *  the setting, the extension/size guards, the viewport signal, and the
+ *  per-connection concurrency limiter. Any miss → null → the pane shows an icon. */
+async function remoteThumbnail(
+  sessionId: SessionId,
+  entry: DirEntry,
+  signal?: AbortSignal
+): Promise<Blob | null> {
+  if (useSettings.getState().remoteImagePreviews !== "on") return null;
+  const ext = entry.name.split(".").pop()?.toLowerCase() ?? "";
+  if (!REMOTE_PREVIEW_EXTS.has(ext)) return null;
+  if (entry.size > MAX_REMOTE_PREVIEW_BYTES) return null;
+  if (signal?.aborted) return null;
+
+  let release: (() => void) | null = null;
+  try {
+    release = await acquirePreviewSlot(sessionId, signal);
+    if (signal?.aborted) return null;
+    // Change token → cache key: prefer the backend's ETag, else size+mtime.
+    const sig = entry.etag ?? `${entry.size}:${entry.modified ?? 0}`;
+    const b64 = await ipc.previewThumbnail(sessionId, entry.path, entry.size, sig);
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    return new Blob([bytes], {
+      type: imageMime(entry.name) ?? "application/octet-stream",
+    });
+  } catch {
+    return null;
+  } finally {
+    release?.();
+  }
 }
 
 // The concrete @faro/file-ui adapter for Faro: it maps the package's
@@ -70,19 +171,23 @@ export const tauriFileSystem: FileSystemAdapter = {
     useSearch.getState().openFor(sessionId, path);
   },
 
-  // Image previews for the grid view. Local files only for now — the backend
-  // `read_file_preview` command reads bytes off the local disk and we wrap them
-  // in a Blob for the package to downscale. Remote sessions return null, so the
-  // pane falls back to the type icon. Any failure → null → icon.
-  thumbnail: async (sessionId, entry) => {
-    if (sessionId !== LOCAL_SESSION || !isImage(entry)) return null;
-    try {
-      const b64 = await ipc.readFilePreview(sessionId, entry.path);
-      const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-      const type = imageMime(entry.name) ?? "application/octet-stream";
-      return new Blob([bytes], { type });
-    } catch {
-      return null;
+  // Image previews for the grid/list views. Local files read straight off disk
+  // (`read_file_preview`, always on). Remote files go through the budgeted,
+  // cached `preview_thumbnail` pipeline — opt-in via the `remoteImagePreviews`
+  // setting, viewport- and concurrency-gated so scrolling never fires unbounded
+  // requests (Plan 13 Phase 1). Any failure → null → the pane shows the icon.
+  thumbnail: async (sessionId, entry, signal) => {
+    if (!isImage(entry)) return null;
+    if (sessionId === LOCAL_SESSION) {
+      try {
+        const b64 = await ipc.readFilePreview(sessionId, entry.path);
+        const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+        const type = imageMime(entry.name) ?? "application/octet-stream";
+        return new Blob([bytes], { type });
+      } catch {
+        return null;
+      }
     }
+    return remoteThumbnail(sessionId, entry, signal);
   },
 };

@@ -220,6 +220,37 @@ enum Cmd {
         #[arg(long)]
         profile: Option<String>,
     },
+
+    /// Export or restore an encrypted backup of profiles, secrets, and state.
+    ///
+    /// The backup is a single password-protected file (Argon2id + AES-256-GCM)
+    /// carrying every connection profile, its keychain credentials, app settings,
+    /// and sync pairs — enough to move Faro to a new machine. Provide the password
+    /// with --password or the FARO_BACKUP_PASSWORD environment variable.
+    Backup {
+        #[command(subcommand)]
+        action: BackupCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum BackupCmd {
+    /// Write an encrypted backup to a file.
+    Export {
+        /// Destination path (e.g. faro-backup.farobak).
+        path: String,
+        /// Encryption password. Falls back to $FARO_BACKUP_PASSWORD.
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// Restore an encrypted backup, overwriting local profiles/settings/secrets.
+    Import {
+        /// Backup file to restore.
+        path: String,
+        /// Decryption password. Falls back to $FARO_BACKUP_PASSWORD.
+        #[arg(long)]
+        password: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -568,14 +599,69 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::SelfUpdate { tag, check } => cmd_self_update(tag, check),
         // Authenticated GET through a saved HTTP profile's creds.
         Cmd::Fetch { url, profile } => cmd_fetch(&store, &url, profile).await,
+        // Encrypted backup / restore — sync, no bridge or session needed.
+        Cmd::Backup { action } => cmd_backup(action),
+    }
+}
+
+// ---- Backup / restore --------------------------------------------------
+
+fn resolve_backup_password(flag: Option<String>) -> Result<String> {
+    if let Some(p) = flag {
+        if !p.is_empty() {
+            return Ok(p);
+        }
+    }
+    if let Ok(p) = std::env::var("FARO_BACKUP_PASSWORD") {
+        if !p.is_empty() {
+            return Ok(p);
+        }
+    }
+    anyhow::bail!("provide a password with --password or the FARO_BACKUP_PASSWORD env var")
+}
+
+fn cmd_backup(action: BackupCmd) -> Result<()> {
+    let dir = default_data_dir()?;
+    match action {
+        BackupCmd::Export { path, password } => {
+            let pw = resolve_backup_password(password)?;
+            let db = faro_lib::db::Db::open(&dir.join("faro.db"))?;
+            let s = faro_lib::backup::export(&dir, &db, &pw, std::path::Path::new(&path))?;
+            println!(
+                "Exported {} profile(s), {} credential(s), and {} KiB of app state to {path}",
+                s.profiles,
+                s.credentials,
+                s.db_bytes / 1024
+            );
+            Ok(())
+        }
+        BackupCmd::Import { path, password } => {
+            let pw = resolve_backup_password(password)?;
+            // defer = false: no running GUI to coordinate with, apply now. (If the
+            // GUI happens to hold faro.db open, the DB swap is staged and applies
+            // on its next launch.)
+            let s = faro_lib::backup::import(&dir, &pw, std::path::Path::new(&path), false)?;
+            println!(
+                "Restored {} profile(s) and {} credential(s). Restart Faro if it's running.",
+                s.profiles, s.credentials
+            );
+            Ok(())
+        }
     }
 }
 
 // ---- Profile store -----------------------------------------------------
 
 /// Resolve the same on-disk path the Tauri GUI uses for its data dir, so a
-/// CLI invocation sees the profiles the user set up in the app.
+/// CLI invocation sees the profiles the user set up in the app. `FARO_DATA_DIR`
+/// overrides it — handy for scripted migrations and for pointing the CLI at a
+/// non-default data dir.
 fn default_data_dir() -> Result<PathBuf> {
+    if let Ok(dir) = std::env::var("FARO_DATA_DIR") {
+        if !dir.is_empty() {
+            return Ok(PathBuf::from(dir));
+        }
+    }
     let base = dirs::data_dir().ok_or_else(|| anyhow!("could not resolve a data dir"))?;
     Ok(base.join("com.juandenis.faro"))
 }

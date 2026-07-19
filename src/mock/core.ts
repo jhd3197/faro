@@ -6,7 +6,57 @@ import { emit } from "./event";
 
 type Args = Record<string, any>;
 
-const emittedTerminals = new Set<string>();
+// Each open_terminal call gets a distinct id so split panes each render their
+// own transcript (Plan 11). The registry opens one PTY per pane.
+let terminalCounter = 0;
+
+// A tiny in-memory snippets store so the demo's Snippets panel / palette work
+// (save/delete round-trip) without the Rust backend (Plan 11 Phase 4).
+let snippets: any[] = [
+  {
+    id: "sn-tail",
+    name: "Tail nginx errors",
+    body: "sudo tail -n 100 -f /var/log/nginx/error.log",
+    folder: "nginx",
+    useCount: 6,
+    createdMs: 0,
+    updatedMs: 0,
+  },
+  {
+    id: "sn-wp",
+    name: "WP core update",
+    body: "wp core update --path=/var/www/{{site}}",
+    folder: "wordpress",
+    useCount: 3,
+    createdMs: 0,
+    updatedMs: 0,
+  },
+  {
+    id: "sn-restart",
+    name: "Restart service",
+    body: "sudo systemctl restart {{service}}",
+    folder: null,
+    useCount: 1,
+    createdMs: 0,
+    updatedMs: 0,
+  },
+];
+
+// Mock PATH-integration state (Plan 16 Phase 4). `managed` flips on add/remove so
+// the About tab's Add ⇄ Remove flow round-trips without the Rust backend.
+let pathManaged = false;
+function pathStatus() {
+  return {
+    binDir: "C:\\Users\\demo\\AppData\\Roaming\\com.juandenis.faro\\bin",
+    binHasCli: true,
+    onPath: pathManaged,
+    cliLocation: pathManaged
+      ? "C:\\Users\\demo\\AppData\\Roaming\\com.juandenis.faro\\bin\\faro-cli.exe"
+      : null,
+    managed: pathManaged,
+    detail: null as string | null,
+  };
+}
 
 export async function invoke<T = unknown>(cmd: string, args: Args = {}): Promise<T> {
   const out = await dispatch(cmd, args);
@@ -42,8 +92,28 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       return null;
     }
 
+    // ---- settings + credentials (Plan 12) ----
+    case "settings_get_all":
+      return {};
+    case "settings_set":
+    case "settings_delete":
+    case "settings_set_all":
+    case "set_api_key":
+      return null;
+    case "api_key_status":
+      return false;
+
     // ---- sessions ----
     case "connect":
+      // Test hooks (Plan 12 Phase 3): sentinel ids reject like a migrated
+      // command — a structured {kind, message} error, exactly as Tauri delivers
+      // one. Drives scripts/verify-errors.mjs.
+      if (a.profileId === "__auth_fail__")
+        throw { kind: "auth", message: "Authentication failed for user demo" };
+      if (a.profileId === "__net_fail__")
+        throw { kind: "network", message: "Connection refused (os error 111)" };
+      if (a.profileId === "__str_fail__")
+        throw "legacy string error: something broke"; // un-migrated command shape
       return data.openSession(a.profileId);
     case "disconnect":
       data.closeSession(a.sessionId);
@@ -56,6 +126,10 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       return data.capabilities(a.sessionId);
     case "read_file_preview":
       throw new Error("no preview in demo mode");
+    case "preview_thumbnail":
+      // A valid 8×8 RGBA PNG so the mock harness can exercise the remote-preview
+      // UI (toggle → thumbnail render → downscale) without a real backend.
+      return "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAYAAADED76LAAAANElEQVR42n3EQQEAEAAEwY0jhBDe3kIIIYQQQmjFJdjHDKXfZ6jJ0JJhJMNMhpUMOxlOMh/OWKPBK+ZUdQAAAABJRU5ErkJggg==";
     case "rename_path":
     case "delete_path":
     case "create_directory":
@@ -67,19 +141,37 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
 
     // ---- terminal ----
     case "open_terminal": {
-      const id = "term-1";
-      // Push the canned transcript once the xterm is listening. Guard against
-      // StrictMode's double-mount so the transcript isn't emitted twice.
-      if (!emittedTerminals.has(id)) {
-        emittedTerminals.add(id);
-        setTimeout(() => emit("terminal://data", { terminalId: id, data: data.TERMINAL_TRANSCRIPT }), 120);
-      }
+      const id = `term-${++terminalCounter}`;
+      // Push the canned transcript once the xterm is listening.
+      setTimeout(
+        () => emit("terminal://data", { terminalId: id, data: data.TERMINAL_TRANSCRIPT }),
+        120
+      );
       return id;
     }
     case "terminal_write":
     case "terminal_resize":
     case "close_terminal":
       return null;
+
+    // ---- snippets (Plan 11 Phase 4) ----
+    case "snippet_list":
+      return snippets;
+    case "snippet_save": {
+      const s = a.snippet;
+      const i = snippets.findIndex((x) => x.id === s.id);
+      snippets = i >= 0 ? snippets.map((x) => (x.id === s.id ? s : x)) : [...snippets, s];
+      return snippets;
+    }
+    case "snippet_delete":
+      snippets = snippets.filter((x) => x.id !== a.id);
+      return snippets;
+    case "snippet_run": {
+      snippets = snippets.map((x) =>
+        x.id === a.id ? { ...x, useCount: x.useCount + 1 } : x
+      );
+      return snippets;
+    }
 
     // ---- transfers ----
     case "list_transfers":
@@ -167,6 +259,20 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       return { content: "The API service is healthy — 37 days uptime, load 0.08." };
     case "export_agent_log":
       return "C:\\Users\\demo\\Downloads\\faro-agent-console.txt";
+
+    // ---- folder sync (no pairs in the demo) ----
+    case "foldersync_list":
+      return [];
+
+    // ---- one-click PATH install (Plan 16 Phase 4) ----
+    case "path_status":
+      return pathStatus();
+    case "path_add":
+      pathManaged = true;
+      return { ...pathStatus(), detail: "Added to your account's PATH." };
+    case "path_remove":
+      pathManaged = false;
+      return { ...pathStatus(), detail: "Removed from your account's PATH." };
 
     default:
       return null;

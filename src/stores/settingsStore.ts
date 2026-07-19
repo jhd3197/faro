@@ -1,10 +1,14 @@
 import { create } from "zustand";
+import { ipc } from "@/lib/ipc";
 
 export type OverwritePolicy = "overwrite" | "skip" | "rename";
 export type SortField = "name" | "size" | "modified";
 export type SortDirection = "asc" | "desc";
 export type PaneViewMode = "list" | "details" | "grid";
 export type PaneDensity = "comfortable" | "compact";
+// Remote image previews are opt-in (default off) because a preview means a
+// download; local previews are always on and unaffected by this. See Plan 13.
+export type RemoteImagePreviews = "off" | "on";
 // "single" = one server-focused pane (default); "dual" = local + remote panes.
 export type BrowserLayout = "single" | "dual";
 export type AppTheme =
@@ -67,6 +71,14 @@ export type TerminalTheme =
   | "rosepine"
   | "everforest";
 
+/** Desktop-notification preference (Plan 16 Phase 3). OS toasts for a curated
+ *  set of events, off-window by default so they don't duplicate in-app toasts. */
+export interface NotificationSettings {
+  enabled: boolean;
+  /** Only notify when Faro isn't the focused window (the default). */
+  unfocusedOnly: boolean;
+}
+
 interface SettingsState {
   // Appearance
   appTheme: AppTheme;
@@ -91,6 +103,9 @@ interface SettingsState {
   paneViewMode: PaneViewMode;
   paneDensity: PaneDensity;
   browserLayout: BrowserLayout;
+  /** Remote image previews: `"off"` (default) or `"on"`. Local previews are
+   *  always on; this only gates the network-fetching remote kind (Plan 13). */
+  remoteImagePreviews: RemoteImagePreviews;
   /** Expand the connection rail into a labeled list (names + addresses) instead
    *  of the compact Discord-style bubble strip. */
   railExpanded: boolean;
@@ -112,9 +127,8 @@ interface SettingsState {
   // Connections
   defaultPort: number;
 
-  // Agent
-  /** Anthropic API key for the built-in Agent chat. Stored locally only. */
-  anthropicApiKey: string;
+  // Notifications (Plan 16 Phase 3)
+  notifications: NotificationSettings;
 
   setAppTheme: (t: AppTheme) => void;
   setAccentColor: (hex: string) => void;
@@ -129,6 +143,7 @@ interface SettingsState {
   setPaneViewMode: (m: PaneViewMode) => void;
   setPaneDensity: (d: PaneDensity) => void;
   setBrowserLayout: (l: BrowserLayout) => void;
+  setRemoteImagePreviews: (v: RemoteImagePreviews) => void;
   setRailExpanded: (v: boolean) => void;
   toggleRailGroup: (name: string) => void;
   setTerminalFontSize: (n: number) => void;
@@ -138,10 +153,33 @@ interface SettingsState {
   setTerminalCopyOnSelect: (v: boolean) => void;
   setTerminalSuggestions: (v: boolean) => void;
   setDefaultPort: (n: number) => void;
-  setAnthropicApiKey: (s: string) => void;
+  setNotifications: (v: NotificationSettings) => void;
 }
 
 const STORAGE_KEY = "faro.settings.v1";
+
+// Legacy secret capture (Plan 12 Phase 1). The Anthropic API key used to live in
+// this same localStorage blob. Grab it *synchronously at module load* — before
+// any persist() below can strip it — so it can be migrated into the OS keychain
+// (see `runSecretMigration` in lib/secretMigration.ts). Reading it here does not
+// leave it in the store; the field is gone from SettingsState entirely.
+let legacyAnthropicKey: string | null = null;
+try {
+  const raw = localStorage.getItem(STORAGE_KEY);
+  if (raw) {
+    const k = (JSON.parse(raw)?.anthropicApiKey ?? "").trim();
+    if (k) legacyAnthropicKey = k;
+  }
+} catch {
+  // ignore
+}
+
+/** Take (and forget) any pre-keychain Anthropic key found in localStorage. */
+export function takeLegacyAnthropicKey(): string | null {
+  const k = legacyAnthropicKey;
+  legacyAnthropicKey = null;
+  return k;
+}
 
 type Persisted = Omit<
   SettingsState,
@@ -158,6 +196,7 @@ type Persisted = Omit<
   | "setPaneViewMode"
   | "setPaneDensity"
   | "setBrowserLayout"
+  | "setRemoteImagePreviews"
   | "setRailExpanded"
   | "toggleRailGroup"
   | "setTerminalFontSize"
@@ -167,7 +206,7 @@ type Persisted = Omit<
   | "setTerminalCopyOnSelect"
   | "setTerminalSuggestions"
   | "setDefaultPort"
-  | "setAnthropicApiKey"
+  | "setNotifications"
 >;
 
 const DEFAULTS: Persisted = {
@@ -184,6 +223,7 @@ const DEFAULTS: Persisted = {
   paneViewMode: "grid",
   paneDensity: "comfortable",
   browserLayout: "single",
+  remoteImagePreviews: "off",
   railExpanded: false,
   railCollapsedGroups: [],
   terminalFontSize: 13,
@@ -194,74 +234,63 @@ const DEFAULTS: Persisted = {
   terminalCopyOnSelect: true,
   terminalSuggestions: true,
   defaultPort: 22,
-  anthropicApiKey: "",
+  notifications: { enabled: true, unfocusedOnly: true },
 };
 
-const VIEW_MIGRATION_KEY = "faro.viewModeDefaultV2";
+// The persisted setting keys, in one place — also the authoritative allow-list
+// the localStorage→faro.db migration filters against.
+export const SETTINGS_KEYS = Object.keys(DEFAULTS) as (keyof Persisted)[];
 
-function load(): Persisted {
+/** Read the pre-paint snapshot Rust injected on `window.__FARO_SETTINGS__`
+ *  (Plan 12 Phase 2) — present in the main window, absent in JS-spawned
+ *  popouts and mock builds. */
+function readInjected(): Partial<Persisted> | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return DEFAULTS;
-    const parsed = JSON.parse(raw) as Partial<Persisted>;
-    const merged = { ...DEFAULTS, ...parsed };
-    // One-time migration: the default file view moved from "details" to "grid".
-    // Flip existing installs that were still on the old default once, then
-    // respect whatever the user picks afterward.
-    if (localStorage.getItem(VIEW_MIGRATION_KEY) !== "done") {
-      if (merged.paneViewMode === "details") merged.paneViewMode = "grid";
-      localStorage.setItem(VIEW_MIGRATION_KEY, "done");
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
-    }
-    return merged;
-  } catch {
-    return DEFAULTS;
-  }
-}
-
-function persist(s: Persisted) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+    const inj = (globalThis as { __FARO_SETTINGS__?: unknown }).__FARO_SETTINGS__;
+    if (inj && typeof inj === "object") return inj as Partial<Persisted>;
   } catch {
     // ignore
   }
+  return null;
+}
+
+/** Keep only recognised setting keys from an arbitrary object. */
+function pickKnown(obj: Partial<Persisted>): Partial<Persisted> {
+  const out: Partial<Persisted> = {};
+  for (const k of SETTINGS_KEYS) {
+    const v = (obj as Record<string, unknown>)[k];
+    if (v !== undefined) (out as Record<string, unknown>)[k] = v;
+  }
+  return out;
+}
+
+function load(): Persisted {
+  const injected = readInjected();
+  if (injected) return { ...DEFAULTS, ...pickKnown(injected) };
+  // No injection (popout / mock / first paint before the script ran) — start
+  // from defaults; `hydrateFromDb()` below reconciles from faro.db async.
+  return DEFAULTS;
+}
+
+/** Persist one setting to faro.db — the single source of truth (Plan 12 Phase
+ *  2). Fire-and-forget: a missing backend (mock) just skips the write, the
+ *  in-memory value still applies for the session. */
+function persistKey<K extends keyof Persisted>(key: K, value: Persisted[K]) {
+  ipc.settingsSet(String(key), JSON.stringify(value)).catch(() => {
+    // no backend — ignore
+  });
 }
 
 const initial = load();
 
 function mutate<K extends keyof Persisted>(
   set: (fn: (s: SettingsState) => Partial<SettingsState>) => void,
-  get: () => SettingsState,
+  _get: () => SettingsState,
   key: K,
   value: Persisted[K]
 ) {
   set(() => ({ [key]: value }) as Partial<SettingsState>);
-  const s = get();
-  persist({
-    appTheme: s.appTheme,
-    accentColor: s.accentColor,
-    overwritePolicy: s.overwritePolicy,
-    promptOnOverwrite: s.promptOnOverwrite,
-    autoOpenTransferPanel: s.autoOpenTransferPanel,
-    defaultDownloadFolder: s.defaultDownloadFolder,
-    defaultEditor: s.defaultEditor,
-    showHiddenFiles: s.showHiddenFiles,
-    sortField: s.sortField,
-    sortDirection: s.sortDirection,
-    paneViewMode: s.paneViewMode,
-    paneDensity: s.paneDensity,
-    browserLayout: s.browserLayout,
-    railExpanded: s.railExpanded,
-    railCollapsedGroups: s.railCollapsedGroups,
-    terminalFontSize: s.terminalFontSize,
-    terminalFontFamily: s.terminalFontFamily,
-    terminalTheme: s.terminalTheme,
-    terminalScrollback: s.terminalScrollback,
-    terminalCopyOnSelect: s.terminalCopyOnSelect,
-    terminalSuggestions: s.terminalSuggestions,
-    defaultPort: s.defaultPort,
-    anthropicApiKey: s.anthropicApiKey,
-  });
+  persistKey(key, value);
 }
 
 export const useSettings = create<SettingsState>((set, get) => ({
@@ -282,6 +311,7 @@ export const useSettings = create<SettingsState>((set, get) => ({
   setPaneViewMode: (m) => mutate(set, get, "paneViewMode", m),
   setPaneDensity: (d) => mutate(set, get, "paneDensity", d),
   setBrowserLayout: (l) => mutate(set, get, "browserLayout", l),
+  setRemoteImagePreviews: (v) => mutate(set, get, "remoteImagePreviews", v),
   setRailExpanded: (v) => mutate(set, get, "railExpanded", v),
   toggleRailGroup: (name) => {
     const cur = get().railCollapsedGroups;
@@ -301,8 +331,40 @@ export const useSettings = create<SettingsState>((set, get) => ({
   setTerminalSuggestions: (v) =>
     mutate(set, get, "terminalSuggestions", v),
   setDefaultPort: (n) => mutate(set, get, "defaultPort", n),
-  setAnthropicApiKey: (s) => mutate(set, get, "anthropicApiKey", s),
+  setNotifications: (v) => mutate(set, get, "notifications", v),
 }));
+
+/** Reload settings from faro.db and merge them into the live store. Used by
+ *  windows that didn't get the pre-paint injection (popouts) and to reflect a
+ *  freshly-completed localStorage→faro.db migration in the current session. */
+export async function hydrateFromDb(): Promise<void> {
+  try {
+    const raw = await ipc.settingsGetAll();
+    const parsed: Partial<Persisted> = {};
+    for (const k of SETTINGS_KEYS) {
+      const v = raw[k as string];
+      if (v !== undefined) {
+        try {
+          (parsed as Record<string, unknown>)[k] = JSON.parse(v);
+        } catch {
+          // skip a corrupt row
+        }
+      }
+    }
+    const known = pickKnown(parsed);
+    if (Object.keys(known).length) {
+      useSettings.setState(known as Partial<SettingsState>);
+    }
+  } catch {
+    // no backend — ignore
+  }
+}
+
+// Popped-out terminal windows and mock builds never receive the Rust pre-paint
+// injection, so seed them from faro.db right after boot.
+if (!readInjected()) {
+  void hydrateFromDb();
+}
 
 export const TERMINAL_THEMES: Record<
   TerminalTheme,

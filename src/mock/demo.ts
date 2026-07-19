@@ -9,6 +9,11 @@ import { useBridge } from "@/stores/bridgeStore";
 import { useTerminals } from "@/stores/terminalsStore";
 import { useSettings } from "@/stores/settingsStore";
 import { useDiskScan } from "@/stores/diskScanStore";
+import { useSnippets } from "@/stores/snippetsStore";
+import { useToasts } from "@/stores/toastStore";
+import { useBindings } from "@/stores/bindingsStore";
+import { useSync } from "@/stores/syncStore";
+import { useUpdater } from "@/stores/updaterStore";
 import { emit } from "./event";
 
 (window as any).__demo = {
@@ -19,6 +24,11 @@ import { emit } from "./event";
   useTerminals,
   useSettings,
   useDiskScan,
+  useSnippets,
+  useToasts,
+  useBindings,
+  useSync,
+  useUpdater,
   // Convenience: focus a server by profile id (connects if needed).
   focusProfile: (profileId: string) =>
     useConnections.getState().connect(profileId),

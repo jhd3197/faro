@@ -1,4 +1,5 @@
 use crate::agent::ChatRequest;
+use crate::error::{ErrorKind, FaroError};
 use crate::profiles::{AuthMethod, ConnectionProfile};
 use crate::remotefs::{Capabilities, DirEntry, RemoteFs};
 use crate::session::{HostDecision, JobHandle, Session, SshSession};
@@ -116,14 +117,20 @@ pub async fn connect(
     profile_id: String,
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<String, FaroError> {
     let profile = state
         .profiles
         .get(&profile_id)
         .await
-        .map_err(err)?
-        .ok_or_else(|| format!("profile {profile_id} not found"))?;
-    let session_id = state.sessions.connect(profile, app).await.map_err(err)?;
+        .map_err(FaroError::from)?
+        .ok_or_else(|| {
+            FaroError::new(ErrorKind::NotFound, format!("profile {profile_id} not found"))
+        })?;
+    let session_id = state
+        .sessions
+        .connect(profile, app)
+        .await
+        .map_err(FaroError::from)?;
     // Re-apply a previously-granted Agent Bridge access for this profile (session
     // ids are per-connect, so the bridge tracks the persistent grant by profile).
     state
@@ -542,6 +549,55 @@ pub async fn close_terminal(
     state.ptys.close(&terminal_id).await.map_err(err)
 }
 
+// ---------- Command snippets (Plan 11 Phase 4) ----------
+//
+// The low-friction, single-session counterpart to Fleet Skills: saved command
+// lines with optional `{{variable}}` placeholders, inserted into a live shell
+// with one keystroke. Backed by the `snippets` table in `faro.db`; every
+// mutation returns the fresh, re-ordered list (most-used first) so the store
+// stays in lockstep — the same shape the saved-commands / skills IPC uses.
+
+#[tauri::command]
+pub async fn snippet_list(
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::Snippet>, String> {
+    state.db.list_snippets().map_err(err)
+}
+
+#[tauri::command]
+pub async fn snippet_save(
+    snippet: crate::db::Snippet,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::Snippet>, String> {
+    state
+        .db
+        .upsert_snippet(
+            &snippet.id,
+            &snippet.name,
+            &snippet.body,
+            snippet.folder.as_deref().filter(|s| !s.is_empty()),
+        )
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn snippet_delete(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::Snippet>, String> {
+    state.db.delete_snippet(&id).map_err(err)
+}
+
+/// Record that a snippet's text was inserted into a shell (bumps its use count
+/// so it floats up the palette ordering). Returns the re-ordered list.
+#[tauri::command]
+pub async fn snippet_run(
+    id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::db::Snippet>, String> {
+    state.db.touch_snippet(&id).map_err(err)
+}
+
 // ---------- Transfers ----------
 
 #[tauri::command]
@@ -719,9 +775,9 @@ pub async fn rename_path(
     from: String,
     to: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<(), FaroError> {
     let fs = fs_for(&session_id, &state).await?;
-    fs.rename(&from, &to).await.map_err(err)
+    fs.rename(&from, &to).await.map_err(FaroError::from)
 }
 
 #[tauri::command]
@@ -730,9 +786,9 @@ pub async fn delete_path(
     path: String,
     recursive: bool,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<(), FaroError> {
     let fs = fs_for(&session_id, &state).await?;
-    fs.delete(&path, recursive).await.map_err(err)
+    fs.delete(&path, recursive).await.map_err(FaroError::from)
 }
 
 #[tauri::command]
@@ -740,9 +796,9 @@ pub async fn create_directory(
     session_id: String,
     path: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<(), FaroError> {
     let fs = fs_for(&session_id, &state).await?;
-    fs.create_dir(&path).await.map_err(err)
+    fs.create_dir(&path).await.map_err(FaroError::from)
 }
 
 #[tauri::command]
@@ -751,9 +807,9 @@ pub async fn chmod_path(
     path: String,
     mode: u32,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<(), FaroError> {
     let fs = fs_for(&session_id, &state).await?;
-    fs.chmod(&path, mode).await.map_err(err)
+    fs.chmod(&path, mode).await.map_err(FaroError::from)
 }
 
 // ---------- Duplicate ----------
@@ -1439,6 +1495,125 @@ pub async fn bridge_set_active_session(
 ) -> Result<(), String> {
     state.bridge.set_active_session(session_id).await;
     Ok(())
+}
+
+// ---------- Service credentials (Plan 12 Phase 1) ----------
+
+/// Store (or clear, if `value` is empty) a service credential in the OS
+/// keychain, keyed by `purpose`. **One-way** — there is deliberately no command
+/// that reads the value back; Rust fetches it at the point of use. Also updates
+/// the `faro.db` keychain manifest so the encrypted backup can enumerate it.
+#[tauri::command]
+pub async fn set_api_key(
+    purpose: String,
+    value: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    crate::credentials::set_secret(&purpose, &value).map_err(err)?;
+    if value.is_empty() {
+        state
+            .db
+            .forget_keychain(crate::credentials::SERVICE, &purpose)
+            .map_err(err)?;
+    } else {
+        state
+            .db
+            .record_keychain(crate::credentials::SERVICE, &purpose)
+            .map_err(err)?;
+    }
+    Ok(())
+}
+
+/// Whether a credential exists for `purpose`. The only credential state the
+/// frontend gets — enough to render a Set/••••/Clear affordance.
+#[tauri::command]
+pub async fn api_key_status(purpose: String) -> Result<bool, String> {
+    Ok(crate::credentials::has_secret(&purpose))
+}
+
+// ---------- Settings (Plan 12 Phase 2) ----------
+
+/// Every persisted setting as `key -> raw JSON value`. The frontend store seeds
+/// itself from the pre-paint injection when it can; this is the async fallback
+/// (popout windows, or reconciling after a background write).
+#[tauri::command]
+pub async fn settings_get_all(
+    state: State<'_, AppState>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    state.db.settings_get_all().map_err(err)
+}
+
+/// Upsert one setting. `value` is a raw JSON string (the frontend stringifies).
+#[tauri::command]
+pub async fn settings_set(
+    key: String,
+    value: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.db.settings_set(&key, &value).map_err(err)
+}
+
+/// Delete one setting row (reset-to-default for shortcut overrides & friends).
+#[tauri::command]
+pub async fn settings_delete(
+    key: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.db.settings_delete(&key).map_err(err)
+}
+
+/// Bulk-upsert settings in one transaction — the one-time localStorage import.
+#[tauri::command]
+pub async fn settings_set_all(
+    values: std::collections::HashMap<String, String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let entries: Vec<(String, String)> = values.into_iter().collect();
+    state.db.settings_set_many(&entries).map_err(err)
+}
+
+// ---------- Encrypted backup / restore (Plan 12 Phase 4) ----------
+
+fn app_data_dir(app: &AppHandle) -> Result<std::path::PathBuf, FaroError> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| FaroError::other(format!("resolving app data dir: {e}")))
+}
+
+/// Export an encrypted backup (profiles + faro.db + configs + all keychain
+/// credentials) to `path`, protected by `password`.
+#[tauri::command]
+pub async fn backup_export(
+    path: String,
+    password: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<crate::backup::BackupSummary, FaroError> {
+    let dir = app_data_dir(&app)?;
+    crate::backup::export(&dir, &state.db, &password, Path::new(&path)).map_err(FaroError::from)
+}
+
+/// Decrypt a backup and report what's inside — without applying it (the UI's
+/// "what's inside" confirmation before restoring).
+#[tauri::command]
+pub async fn backup_inspect(
+    path: String,
+    password: String,
+) -> Result<crate::backup::BackupSummary, FaroError> {
+    crate::backup::inspect(&password, Path::new(&path)).map_err(FaroError::from)
+}
+
+/// Restore a backup: stage its files (applied on next launch) and inject its
+/// keychain credentials now. The frontend prompts the user to restart.
+#[tauri::command]
+pub async fn backup_import(
+    path: String,
+    password: String,
+    app: AppHandle,
+) -> Result<crate::backup::BackupSummary, FaroError> {
+    let dir = app_data_dir(&app)?;
+    // defer = true: the GUI has files open, so stage + swap on next startup.
+    crate::backup::import(&dir, &password, Path::new(&path), true).map_err(FaroError::from)
 }
 
 /// Send a message to the built-in Agent chat. The backend calls Anthropic's

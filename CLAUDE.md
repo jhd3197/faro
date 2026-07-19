@@ -87,7 +87,7 @@ locally on `dev` (not pushed).
 
 ## Plans & runbook
 
-- `docs/plans/ROADMAP.md` sequences the tracks; numbered plans (`1_…` … `11_…`)
+- `docs/plans/ROADMAP.md` sequences the tracks; numbered plans (`1_…` … `15_…`)
   are the specs, **numbered in build order** (see the ROADMAP's "Plan build
   order" table). E.g. `docs/plans/5_additional-backends.md` adds one `RemoteFs`
   impl + `Session` variant + New-Connection UI entry per backend.

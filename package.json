@@ -13,15 +13,20 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "gen:brand-icons": "node scripts/gen-brand-icons.mjs",
     "init-icons": "node scripts/init-icons.mjs",
     "postinstall": "node scripts/init-icons.mjs"
   },
   "dependencies": {
     "@faro/file-ui": "*",
+    "@iconify/react": "^6.0.2",
     "@tauri-apps/api": "^2.1.1",
     "@tauri-apps/plugin-dialog": "^2.0.1",
     "@tauri-apps/plugin-fs": "^2.0.3",
+    "@tauri-apps/plugin-notification": "^2.3.3",
+    "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-shell": "^2.0.1",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-serialize": "^0.14.0",
     "@xterm/addon-web-links": "^0.11.0",
@@ -35,6 +40,10 @@
     "zustand": "^5.0.1"
   },
   "devDependencies": {
+    "@iconify-json/logos": "^1.2.11",
+    "@iconify-json/mdi": "^1.2.3",
+    "@iconify-json/simple-icons": "^1.2.90",
+    "@iconify/utils": "^3.1.4",
     "@tauri-apps/cli": "^2.1.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",

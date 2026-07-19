@@ -30,6 +30,7 @@ import {
   LayoutGrid,
   Upload,
   Download,
+  Image as ImageIcon,
 } from "lucide-react";
 import type {
   Capabilities,
@@ -46,6 +47,11 @@ import { cn } from "../lib/cn";
 import { fmtSize, fmtMtime, formatMode } from "../lib/format";
 import { isImage, type FileIconSpec } from "../lib/fileIcons";
 import { materialIconUrl } from "../lib/materialIcons";
+import {
+  DEFAULT_FILE_BROWSER_KEYBINDINGS,
+  comboFromEvent,
+  type FileBrowserAction,
+} from "../lib/keys";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
 import { PromptModal } from "./PromptModal";
 import { ConfirmModal } from "./ConfirmModal";
@@ -118,6 +124,18 @@ interface Props {
   reloadToken?: number;
 }
 
+/** Extract a human message from any thrown value. Transport backends may reject
+ *  with a structured `{ kind, message }` object (Faro's Tauri commands do); those
+ *  would otherwise stringify to "[object Object]" in the error banner. */
+function errorText(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e && typeof e === "object" && typeof (e as { message?: unknown }).message === "string") {
+    return (e as { message: string }).message;
+  }
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
 type ModalState =
   | { type: "rename"; entry: DirEntry }
   | { type: "mkdir" }
@@ -153,7 +171,38 @@ export function FilePane({
     setPaneViewMode,
     setPaneDensity,
     editorLabel,
+    remoteImagePreviews,
+    setRemoteImagePreviews,
+    keyBindings,
   } = settings;
+
+  // Effective in-pane key combos: host overrides layered over the built-in
+  // defaults, indexed combo→action so the keydown handler is a single lookup.
+  // Memoized on the combo values (not object identity) so a host that rebuilds
+  // the settings object each render doesn't thrash the listener.
+  const comboToAction = useMemo(() => {
+    const merged = { ...DEFAULT_FILE_BROWSER_KEYBINDINGS, ...keyBindings };
+    const map: Record<string, FileBrowserAction> = {};
+    for (const [action, combo] of Object.entries(merged)) {
+      if (combo) map[combo] = action as FileBrowserAction;
+    }
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify({ ...DEFAULT_FILE_BROWSER_KEYBINDINGS, ...keyBindings })]);
+
+  // Re-key the thumbnail loader whenever the remote-preview toggle flips, so
+  // already-mounted Thumbnails re-run their effect the moment the user clicks
+  // the toolbar toggle (off→on fetches; on→off falls back to icons) instead of
+  // waiting for the next navigation. Wrapping `fs.thumbnail` gives a fresh
+  // function identity per toggle state — the dep the Thumbnail effect watches.
+  const loadThumb = useMemo(
+    () =>
+      fs.thumbnail
+        ? (sid: SessionId, entry: DirEntry, signal?: AbortSignal) =>
+            fs.thumbnail!(sid, entry, signal)
+        : undefined,
+    [fs, remoteImagePreviews]
+  );
 
   const [entries, setEntries] = useState<DirEntry[]>([]);
   const [draftPath, setDraftPath] = useState(path);
@@ -210,7 +259,7 @@ export function FilePane({
         setSelected(new Set());
         setAnchor(null);
       } catch (e) {
-        setError(String(e));
+        setError(errorText(e));
       } finally {
         setLoading(false);
       }
@@ -271,6 +320,8 @@ export function FilePane({
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+    const anchorItem = () =>
+      anchor ? visible.find((v) => v.path === anchor) ?? null : null;
     const handler = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       const typing =
@@ -279,7 +330,8 @@ export function FilePane({
           target.tagName === "TEXTAREA" ||
           target.isContentEditable);
       if (e.key === "Escape") {
-        // Filter first, then selection — least-surprising unwind order.
+        // Filter first, then selection — least-surprising unwind order. Escape
+        // is intentionally not remappable (it's the universal cancel key).
         if (filter) {
           setFilter("");
           if (typing) (target as HTMLInputElement).blur();
@@ -292,16 +344,64 @@ export function FilePane({
       if (typing) return; // don't hijack keys while editing text
       // Only run list nav when the pane/list area is focused, not a toolbar btn.
       if (target && target.closest('button, a, [role="button"]')) return;
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
-        e.preventDefault();
-        setSelected(new Set(visible.map((x) => x.path)));
-        return;
+
+      // Remappable in-pane actions (F2/Enter/Delete/Backspace/mod+A/Space/
+      // mod+shift+N/F5, all overridable by the host). One combo → one action.
+      const action = comboToAction[comboFromEvent(e)];
+      if (action) {
+        switch (action) {
+          case "selectAll":
+            e.preventDefault();
+            setSelected(new Set(visible.map((x) => x.path)));
+            return;
+          case "delete": {
+            const items = visible.filter((v) => selected.has(v.path));
+            if (items.length > 0) setModal({ type: "delete", entries: items });
+            return;
+          }
+          case "rename": {
+            const item = anchorItem();
+            if (item) {
+              e.preventDefault();
+              setModal({ type: "rename", entry: item });
+            }
+            return;
+          }
+          case "quickInfo": {
+            const item = anchorItem();
+            if (item) {
+              e.preventDefault();
+              setModal({ type: "props", entry: item });
+            }
+            return;
+          }
+          case "newFolder":
+            if (sessionId && caps?.hasDirectories !== false) {
+              e.preventDefault();
+              setModal({ type: "mkdir" });
+            }
+            return;
+          case "refresh":
+            if (sessionId) {
+              e.preventDefault();
+              load(path);
+            }
+            return;
+          case "open": {
+            const item = anchorItem();
+            if (item) {
+              e.preventDefault();
+              onRowActivate(item);
+            }
+            return;
+          }
+          case "parentDir":
+            e.preventDefault();
+            goUp();
+            return;
+        }
       }
-      if (e.key === "Delete" && selected.size > 0) {
-        const items = visible.filter((v) => selected.has(v.path));
-        if (items.length > 0) setModal({ type: "delete", entries: items });
-        return;
-      }
+
       if (e.ctrlKey || e.metaKey || e.altKey) return; // leave app shortcuts alone
 
       if (e.key === "ArrowDown" || e.key === "ArrowUp") {
@@ -317,19 +417,6 @@ export function FilePane({
           setAnchor(targetItem.path);
           scrollToIdx(next);
         }
-        return;
-      }
-      if (e.key === "Enter" && anchor) {
-        const item = visible.find((v) => v.path === anchor);
-        if (item) {
-          e.preventDefault();
-          onRowActivate(item);
-        }
-        return;
-      }
-      if (e.key === "Backspace") {
-        e.preventDefault();
-        goUp();
         return;
       }
       // Type-ahead: jump to the first item matching the recently-typed run.
@@ -350,7 +437,7 @@ export function FilePane({
     };
     el.addEventListener("keydown", handler);
     return () => el.removeEventListener("keydown", handler);
-  }, [visible, selected, filter, anchor]);
+  }, [visible, selected, filter, anchor, comboToAction, caps, path, sessionId]);
 
   // Watch this pane's width and pick a column tier. Content-driven, not
   // viewport-driven: only re-renders when crossing a threshold, not per pixel.
@@ -520,7 +607,7 @@ export function FilePane({
           icon: <ExternalLink size={12} />,
           onClick: () => {
             fs.editFile!(sessionId!, single.path).catch((e) =>
-              setError(String(e))
+              setError(errorText(e))
             );
           },
         });
@@ -543,14 +630,14 @@ export function FilePane({
               onClick: () =>
                 fs
                   .archive!(sessionId!, single.path, "tar.gz")
-                  .catch((e) => setError(String(e))),
+                  .catch((e) => setError(errorText(e))),
             },
             {
               label: "Zip archive (.zip)",
               onClick: () =>
                 fs
                   .archive!(sessionId!, single.path, "zip")
-                  .catch((e) => setError(String(e))),
+                  .catch((e) => setError(errorText(e))),
             },
           ],
         });
@@ -568,7 +655,7 @@ export function FilePane({
           onClick: () =>
             fs
               .openTerminal!(sessionId!, single.path)
-              .catch((e) => setError(String(e))),
+              .catch((e) => setError(errorText(e))),
         });
       }
       // Analyze disk usage under this folder (treemap + size breakdown). Works
@@ -581,7 +668,7 @@ export function FilePane({
             sessionId &&
             fs
               .analyzeDiskUsage!(sessionId, single.path)
-              .catch((e) => setError(String(e))),
+              .catch((e) => setError(errorText(e))),
         });
       }
       // Compare this folder against another tree (Meld-style side-by-side diff).
@@ -594,7 +681,7 @@ export function FilePane({
             sessionId &&
             fs
               .compareDirectory!(sessionId, single.path)
-              .catch((e) => setError(String(e))),
+              .catch((e) => setError(errorText(e))),
         });
       }
       // Search this folder by name or content (Spotlight/grep over the backend).
@@ -607,7 +694,7 @@ export function FilePane({
             sessionId &&
             fs
               .searchDirectory!(sessionId, single.path)
-              .catch((e) => setError(String(e))),
+              .catch((e) => setError(errorText(e))),
         });
       }
       // Duplicate needs a server-side copy (cp over SSH) or local fs copy; object
@@ -704,7 +791,7 @@ export function FilePane({
       await fs.rename(sessionId, entry.path, to);
       await load(path);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -716,7 +803,7 @@ export function FilePane({
       }
       await load(path);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -726,7 +813,7 @@ export function FilePane({
       await fs.duplicate(sessionId, entry.path, entry.kind);
       await load(path);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -736,7 +823,7 @@ export function FilePane({
       await fs.mkdir(sessionId, joinPath(path, name));
       await load(path);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -751,7 +838,7 @@ export function FilePane({
       await fs.chmod(sessionId, entry.path, mode);
       await load(path);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -862,7 +949,7 @@ export function FilePane({
               sessionId &&
               fs
                 .analyzeDiskUsage!(sessionId, path)
-                .catch((e) => setError(String(e)))
+                .catch((e) => setError(errorText(e)))
             }
             disabled={!sessionId}
             className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"
@@ -877,7 +964,7 @@ export function FilePane({
               sessionId &&
               fs
                 .searchDirectory!(sessionId, path)
-                .catch((e) => setError(String(e)))
+                .catch((e) => setError(errorText(e)))
             }
             disabled={!sessionId}
             className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"
@@ -1025,6 +1112,26 @@ export function FilePane({
           >
             <AlignJustify size={13} />
           </button>
+          {sessionId &&
+            sessionId !== LOCAL_SESSION &&
+            setRemoteImagePreviews && (
+              <button
+                onClick={() => setRemoteImagePreviews(!remoteImagePreviews)}
+                className={cn(
+                  "rounded p-1 hover:bg-bg-hover",
+                  remoteImagePreviews
+                    ? "text-accent"
+                    : "text-text-dim hover:text-text"
+                )}
+                title={
+                  remoteImagePreviews
+                    ? "Image previews on — click to turn off (fetches images to thumbnail them)"
+                    : "Image previews off — click to show remote image thumbnails"
+                }
+              >
+                <ImageIcon size={13} />
+              </button>
+            )}
         </div>
         {!editingPath && (
           <button
@@ -1149,7 +1256,7 @@ export function FilePane({
                 showModified={showModified}
                 showPermsCol={showPermsCol}
                 sessionId={sessionId}
-                loadThumb={fs.thumbnail}
+                loadThumb={loadThumb}
                 onClick={(e) => onRowClick(entry, e)}
                 onActivate={() => onRowActivate(entry)}
                 onDragStart={(e) => onRowDragStart(e, entry)}
@@ -1172,7 +1279,7 @@ export function FilePane({
               showModified={showModified}
               showPermsCol={showPermsCol}
               sessionId={sessionId}
-              loadThumb={fs.thumbnail}
+              loadThumb={loadThumb}
               onClick={(e) => onRowClick(entry, e)}
               onActivate={() => onRowActivate(entry)}
               onDragStart={(e) => onRowDragStart(e, entry)}
@@ -1313,7 +1420,11 @@ function Row({
   showModified: boolean;
   showPermsCol: boolean;
   sessionId: SessionId | null;
-  loadThumb?: (sessionId: SessionId, entry: DirEntry) => Promise<Blob | null>;
+  loadThumb?: (
+    sessionId: SessionId,
+    entry: DirEntry,
+    signal?: AbortSignal
+  ) => Promise<Blob | null>;
   onClick: (e: React.MouseEvent) => void;
   onActivate: () => void;
   onDragStart: (e: React.DragEvent) => void;
@@ -1345,8 +1456,26 @@ function Row({
       <Icon size={size} className={cn("shrink-0", iconColor)} />
     );
   const iconEl = glyph(13);
-  // Show a real image preview in the grid when the adapter can supply bytes.
+  // Show a real image preview when the adapter can supply bytes. The adapter
+  // gates the (expensive, network) remote kind on the `remoteImagePreviews`
+  // setting — when it's off it returns null fast and the icon fallback shows,
+  // so mounting Thumbnail here costs nothing extra.
   const canThumb = !!loadThumb && !!sessionId && isImage(entry);
+  // Small inline thumbnail for the list / details rows (grid uses its own,
+  // larger one below). Reuses the same lazy, cached pipeline.
+  const rowThumb =
+    canThumb && sessionId ? (
+      <Thumbnail
+        sessionId={sessionId}
+        entry={entry}
+        load={loadThumb!}
+        size={18}
+        fallback={iconEl}
+        className="shrink-0"
+      />
+    ) : (
+      iconEl
+    );
 
   if (viewMode === "grid") {
     const bigIcon = glyph(30);
@@ -1408,7 +1537,7 @@ function Row({
           sel
         )}
       >
-        {iconEl}
+        {rowThumb}
         <span className="min-w-0 flex-1 truncate">{entry.name}</span>
         <span className="shrink-0 text-xs tabular-nums text-text-dim">
           {entry.kind === "file" ? fmtSize(entry.size) : ""}
@@ -1438,7 +1567,7 @@ function Row({
       )}
     >
       <span className="flex min-w-0 items-center gap-2">
-        {iconEl}
+        {rowThumb}
         <span className="truncate">{entry.name}</span>
       </span>
       {showModified && (

@@ -21,7 +21,6 @@ const MAX_TOKENS: u32 = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatRequest {
-    pub api_key: String,
     pub session_id: Option<String>,
     pub prompt: String,
     pub history: Vec<HistoryTurn>,
@@ -44,9 +43,11 @@ pub async fn agent_chat(
     state: &Arc<BridgeState>,
     req: ChatRequest,
 ) -> Result<ChatResponse> {
-    if req.api_key.trim().is_empty() {
-        bail!("Anthropic API key is required. Add it in Settings → Agent.");
-    }
+    // The key never crosses IPC — Rust reads it from the OS keychain at the
+    // moment of use (Plan 12 Phase 1).
+    let api_key = crate::credentials::get_secret(crate::credentials::ANTHROPIC_API_KEY)?
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| anyhow!("Anthropic API key is required. Add it in Settings → Agent."))?;
 
     let mut messages = Vec::new();
     messages.push(json!({
@@ -81,7 +82,7 @@ pub async fn agent_chat(
 
         let res = client
             .post(ANTHROPIC_API_URL)
-            .header("x-api-key", &req.api_key)
+            .header("x-api-key", &api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&body)

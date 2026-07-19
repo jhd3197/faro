@@ -177,16 +177,38 @@ jobs:
       - name: Install npm deps
         run: npm ci
 
+      # Signed auto-updater artifacts (Plan 16) are produced ONLY when the
+      # updater signing key is configured as a secret. Without it, the release
+      # still builds exactly as before (just no in-app update path) — so adding
+      # the updater can never break the pipeline. See docs/updater-key-custody.md.
+      - name: Detect updater signing key
+        id: updater
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -n "$KEY" ]; then
+            echo "sign=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY not set — building WITHOUT auto-updater artifacts. Add the secret to enable in-app updates (docs/updater-key-custody.md)."
+          fi
+
       - name: Build + bundle GUI, attach to draft release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Present only when the maintainer has added the secret; tauri-action
+          # signs the updater artifacts + generates latest.json when it's set.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: 'Faro ${{ needs.prepare.outputs.tag }}'
           releaseDraft: true
           prerelease: false
-          args: ${{ matrix.platform.args }}
+          # Enable createUpdaterArtifacts via a config overlay only when signing.
+          args: ${{ matrix.platform.args }}${{ steps.updater.outputs.sign == 'true' && ' --config updater-release.conf.json' || '' }}
           projectPath: src-tauri
 
   # ---- 3. Standalone CLI binary (all platforms) ---------------------------

@@ -1,6 +1,5 @@
 import { create } from "zustand";
 import { ipc } from "@/lib/ipc";
-import { useSettings } from "./settingsStore";
 
 export type ChatRole = "user" | "assistant" | "tool";
 
@@ -39,9 +38,11 @@ export const useAgentChat = create<AgentChatState>((set, get) => ({
   setSessionId: (id) => set({ sessionId: id }),
 
   send: async (prompt) => {
-    const apiKey = useSettings.getState().anthropicApiKey.trim();
-    if (!apiKey) {
-      set({ error: "Add an Anthropic API key in Settings → Chat." });
+    // The key lives in the OS keychain now (Plan 12 Phase 1) — the frontend
+    // only asks whether one is set; the backend reads the value at call time.
+    const hasKey = await ipc.apiKeyStatus("anthropic-api-key").catch(() => false);
+    if (!hasKey) {
+      set({ error: "Add an Anthropic API key in Settings → Agent." });
       return;
     }
 
@@ -59,7 +60,6 @@ export const useAgentChat = create<AgentChatState>((set, get) => ({
 
     try {
       const response = await ipc.agentChat({
-        apiKey,
         sessionId: get().sessionId,
         prompt,
         history: get()

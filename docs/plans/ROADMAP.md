@@ -46,8 +46,14 @@ thematic detail.
 | 8 | `8_fleet-skills` | ✅ built (live multi-server fan-out run left) | AI-authored fleet automations over the bridge. Independent. |
 | 9 | `9_on-demand-virtual-folders` | 🔄 Windows provider built (feature-flagged); Explorer verify left | OneDrive-style placeholders (Plan 2 Phase 3). Large, per-OS, Windows-first. |
 | 10 | `10_faro-cli-agent-dx` | ✅ built (live SSH-box + phone-agent smoke tests left) | faro-cli/Agent-Bridge remote exec/write DX. All six phases in: CLI version-drift + self-update, `agent script`/`--stdin`, `agent write`, MSYS path guard, background/detached jobs (SSH + agent arms), authenticated `fetch`. Independent of the scan foundation. |
-| 11 | `11_iconify-brand-icons` | ⬜ | Additive brand/protocol logos. Independent polish; do whenever. |
-| 12 | `12_scoped-connection-sharing` | 🅿️ deferred | Blocked on a login/auth foundation. |
+| 11 | `11_terminal-depth-and-snippets` | 🔄 Phases 1, 2, 4 built + runtime-verified (headless mock harness); Phase 3 (agent PTY) deferred — needs a paired phone | Terminal as a first-class surface: instance registry, split panes on one connection, snippets. Biggest everyday-UX win. |
+| 12 | `12_security-settings-and-portability` | ✅ built (all 4 phases, runtime-verified) | Keychain-everything (fix the localStorage API key), settings in `faro.db` + pre-paint injection, structured errors, encrypted backup. Trust fundamentals. |
+| 13 | `13_remote-previews-and-protocol-depth` | 🔄 Phase 1 shipped + verified; Phase 3 protocol foundation landed | Lazy remote image previews (viewport-budgeted) done. Native drag-out, SCP browse/UI, port forwarding, Docker SSH E2E fixtures remain. |
+| 14 | `14_iconify-brand-icons` | ✅ Phases 1–3 shipped + runtime-verified (Phase 4 consolidation deferred) | Additive brand/protocol logos, bundled offline. |
+| 15 | `15_keyboard-shortcuts` | ⬜ | Remappable shortcuts + Settings Keyboard tab + file-browser keys (F2 rename & friends). Builds on the Plan 12 settings substrate. Independent polish; do whenever. |
+| 16 | `16_app-updater-and-notifications` | ⬜ | In-app auto-updater (signed, GitHub Releases manifest) + desktop notifications + one-click per-user PATH install. Trust/UX fundamentals for a shipping app. |
+| 17 | `17_transfer-queue-depth` | ⬜ | Real queue (bounded concurrency), pause/resume, retry, bandwidth throttle. Turns the transfer list into an actual queue. |
+| 99 | `99_scoped-connection-sharing` | 🚫 out of scope | Pulled from the numbered order; slated for removal. Design notes kept on file only. |
 
 Cross-project **Track D** (ServerKit ↔ Faro) has no plan file — it's a
 convergence effort tracked only in the Track section below.
@@ -166,7 +172,7 @@ surface for those agents).
 
 ---
 
-## Track E — Brand & protocol logos (Plan 11)
+## Track E — Brand & protocol logos (Plan 14)
 
 Additive icon layer for recognizable brand marks (S3/Azure/SSH/WordPress) via
 Iconify, bundled offline. Deliberately does **not** touch the file-type icons
@@ -174,10 +180,13 @@ Iconify, bundled offline. Deliberately does **not** touch the file-type icons
 UI icons.
 
 - ✅ Files already use Material Icon Theme; UI uses lucide. *(shipped/present)*
-- ⬜ **Phase 1–2** — Iconify offline foundation + protocol logos on the rail,
+- ✅ **Phase 1–2** — Iconify offline foundation + protocol logos on the rail,
   connection list, and New-Connection picker (logo *plus* the colour monogram).
-- ⬜ Phase 3 — tech badges elsewhere. ⬜ Phase 4 — (deferred) evaluate
-  consolidating lucide UI icons onto Iconify.
+  Curated 25-icon offline subset (`gen-brand-icons.mjs`); the build carries zero
+  `api.iconify.design` references. Verified headlessly (`verify-brand-icons.mjs`).
+- ✅ Phase 3 — vendor logos brand the S3/WebDAV provider presets (Cloudflare,
+  Backblaze, DigitalOcean, Oracle, IBM, Supabase, Nextcloud…). ⬜ Phase 4 —
+  (deferred) evaluate consolidating lucide UI icons onto Iconify.
 
 ## Track F — Disk Usage Explorer (Plan 4)
 
@@ -267,11 +276,138 @@ additive protocol op so older daemons keep working). Verified by unit +
 end-to-end tests; live smoke tests against a real SSH box and the paired phone
 agent are the maintainer's step (single-instance lock + Android daemon redeploy).
 
-## Track J — Scoped connection sharing (Plan 12) — DEFERRED
-Share a box read-only / path-jailed / time-boxed. **Parked until a login/auth
-foundation exists** — the real use case (remote employee, link-based) needs auth
-regardless, so we hold the whole track rather than ship the LAN-only half. The
-scoped-grant model remains the permission backbone once login lands. 🅿️
+## Track L — Terminal depth & snippets (Plan 11)
+Makes the terminal a first-class surface:
+an xterm **instance registry** decoupled from React (scrollback survives
+remounts/popouts/HMR), **split panes** opening extra PTY channels on the same
+pooled SSH connection (Cmd+D family, layout tree), terminal-over-agent as an
+additive protocol op (stretch), and **command snippets** (`faro.db` table,
+`{{variable}}` templates, Cmd+K insert into the shell — the everyday
+low-friction counterpart to Fleet Skills).
+
+- ✅ **Phase 1 — instance registry** (`src/lib/terminalRegistry.ts`): xterm
+  instances + their DOM nodes live outside React; leaves attach/detach the cached
+  node, disposal is store-driven, HMR-safe. Scrollback survives tab switches,
+  dock toggles, splits, popouts.
+- ✅ **Phase 2 — split panes**: each tab owns a layout tree (leaf | split), split
+  right/down open a new PTY channel on the same pooled SSH connection, with
+  draggable dividers, zoom, close-pane, and `mod+shift+D/E/Enter/W` chords
+  (palette + cheat-sheet; xterm swallows them so bare Ctrl+D stays EOF).
+- ✅ **Phase 4 — command snippets**: `snippets` table in `faro.db` (v2 migration)
+  + `snippet_list/save/delete/run`, a Snippets panel, a Cmd+K section, a terminal
+  toolbar quick-insert, and a `{{variable}}` fill-in dialog (never auto-submits;
+  multi-line warns). Backend unit-tested; the whole UI verified end-to-end in a
+  headless browser via the mock harness (`scripts/verify-terminal.mjs`).
+- ⬜ **Phase 3 — terminal over the Faro Agent** (stretch, deferred): additive
+  `faro-agent-proto` PTY op + `faro-agentd` + `supportsTerminal =
+  sftp || agent(supports_pty)`. Left for a session with a paired phone + rebuilt
+  daemon — its verification (interactive `top`/`vi`) can't be reached from the
+  dev box or the mock harness.
+
+## Track M — Security, settings & portability (Plan 12)
+Trust fundamentals: **keychain-everything
+credentials** (the Anthropic API key leaves plaintext localStorage; the
+frontend never sees secrets — Rust fetches at use time), settings moved from
+localStorage into **`faro.db` with pre-paint window injection** (one source of
+truth, no theme flash), **structured `{kind, message}` errors** across IPC so
+toasts pattern-match instead of regexing strings, and **encrypted
+backup/restore** (Argon2id + AES-256-GCM container carrying profiles,
+`faro.db`, and all keychain credentials).
+
+- ✅ **Phase 1 — keychain the API key**: `credentials` module + one-way
+  `set_api_key`/`api_key_status`, `agent.rs` reads the key at call time, a
+  one-time localStorage→keychain migration, and a keychain manifest table so the
+  backup can enumerate secrets. Real Windows Credential Manager round-trip
+  verified.
+- ✅ **Phase 2 — settings in `faro.db`**: `settings` table + commands, the main
+  window built in `setup()` with an `initialization_script` that sets
+  `data-theme` before first paint, store seeds from the injection, one-time
+  localStorage→DB migration (migrate-then-verify). Verified: app boots with the
+  programmatic window; the real DB migrated 22 settings rows.
+- ✅ **Phase 3 — structured errors**: `FaroError {kind, message}` + classifier;
+  `remotefs` file ops + `connect` migrated; frontend `errors.ts` with a
+  kind-keyed `toastError`. Verified via a headless harness
+  (`scripts/verify-errors.mjs`): auth→reconnect, network→check-connection,
+  legacy strings still generic.
+- ✅ **Phase 4 — encrypted backup/restore**: `FAROBAK\x01` container (Argon2id
+  64 MiB + AES-256-GCM, header as AAD), carrying profiles + WAL-safe `faro.db`
+  snapshot + configs + all keychain credentials; staged restore applied at
+  startup; Settings danger-zone UI + `faro-cli backup export|import`. Verified
+  via the real CLI binary (round-trip + real-data export + wrong-password
+  rejection).
+
+## Track N — Remote previews & protocol depth (Plan 13)
+Headlined by **lazy remote image previews** (a real user ask): global +
+per-connection setting (default off for remote), IntersectionObserver-driven
+fetching with a hard concurrency cap, cancellation on scroll-away, size guards
+and an LRU disk cache keyed by change signal — scrolling a 100k-image
+`wp-content/uploads` costs only the rows you actually see. Plus **native
+drag-out download** (the `drag` crate stages to temp; HTML5 DnD can't leave a
+webview), an **SCP fallback** for SFTP-less servers, **port forwarding** with
+persisted rules + presets, and **Docker SSH E2E fixtures** (bastion / SCP-only
+/ sudo) to finally retire the roadmap's "compile-verified only" refrain.
+
+- ✅ **Phase 1 — lazy remote image previews.** `preview.rs` PreviewManager +
+  `preview_thumbnail`: a bounded per-`Session` `read_head` (SFTP/object/FTP/
+  WebDAV/HTTP/agent/local, capped at 25 MiB), Rust decode+downscale (`image`),
+  and an LRU disk cache (`thumb_cache` in faro.db, 256 MiB budget, keyed by
+  change signal so edits invalidate). Frontend: default-off `remoteImagePreviews`
+  setting + a per-pane toolbar toggle, an AbortSignal from the row's
+  IntersectionObserver (scroll-away cancels before dispatch) + a per-connection
+  concurrency limiter, raster/size guards; grid **and** list/detail rows preview.
+  Backend unit-tested; the full UI flow runtime-verified headlessly
+  (`scripts/verify-previews.mjs`): off→icons, toggle→thumbnails for on-screen
+  image rows in grid+list, non-images stay icons, toggle-off reverts.
+- 🔄 **Phase 3 — SCP fallback (protocol foundation).** `scp.rs` wire protocol
+  (`download_to`/`upload_from` over a generic `AsyncRead+AsyncWrite`,
+  unit-tested via `tokio::io::duplex`) + `SshSession::scp_download_to`/
+  `scp_upload_from`/`sftp_available`. ⬜ Remaining: an ScpFs that browses via the
+  shell, a New-Connection "SCP mode" toggle, and routing SSH transfers through
+  it when SFTP is off — best verified against the Phase 5 busybox fixture.
+- ⬜ **Phase 2** — native drag-out download (the `drag` crate stages to temp).
+- ⬜ **Phase 4** — port forwarding (persisted `forward_rules` + DB presets).
+- ⬜ **Phase 5** — Docker SSH E2E fixtures (bastion / SCP-only busybox / sudo).
+
+## Track J — Scoped connection sharing (Plan 99, was 15) — OUT OF SCOPE
+Share a box read-only / path-jailed / time-boxed. **Pulled from the numbered
+build order and slated for removal** — not being built any time soon (it was
+blocked on a login/auth foundation regardless). The plan file survives at
+`99_scoped-connection-sharing.md` for its design notes only; do not schedule
+work against it. 🚫
+
+## Track O — Keyboard shortcuts & remapping (Plan 15)
+Every app's expected shortcut surface: turn the hardcoded command-registry
+combos (`src/lib/commands.tsx`) into **data** — defaults + user overrides in
+`faro.db` (Plan 12's settings table, pre-paint injection) — with a **Settings →
+Keyboard tab** (searchable command list, click-to-record capture, conflict
+detection, reset). Then teach the dispatcher (`src/hooks/useShortcuts.ts`) about
+**non-modifier keys** with input-focus guards so `F2` rename, `Enter` open,
+`Delete`, `Backspace` go-up work in the file browser, and make the terminal
+chords (`terminalChords.ts`) remappable too. Independent polish; pairs naturally
+with Plan 14 (icons) as a UX-polish batch. ⬜
+
+## Track P — App updater, notifications & PATH install (Plan 16)
+The app at v1.3.22 has no self-update path (Plan 10 only covered `faro-cli`),
+no OS notifications, and no PATH integration (`install_missing` downloads the
+CLI and tells the user to wire PATH by hand). Add `tauri-plugin-updater` with
+**signed** artifacts + a GitHub Releases `latest.json` (check on launch,
+Settings → About "Check for updates", download-progress → restart),
+`tauri-plugin-notification` for a small curated set (transfer batch
+done/failed, sync error, edit-in-place save failure) behind an
+unfocused-only-by-default toggle, and a **one-click "Add faro-cli to PATH"**
+at the per-user level — `HKCU\Environment` on Windows (no admin needed; `setx`
+banned for its 1024-char truncation), `~/.local/bin` + a marker-guarded shell
+profile line elsewhere — with add/status/remove. Key custody is the main
+updater risk; PATH writes keep a `faro.db` backup so remove = restore. ⬜
+
+## Track Q — Transfer queue depth (Plan 17)
+`TransferManager` spawns every transfer immediately — `Queued` is a label, not a
+queue; `cancel` is the only control. Turn it into a real queue: bounded
+concurrency (semaphore + FIFO, reorderable), per-transfer pause/resume
+(park at a chunk boundary, resume re-runs the file), manual + classified
+auto-retry (Plan 12 error kinds), and a global token-bucket bandwidth throttle.
+All checkpoints live in the *shared* copy loops so the 11 backends get it for
+free. Panel gains pause/retry row actions, pause-all, and a throttle input. ⬜
 
 ## Near-term quick wins (small, high-value)
 - **Editable permissions dialog** — today Properties *shows* mode read-only; add
@@ -311,11 +447,18 @@ mirror.
 7. **Track K — faro-cli remote-exec DX (Plan 10).** Independent of the scan
    foundation, so it can slot in here — and its **Phase 0 (CLI version-drift
    check + update, exec-ceiling fix) is a live pain point that can be pulled
-   forward at any time.** Ships before the polish/deferred plans (iconify #11,
-   scoped sharing #12).
-8. **Track D option (b)** — ServerKit installs `faro-agentd` as a managed
+   forward at any time.** Ships before the polish/deferred plans (iconify #14,
+   keyboard shortcuts #15).
+8. **Track M — Security, settings & portability (Plan 12).** Trust
+   fundamentals; the localStorage API-key fix is small and should land early.
+9. **Track L — Terminal depth & snippets (Plan 11).** The biggest everyday-UX
+   win; independent of the scan foundation and of Plan 12.
+10. **Track N — Remote previews & protocol depth (Plan 13).** Phase 1 (lazy
+    previews) is the user-facing headline; its E2E fixtures phase then serves
+    the whole roadmap's live-verification backlog.
+11. **Track D option (b)** — ServerKit installs `faro-agentd` as a managed
    service; every server becomes syncable via Track A.
-9. **Track C Windows on-demand** — the large, later effort.
+12. **Track C Windows on-demand** — the large, later effort.
 
 To execute any of these tracks end-to-end in a fresh session, use the local
 `docs/plans/prompt.md` runbook — set its one plan-filename knob and paste it.

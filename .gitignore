@@ -49,3 +49,7 @@ docs/plans/prompt.md
 # Generated demo screenshots — rebuild with `npm run shots` (already covered by
 # the global *.png rule above; listed explicitly so the intent is clear).
 docs/screenshots/*.png
+
+# Tauri updater signing key (Plan 16) — PRIVATE key, never commit. Belongs in
+# CI secret TAURI_SIGNING_PRIVATE_KEY. See docs/updater-key-custody.md.
+.updater/

@@ -10,19 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "title": "Faro",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 900,
-        "minHeight": 600,
-        "decorations": false,
-        "transparent": false,
-        "resizable": true,
-        "shadow": true
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }
@@ -33,6 +21,15 @@
         "schemes": [
           "faro"
         ]
+      }
+    },
+    "updater": {
+      "endpoints": [
+        "https://github.com/jhd3197/Faro/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE4MzQ2NEEwRDBENEE5OTcKUldTWHFkVFFvR1EwR0s3NGpQeEcvcEptVUNqanFZdXNsQVF1dFBnNHhqalpLWVQvcnhsTy9mVHYK",
+      "windows": {
+        "installMode": "passive"
       }
     }
   },

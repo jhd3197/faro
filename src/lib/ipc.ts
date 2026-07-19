@@ -32,6 +32,7 @@ import type {
   AgentExecStart,
   AgentOutput,
   SavedCommand,
+  Snippet,
   Skill,
   SkillRunResult,
   SkillDryRunResult,
@@ -40,6 +41,7 @@ import type {
   AgentHostStatus,
   CliStatus,
   CliUpdateMode,
+  PathStatus,
   DeepLink,
   SyncPair,
   PairView,
@@ -52,6 +54,7 @@ import type {
   SearchSnapshot,
   SearchProgress,
   SearchHitBatch,
+  BackupSummary,
 } from "./types";
 
 // Typed wrappers around the Tauri command surface. The string names must match
@@ -154,6 +157,11 @@ export const ipc = {
   cliUpdaterSetMode: (mode: CliUpdateMode) =>
     invoke<CliStatus>("cli_updater_set_mode", { mode }),
 
+  // ---- One-click "Add faro-cli to PATH" (Plan 16 Phase 4): per-user, no admin.
+  pathStatus: () => invoke<PathStatus>("path_status"),
+  pathAdd: () => invoke<PathStatus>("path_add"),
+  pathRemove: () => invoke<PathStatus>("path_remove"),
+
   listDirectory: (sessionId: SessionId, path: string) =>
     invoke<DirEntry[]>("list_directory", { sessionId, path }),
 
@@ -163,6 +171,18 @@ export const ipc = {
   // Base64 of a small local file, for image thumbnails in the grid view.
   readFilePreview: (sessionId: SessionId, path: string) =>
     invoke<string>("read_file_preview", { sessionId, path }),
+
+  // Base64 of a Rust-decoded+downscaled thumbnail for a remote (or local) image
+  // (Plan 13 Phase 1). `signal` is the file's change token (an object-store ETag
+  // or "size:mtime") — it keys the disk cache so edits invalidate. Rejects for
+  // oversized/undecodable/unsupported files; the adapter maps that to "no
+  // preview" → the type icon.
+  previewThumbnail: (
+    sessionId: SessionId,
+    path: string,
+    fileSize: number,
+    signal: string
+  ) => invoke<string>("preview_thumbnail", { sessionId, path, fileSize, signal }),
 
   openTerminal: (sessionId: SessionId, cols: number, rows: number) =>
     invoke<string>("open_terminal", { sessionId, cols, rows }),
@@ -175,6 +195,15 @@ export const ipc = {
 
   closeTerminal: (terminalId: string) =>
     invoke<void>("close_terminal", { terminalId }),
+
+  // ---- Command snippets (Plan 11 Phase 4) ----
+  // Every mutation returns the full, re-ordered list (most-used first).
+  snippetList: () => invoke<Snippet[]>("snippet_list"),
+  snippetSave: (snippet: Snippet) =>
+    invoke<Snippet[]>("snippet_save", { snippet }),
+  snippetDelete: (id: string) => invoke<Snippet[]>("snippet_delete", { id }),
+  /** Record one insertion so the snippet floats up the ordering. */
+  snippetRun: (id: string) => invoke<Snippet[]>("snippet_run", { id }),
 
   startDownload: (
     sessionId: SessionId,
@@ -319,8 +348,43 @@ export const ipc = {
     invoke<void>("bridge_set_active_session", { sessionId }),
   bridgeRegisterMcp: (url: string, token: string) =>
     invoke<string>("bridge_register_mcp", { url, token }),
+  // ---- Service credentials (Plan 12 Phase 1) ----
+  // Secrets never cross IPC as readable values: the frontend writes (one-way)
+  // and asks whether one exists, but never reads the value back. Rust fetches
+  // it from the OS keychain at the point of use.
+  /** Store (or clear, if `value` is "") a service credential by purpose. */
+  setApiKey: (purpose: string, value: string) =>
+    invoke<void>("set_api_key", { purpose, value }),
+  /** Whether a credential exists for `purpose` (for the Set/••••/Clear UI). */
+  apiKeyStatus: (purpose: string) =>
+    invoke<boolean>("api_key_status", { purpose }),
+
+  // ---- Settings (Plan 12 Phase 2): faro.db is the source of truth ----
+  /** Every setting as `key -> raw JSON value`. */
+  settingsGetAll: () =>
+    invoke<Record<string, string>>("settings_get_all"),
+  /** Upsert one setting (`value` is a JSON-stringified value). */
+  settingsSet: (key: string, value: string) =>
+    invoke<void>("settings_set", { key, value }),
+  /** Delete one setting row (reset-to-default, e.g. clearing a shortcut override). */
+  settingsDelete: (key: string) =>
+    invoke<void>("settings_delete", { key }),
+  /** Bulk-upsert (the one-time localStorage import). */
+  settingsSetAll: (values: Record<string, string>) =>
+    invoke<void>("settings_set_all", { values }),
+
+  // ---- Encrypted backup / restore (Plan 12 Phase 4) ----
+  /** Write an encrypted backup to `path`, protected by `password`. */
+  backupExport: (path: string, password: string) =>
+    invoke<BackupSummary>("backup_export", { path, password }),
+  /** Decrypt + report what's inside a backup, without applying it. */
+  backupInspect: (path: string, password: string) =>
+    invoke<BackupSummary>("backup_inspect", { path, password }),
+  /** Restore a backup (staged for next launch; credentials injected now). */
+  backupImport: (path: string, password: string) =>
+    invoke<BackupSummary>("backup_import", { path, password }),
+
   agentChat: (req: {
-    apiKey: string;
     sessionId: string | null;
     prompt: string;
     history: Array<{ role: "user" | "assistant"; content: string }>;

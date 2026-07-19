@@ -34,6 +34,13 @@ export {
 // A Material Icon Theme SVG URL for a filename (folders/unknown → undefined).
 export { materialIconUrl } from "./lib/materialIcons";
 
+// Remappable file-browser key actions: the default combos + a combo matcher.
+export {
+  DEFAULT_FILE_BROWSER_KEYBINDINGS,
+  comboFromEvent,
+  type FileBrowserAction,
+} from "./lib/keys";
+
 // Hooks + utils.
 export { usePathHistory } from "./hooks/usePathHistory";
 export { useDialog } from "./hooks/useDialog";

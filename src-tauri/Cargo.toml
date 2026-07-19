@@ -31,6 +31,19 @@ tauri-plugin-dialog = "2"
 # instead of launching a second copy; the `deep-link` feature carries the URL.
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# Desktop notifications (Plan 16 Phase 3): OS toasts for a small curated set of
+# events (transfer batch done/failed, folder-sync error, edit-in-place save
+# failure) so they surface when Faro isn't focused. The events are decided +
+# gated frontend-side (focus + the `notifications` setting); this just exposes
+# the OS toast API to the webview.
+tauri-plugin-notification = "2"
+# In-app auto-updater (Plan 16 Phase 1/2): checks a signed GitHub-Releases
+# `latest.json`, downloads the signed artifact, verifies its minisign signature
+# against the pubkey in tauri.conf.json, and installs. `process` powers the
+# "Restart to update" relaunch. Signature verification is the whole security
+# model — the app never installs an unsigned/unverified update.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -98,6 +111,15 @@ tokio-util = { version = "0.7", features = ["io"] }
 # Decode percent-encoded WebDAV PROPFIND href paths back into file names.
 percent-encoding = "2"
 
+# Remote image thumbnails (Plan 13 Phase 1): decode a bounded read of a remote
+# image and downscale it to a small cached PNG in Rust. `default-features = false`
+# keeps out the codecs that need system libs (avif/dav1d); the enabled set covers
+# the web-common raster formats we gate previews to. `rayon` parallelises the
+# resize across cores.
+image = { version = "0.25", default-features = false, features = [
+    "jpeg", "png", "gif", "webp", "bmp", "ico", "tiff",
+] }
+
 # Filesystem watcher — powers the right-click "Edit with…" flow that
 # downloads a remote file to a tempfile, opens it in the user's editor, and
 # uploads it back on every save.
@@ -108,6 +130,15 @@ notify = "6"
 # no dbus/secret-service build dependency.
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 
+# Encrypted backup/restore container (Plan 12 Phase 4): an Argon2id-derived key
+# over a user password, AES-256-GCM over a gzipped archive of profiles + faro.db
+# + configs + all keychain credentials. All pure-Rust, no system crypto dep.
+# (aes-gcm / flate2 / rand were already in the tree transitively.)
+argon2 = "0.5"
+aes-gcm = "0.10"
+flate2 = "1"
+rand = "0.8"
+
 # Windows-only: registry access for the PuTTY sessions importer, plus the
 # Cloud Filter API (`cldapi.dll`) that powers on-demand virtual folders (Plan 9)
 # via the safe `cloud-filter` wrapper crate. It's optional — only pulled when the
@@ -116,6 +147,15 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 # the unsafe surface tiny for code that can only be verified manually in Explorer.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# One-click "Add faro-cli to PATH" (Plan 16 Phase 4). After writing the per-user
+# Path under HKCU\Environment we broadcast WM_SETTINGCHANGE("Environment") so new
+# terminals pick it up without a logoff — that's the only Win32 call we need, so
+# the lightweight `windows-sys` FFI crate (already in the tree transitively) is
+# enough; no need for the heavier `windows` wrapper.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
 # cloud-filter drives the hard part (connect + placeholders + hydration
 # callbacks over cldapi). The `windows` crate (same 0.58 cloud-filter pulls) is
 # used ONLY for `CfRegisterSyncRoot`/`CfUnregisterSyncRoot`, because the WinRT

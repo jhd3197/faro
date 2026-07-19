@@ -6,6 +6,7 @@ import { FileUiBridge } from "./components/FileUiBridge";
 import { TerminalDock } from "./components/Terminal";
 import { TransferQueue } from "./components/TransferQueue";
 import { CliUpdatePrompt } from "./components/CliUpdatePrompt";
+import { UpdatePrompt } from "./components/UpdatePrompt";
 import { Settings } from "./components/Settings";
 import { HostKeyModal } from "./components/HostKeyModal";
 import { AuthPromptModal } from "./components/AuthPromptModal";
@@ -39,6 +40,8 @@ import { useBridge } from "./stores/bridgeStore";
 import { useSync } from "./stores/syncStore";
 import { useSettings } from "./stores/settingsStore";
 import { onDeepLink } from "./lib/ipc";
+import { runSecretMigration, runSettingsMigration } from "./lib/secretMigration";
+import { initNotifications } from "./lib/notifications";
 import { openTerminalWindow } from "./lib/popout";
 import { toast } from "./stores/toastStore";
 import type { DeepLink, Protocol, ConnectionProfile } from "./lib/types";
@@ -54,6 +57,7 @@ import { DiskUsageHost } from "./components/DiskUsage";
 import { DirectoryDiffHost } from "./components/DirectoryDiff";
 import { FleetSearchHost } from "./components/FleetSearch";
 import { SkillsHost } from "./components/SkillsPanel";
+import { SnippetsHost } from "./components/SnippetsPanel";
 import { useShortcuts } from "./hooks/useShortcuts";
 import { relTime } from "./lib/format";
 import { cn } from "./lib/cn";
@@ -103,6 +107,21 @@ export default function App() {
     };
   }, []);
 
+  // One-time migrations off localStorage (Plan 12): the plaintext API key into
+  // the OS keychain (Phase 1), and app settings into faro.db (Phase 2).
+  useEffect(() => {
+    void runSecretMigration();
+    void runSettingsMigration();
+  }, []);
+
+  // Desktop notifications (Plan 16 Phase 3): OS toasts for the curated events
+  // (transfer batch done/failed, folder-sync error, edit-in-place save failure),
+  // gated by the `notifications` setting + window focus.
+  useEffect(() => {
+    const cleanup = initNotifications();
+    return cleanup;
+  }, []);
+
   return (
     <div className="flex h-screen w-screen flex-col">
       <TitleBar />
@@ -127,6 +146,7 @@ export default function App() {
       <DirectoryDiffHost />
       <FleetSearchHost />
       <SkillsHost />
+      <SnippetsHost />
       <CommandPalette />
       <KeyboardShortcutsDialog />
       <div className="flex flex-1 overflow-hidden">
@@ -161,6 +181,7 @@ export default function App() {
             />
           </div>
           <TransferQueue />
+          <UpdatePrompt />
           <CliUpdatePrompt />
           <StatusBar
             terminalOpen={terminalOpen && supportsTerminal}

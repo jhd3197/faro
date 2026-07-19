@@ -1,6 +1,11 @@
-# Plan 12 — Scoped, time-boxed connection sharing
+# Plan 99 (was 15) — Scoped, time-boxed connection sharing
 
-> **Status: DEFERRED — blocked on a login/auth foundation.** The target use case
+> **Status: OUT OF SCOPE — slated for removal.** Pulled out of the numbered
+> build order (2026-07): not being built any time soon. Kept on file for the
+> design notes only; the file itself will be deleted in a later cleanup. Do not
+> schedule work against this plan.
+>
+> **Previously: DEFERRED — blocked on a login/auth foundation.** The target use case
 > (share a box with a remote employee via a link, over the internet) needs
 > authentication regardless of delivery. Rather than build half of it, this is
 > parked until a login/auth system exists. When it lands, the scoped-grant

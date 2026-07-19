@@ -5,14 +5,17 @@ use tauri::Manager;
 // crate, so they need to be `pub` rather than `mod`. None of them expose
 // secrets directly — credentials live in profiles::ConnectionProfile, which
 // the CLI deliberately redacts in `profiles show`.
+pub mod backup;
 pub mod bridge;
 pub mod commands;
 pub mod agent;
 mod agent_host;
 mod cli_updater;
+pub mod credentials;
 pub mod db;
 mod deeplink;
 pub mod diff;
+pub mod error;
 mod diskscan;
 mod editor;
 mod foldersync;
@@ -20,9 +23,12 @@ pub mod importers;
 pub mod keys;
 mod known_hosts;
 pub mod oauth;
+mod path_integration;
+mod preview;
 pub mod profiles;
 pub mod remotefs;
 pub mod scan;
+pub mod scp;
 pub mod search;
 pub mod session;
 pub mod sync;
@@ -55,6 +61,79 @@ pub struct AppState {
     /// Shared `faro.db` — the per-connection index (sync_state today; scan/search
     /// caches later). See `db.rs`.
     pub db: Arc<db::Db>,
+    /// Remote image thumbnail previews (Plan 13 Phase 1) — bounded reads, a
+    /// per-connection concurrency cap, and an LRU disk cache. See `preview.rs`.
+    pub preview: Arc<preview::PreviewManager>,
+}
+
+/// Build the pre-paint JS injected into the main window (Plan 12 Phase 2). It
+/// reads every setting from `faro.db`, exposes them on `window.__FARO_SETTINGS__`
+/// for the frontend store to seed from, and sets `data-theme` on `<html>` before
+/// the first paint so there's no theme flash on reload.
+fn build_settings_init_script(db: &db::Db) -> String {
+    let mut map = db.settings_get_all().unwrap_or_default();
+    // A fresh install has no rows yet — default the theme so the window still
+    // paints dark (matching the frontend DEFAULTS), not the bare CSS default.
+    map.entry("appTheme".to_string())
+        .or_insert_with(|| "\"dark\"".to_string());
+
+    // Build a JS object literal `{ "key": <rawJson>, ... }`. Each stored value is
+    // already a JSON string; skip any that don't parse so one bad row can't break
+    // the whole injection (which would leave the window unthemed).
+    let mut pairs: Vec<String> = Vec::new();
+    for (k, v) in &map {
+        if serde_json::from_str::<serde_json::Value>(v).is_ok() {
+            if let Ok(key) = serde_json::to_string(k) {
+                pairs.push(format!("{key}:{v}"));
+            }
+        }
+    }
+    let obj = format!("{{{}}}", pairs.join(","));
+
+    format!(
+        "(function(){{try{{\
+           var s={obj};\
+           window.__FARO_SETTINGS__=s;\
+           var el=document.documentElement;\
+           if(el&&typeof s.appTheme==='string'){{el.setAttribute('data-theme',s.appTheme);}}\
+         }}catch(e){{}}}})();"
+    )
+}
+
+#[cfg(test)]
+mod init_script_tests {
+    use super::*;
+
+    #[test]
+    fn injects_theme_and_snapshot() {
+        let db = db::Db::open_in_memory().unwrap();
+        db.settings_set("appTheme", "\"nord\"").unwrap();
+        db.settings_set("terminalFontSize", "15").unwrap();
+        let script = build_settings_init_script(&db);
+        assert!(script.contains("window.__FARO_SETTINGS__"));
+        assert!(script.contains("setAttribute('data-theme'"));
+        assert!(script.contains("\"appTheme\":\"nord\""));
+        assert!(script.contains("\"terminalFontSize\":15"));
+    }
+
+    #[test]
+    fn defaults_theme_to_dark_on_empty_db() {
+        let db = db::Db::open_in_memory().unwrap();
+        let script = build_settings_init_script(&db);
+        assert!(script.contains("\"appTheme\":\"dark\""));
+    }
+
+    #[test]
+    fn skips_corrupt_rows_without_breaking() {
+        let db = db::Db::open_in_memory().unwrap();
+        // A value that isn't valid JSON must be dropped, not emitted raw (which
+        // would break the whole object literal and leave the window unthemed).
+        db.settings_set("appTheme", "\"dracula\"").unwrap();
+        db.settings_set("broken", "not json").unwrap();
+        let script = build_settings_init_script(&db);
+        assert!(script.contains("\"appTheme\":\"dracula\""));
+        assert!(!script.contains("not json"));
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -80,8 +159,20 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let handle = app.handle().clone();
+
+            // Apply a pending encrypted-backup restore (Plan 12 Phase 4) before
+            // anything opens profiles.json / faro.db, so a restore staged by a
+            // previous run swaps in atomically on this launch.
+            if let Ok(data_dir) = handle.path().app_data_dir() {
+                std::fs::create_dir_all(&data_dir).ok();
+                backup::apply_pending_restore(&data_dir);
+            }
+
             let profile_store = Arc::new(
                 profiles::ProfileStore::load_or_create(&handle)
                     .expect("failed to initialise profile store"),
@@ -94,6 +185,38 @@ pub fn run() {
                 std::fs::create_dir_all(&dir).ok();
                 Arc::new(db::Db::open(&dir.join("faro.db")).expect("failed to open faro.db"))
             };
+            // Remote thumbnail cache lives under the app data dir alongside faro.db
+            // (the codebase keeps everything under app_data_dir; there's no
+            // app_cache_dir convention here).
+            let preview = {
+                let dir = handle
+                    .path()
+                    .app_data_dir()
+                    .expect("resolving app_data_dir for thumbnail cache");
+                Arc::new(preview::PreviewManager::new(dir.join("thumbnails")))
+            };
+
+            // Create the main window ourselves (it's no longer in
+            // tauri.conf.json) so we can inject a pre-paint script that reads the
+            // theme from faro.db and sets `data-theme` on <html> before the first
+            // paint — killing the dark→light flash structurally, not by timing
+            // luck (Plan 12 Phase 2). The script also stashes the full settings
+            // snapshot on `window.__FARO_SETTINGS__` so the frontend store seeds
+            // itself synchronously instead of an async round-trip.
+            {
+                let init_script = build_settings_init_script(&db);
+                tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::default())
+                    .title("Faro")
+                    .inner_size(1280.0, 800.0)
+                    .min_inner_size(900.0, 600.0)
+                    .decorations(false)
+                    .resizable(true)
+                    .shadow(true)
+                    .initialization_script(&init_script)
+                    .build()
+                    .expect("failed to create main window");
+            }
+
             let state = AppState {
                 sessions: Arc::new(session::SessionManager::new()),
                 ptys: Arc::new(terminal::PtyManager::new()),
@@ -123,6 +246,7 @@ pub fn run() {
                 diff: Arc::new(diff::DiffManager::new()),
                 search: Arc::new(search::SearchManager::new()),
                 db,
+                preview,
             };
             app.manage(state);
 
@@ -207,6 +331,9 @@ pub fn run() {
             cli_updater::cli_updater_check,
             cli_updater::cli_updater_update,
             cli_updater::cli_updater_set_mode,
+            path_integration::path_status,
+            path_integration::path_add,
+            path_integration::path_remove,
             foldersync::foldersync_list,
             foldersync::foldersync_upsert,
             foldersync::foldersync_remove,
@@ -246,10 +373,15 @@ pub fn run() {
             commands::list_directory,
             commands::capabilities,
             commands::read_file_preview,
+            preview::preview_thumbnail,
             commands::open_terminal,
             commands::terminal_write,
             commands::terminal_resize,
             commands::close_terminal,
+            commands::snippet_list,
+            commands::snippet_save,
+            commands::snippet_delete,
+            commands::snippet_run,
             commands::start_download,
             commands::start_upload,
             commands::start_directory_download,
@@ -270,6 +402,15 @@ pub fn run() {
             commands::bridge_set_policy,
             commands::bridge_set_active_session,
             commands::bridge_register_mcp,
+            commands::set_api_key,
+            commands::api_key_status,
+            commands::settings_get_all,
+            commands::settings_set,
+            commands::settings_delete,
+            commands::settings_set_all,
+            commands::backup_export,
+            commands::backup_inspect,
+            commands::backup_import,
             commands::agent_chat_cmd,
             commands::respond_to_bridge_approval,
             commands::bridge_activity,

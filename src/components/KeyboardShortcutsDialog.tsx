@@ -1,34 +1,41 @@
 import { useId, useMemo, useRef, useState } from "react";
 import { X, Keyboard } from "lucide-react";
 import { useLayout } from "@/stores/layoutStore";
-import { useCommands } from "@/lib/commands";
+import { useResolvedCommands } from "@/lib/keybindings";
+import { useBindings } from "@/stores/bindingsStore";
+import { FILE_BROWSER_KEYS, FILE_BROWSER_GROUP } from "@/lib/fileBrowserKeys";
+import { effectiveCombo } from "@/lib/keybindings";
 import { useDialog } from "@/hooks/useDialog";
 import { formatCombo } from "@/lib/shortcuts";
 
-// Global shortcuts that aren't registry commands (palette + FilePane keys).
+// Informational rows that aren't remappable commands (the palette toggle and the
+// file-browser navigation keys that have no single canonical combo).
 const EXTRAS: { group: string; title: string; combo: string }[] = [
   { group: "General", title: "Command Palette", combo: "mod+k" },
-  { group: "File pane", title: "Move cursor", combo: "arrows" },
-  { group: "File pane", title: "Open / transfer", combo: "enter" },
-  { group: "File pane", title: "Up one folder", combo: "backspace" },
-  { group: "File pane", title: "Jump to name", combo: "type" },
-  { group: "File pane", title: "Select all", combo: "mod+a" },
-  { group: "File pane", title: "Delete selection", combo: "delete" },
-  { group: "File pane", title: "Clear filter / selection", combo: "escape" },
+  { group: FILE_BROWSER_GROUP, title: "Move cursor", combo: "arrows" },
+  { group: FILE_BROWSER_GROUP, title: "Jump to name", combo: "type" },
+  { group: FILE_BROWSER_GROUP, title: "Clear filter / selection", combo: "escape" },
 ];
 
 export function KeyboardShortcutsDialog() {
   const open = useLayout((s) => s.shortcutsOpen);
   const setOpen = useLayout((s) => s.setShortcutsOpen);
-  const commands = useCommands();
+  const commands = useResolvedCommands();
+  const overrides = useBindings((s) => s.overrides);
   const [q, setQ] = useState("");
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
   useDialog(panelRef, { onClose: () => setOpen(false), enabled: open });
 
   const groups = useMemo(() => {
+    const fileBrowserRows = FILE_BROWSER_KEYS.map((k) => ({
+      group: FILE_BROWSER_GROUP,
+      title: k.title,
+      combo: effectiveCombo(k.id, k.defaultCombo, overrides),
+    })).filter((r) => !!r.combo) as { group: string; title: string; combo: string }[];
     const rows = [
       ...EXTRAS,
+      ...fileBrowserRows,
       ...commands
         .filter((c) => c.combo)
         .map((c) => ({ group: c.group, title: c.title, combo: c.combo! })),
@@ -41,7 +48,7 @@ export function KeyboardShortcutsDialog() {
       byGroup.get(r.group)!.push({ title: r.title, combo: r.combo });
     }
     return Array.from(byGroup.entries());
-  }, [commands, q]);
+  }, [commands, overrides, q]);
 
   if (!open) return null;
 

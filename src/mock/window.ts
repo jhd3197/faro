@@ -5,6 +5,15 @@ export function getCurrentWindow() {
     async isMaximized() {
       return false;
     },
+    // Focus is controllable from tests via `window.__focused` (default: focused).
+    // Falls back to the DOM's own notion of focus when the flag is unset.
+    async isFocused() {
+      const w = window as any;
+      return typeof w.__focused === "boolean" ? w.__focused : document.hasFocus();
+    },
+    async setFocus() {
+      (window as any).__focused = true;
+    },
     async onResized() {
       return () => {};
     },

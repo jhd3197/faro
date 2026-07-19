@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { X, Palette, ArrowDownUp, FolderTree, TerminalSquare, Plug, Radio, Bot, Ban, Check, Info, MonitorSmartphone, FolderSync } from "lucide-react";
+import { X, Palette, ArrowDownUp, FolderTree, TerminalSquare, Plug, Radio, Bot, Ban, Check, Info, MonitorSmartphone, FolderSync, ShieldAlert, Loader2, Keyboard } from "lucide-react";
 import { useDialog } from "@/hooks/useDialog";
 import { ACCENTS } from "@/lib/accent";
 import {
@@ -16,11 +16,17 @@ import {
   type TerminalTheme,
 } from "@/stores/settingsStore";
 import { useBridge } from "@/stores/bridgeStore";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ipc } from "@/lib/ipc";
+import { toast } from "@/stores/toastStore";
+import { toastError } from "@/lib/errors";
+import type { BackupSummary } from "@/lib/types";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { cn } from "@/lib/cn";
 import { RemoteControlSettings } from "./RemoteControlSettings";
 import { SyncSettings } from "./SyncSettings";
 import { CliUpdaterSettings } from "./CliUpdaterSettings";
+import { KeyboardSettings } from "./KeyboardSettings";
+import { AboutSettings } from "./AboutSettings";
 
 interface Props {
   onClose: () => void;
@@ -31,24 +37,30 @@ type SectionId =
   | "transfers"
   | "panes"
   | "terminal"
+  | "keyboard"
   | "connections"
   | "remoteControl"
   | "sync"
   | "bridge"
   | "cli"
-  | "agent";
+  | "agent"
+  | "backup"
+  | "about";
 
 const SECTIONS: { id: SectionId; label: string; icon: React.ReactNode }[] = [
   { id: "appearance", label: "Appearance", icon: <Palette size={14} /> },
   { id: "transfers", label: "Transfers", icon: <ArrowDownUp size={14} /> },
   { id: "panes", label: "File panes", icon: <FolderTree size={14} /> },
   { id: "terminal", label: "Terminal", icon: <TerminalSquare size={14} /> },
+  { id: "keyboard", label: "Keyboard", icon: <Keyboard size={14} /> },
   { id: "connections", label: "Connections", icon: <Plug size={14} /> },
   { id: "remoteControl", label: "Remote control", icon: <MonitorSmartphone size={14} /> },
   { id: "sync", label: "Folder Sync", icon: <FolderSync size={14} /> },
   { id: "bridge", label: "Agent Bridge", icon: <Radio size={14} /> },
   { id: "cli", label: "faro-cli", icon: <TerminalSquare size={14} /> },
   { id: "agent", label: "Chat", icon: <Bot size={14} /> },
+  { id: "backup", label: "Backup", icon: <ShieldAlert size={14} /> },
+  { id: "about", label: "About", icon: <Info size={14} /> },
 ];
 
 export function Settings({ onClose }: Props) {
@@ -237,6 +249,12 @@ export function Settings({ onClose }: Props) {
                 ]}
               />
             </Field>
+            <ToggleField
+              label="Remote image previews"
+              help="Show thumbnails for images on remote connections (SFTP, S3, FTP, …). Off by default — previews are fetched over the network, but only for the rows you scroll to, capped and cached. Local images always preview. Toggle per connection from the file toolbar."
+              checked={s.remoteImagePreviews === "on"}
+              onChange={(v) => s.setRemoteImagePreviews(v ? "on" : "off")}
+            />
             <Field
               label="Default editor"
               help="Command used to open files for edit-in-place (e.g. code). Blank = your OS default app."
@@ -408,21 +426,23 @@ export function Settings({ onClose }: Props) {
       case "agent":
         return (
           <>
-            <Field label="Anthropic API key">
-              <input
-                type="password"
-                value={s.anthropicApiKey}
-                onChange={(e) => s.setAnthropicApiKey(e.target.value)}
-                placeholder="sk-ant-api03-..."
-                className="w-full rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-sm outline-none focus:border-accent"
-              />
-            </Field>
+            <ApiKeyField />
             <Help>
-              Used only by the built-in AI chat. Stored locally; never sent
-              to Faro's servers.
+              Used only by the built-in AI chat. Stored in your operating
+              system's keychain — never in the app's settings, never sent to
+              Faro's servers, and never read back into this window.
             </Help>
           </>
         );
+
+      case "keyboard":
+        return <KeyboardSettings />;
+
+      case "backup":
+        return <BackupSettings />;
+
+      case "about":
+        return <AboutSettings />;
     }
   };
 
@@ -574,6 +594,333 @@ function Field({
 
 function Help({ children }: { children: React.ReactNode }) {
   return <div className="mt-1 w-full text-xs text-text-dim">{children}</div>;
+}
+
+const ANTHROPIC_PURPOSE = "anthropic-api-key";
+
+// Keychain-backed API-key affordance (Plan 12 Phase 1). The value never crosses
+// IPC as a readable string: we ask whether one is set, write a new one (one-way),
+// or clear it. When one is configured we show a masked "Set" state with Replace /
+// Clear, mirroring how OS credential managers present stored secrets.
+function ApiKeyField() {
+  const [hasKey, setHasKey] = useState<boolean | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    ipc
+      .apiKeyStatus(ANTHROPIC_PURPOSE)
+      .then((v) => !cancelled && setHasKey(v))
+      .catch(() => !cancelled && setHasKey(false));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const save = async () => {
+    const v = value.trim();
+    if (!v) return;
+    setBusy(true);
+    try {
+      await ipc.setApiKey(ANTHROPIC_PURPOSE, v);
+      setHasKey(true);
+      setEditing(false);
+      setValue("");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clear = async () => {
+    setBusy(true);
+    try {
+      await ipc.setApiKey(ANTHROPIC_PURPOSE, "");
+      setHasKey(false);
+      setEditing(false);
+      setValue("");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const inputClass =
+    "w-full rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-sm outline-none focus:border-accent";
+  const btnClass =
+    "rounded-md border border-border px-2.5 py-1.5 text-sm text-text-muted transition-colors hover:bg-bg-hover hover:text-text disabled:opacity-50";
+
+  // Configured + not replacing: show the masked state with actions.
+  if (hasKey && !editing) {
+    return (
+      <Field label="Anthropic API key">
+        <div className="flex items-center gap-2">
+          <div className="flex flex-1 items-center gap-2 rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-sm text-text-muted">
+            <Check size={14} className="text-emerald-500" />
+            <span className="font-mono tracking-widest">••••••••••••</span>
+            <span className="text-xs text-text-dim">stored in keychain</span>
+          </div>
+          <button type="button" className={btnClass} onClick={() => setEditing(true)} disabled={busy}>
+            Replace
+          </button>
+          <button type="button" className={btnClass} onClick={clear} disabled={busy}>
+            Clear
+          </button>
+        </div>
+      </Field>
+    );
+  }
+
+  // Unset, still loading, or replacing: show the entry field.
+  return (
+    <Field label="Anthropic API key">
+      <div className="flex items-center gap-2">
+        <input
+          type="password"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void save();
+          }}
+          placeholder={hasKey === null ? "Loading…" : "sk-ant-api03-..."}
+          disabled={hasKey === null || busy}
+          className={inputClass}
+          autoComplete="off"
+        />
+        <button
+          type="button"
+          className={btnClass}
+          onClick={save}
+          disabled={busy || !value.trim()}
+        >
+          Save
+        </button>
+        {editing && (
+          <button type="button" className={btnClass} onClick={() => setEditing(false)} disabled={busy}>
+            Cancel
+          </button>
+        )}
+      </div>
+    </Field>
+  );
+}
+
+// Encrypted backup / restore (Plan 12 Phase 4). Export writes a single
+// password-protected container carrying profiles, faro.db, subsystem configs,
+// and all keychain credentials; restore stages it for the next launch.
+function BackupSettings() {
+  const [exportPw, setExportPw] = useState("");
+  const [exportPw2, setExportPw2] = useState("");
+  const [exporting, setExporting] = useState(false);
+
+  const [importPath, setImportPath] = useState<string | null>(null);
+  const [importPw, setImportPw] = useState("");
+  const [pending, setPending] = useState<BackupSummary | null>(null);
+  const [importing, setImporting] = useState(false);
+
+  const btn =
+    "rounded-md border border-border px-3 py-1.5 text-sm text-text transition-colors hover:bg-bg-hover disabled:opacity-50";
+  const input =
+    "w-full rounded-md border border-border bg-bg-subtle px-2.5 py-1.5 text-sm outline-none focus:border-accent";
+  const danger =
+    "rounded-md border border-red-500/40 bg-red-500/10 px-3 py-1.5 text-sm text-red-400 transition-colors hover:bg-red-500/20 disabled:opacity-50";
+
+  const doExport = async () => {
+    if (exportPw.length < 8) {
+      toast.warning("Weak password", "Use at least 8 characters.");
+      return;
+    }
+    if (exportPw !== exportPw2) {
+      toast.warning("Passwords don't match");
+      return;
+    }
+    const path = await save({
+      title: "Save Faro backup",
+      defaultPath: "faro-backup.farobak",
+      filters: [{ name: "Faro backup", extensions: ["farobak"] }],
+    });
+    if (!path) return;
+    setExporting(true);
+    try {
+      const s = await ipc.backupExport(path, exportPw);
+      setExportPw("");
+      setExportPw2("");
+      toast.success(
+        "Backup created",
+        `${s.profiles} profile${s.profiles === 1 ? "" : "s"}, ${s.credentials} credential${
+          s.credentials === 1 ? "" : "s"
+        }, and app state — encrypted.`
+      );
+    } catch (e) {
+      toastError(e, "Backup failed");
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const chooseFile = async () => {
+    const path = await open({
+      title: "Choose a Faro backup",
+      multiple: false,
+      filters: [{ name: "Faro backup", extensions: ["farobak"] }],
+    });
+    if (typeof path === "string") {
+      setImportPath(path);
+      setPending(null);
+    }
+  };
+
+  // Step 1: decrypt + preview ("what's inside") — also validates the password.
+  const doInspect = async () => {
+    if (!importPath || !importPw) return;
+    setImporting(true);
+    try {
+      const s = await ipc.backupInspect(importPath, importPw);
+      setPending(s);
+    } catch (e) {
+      toastError(e, "Couldn't open backup");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  // Step 2: apply it (staged for next launch; credentials injected now).
+  const doImport = async () => {
+    if (!importPath || !importPw) return;
+    setImporting(true);
+    try {
+      await ipc.backupImport(importPath, importPw);
+      setPending(null);
+      setImportPw("");
+      setImportPath(null);
+      toast.success(
+        "Backup restored",
+        "Restart Faro to finish applying it — your connections and secrets are ready."
+      );
+    } catch (e) {
+      toastError(e, "Restore failed");
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-5">
+      {/* Export */}
+      <div>
+        <div className="mb-1 text-sm font-medium">Create an encrypted backup</div>
+        <Help>
+          One password-protected file with your connection profiles, their saved
+          secrets (SSH passwords, cloud tokens, the AI API key), app settings, and
+          sync pairs. Argon2id + AES-256-GCM — useless without the password, so
+          store it somewhere safe.
+        </Help>
+        <div className="mt-2 flex flex-col gap-2">
+          <input
+            type="password"
+            value={exportPw}
+            onChange={(e) => setExportPw(e.target.value)}
+            placeholder="Backup password"
+            className={input}
+            autoComplete="new-password"
+          />
+          <input
+            type="password"
+            value={exportPw2}
+            onChange={(e) => setExportPw2(e.target.value)}
+            placeholder="Confirm password"
+            className={input}
+            autoComplete="new-password"
+          />
+          <div>
+            <button type="button" className={btn} onClick={doExport} disabled={exporting}>
+              {exporting ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <Loader2 size={13} className="animate-spin" /> Exporting…
+                </span>
+              ) : (
+                "Export backup…"
+              )}
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="h-px bg-border" />
+
+      {/* Restore */}
+      <div>
+        <div className="mb-1 flex items-center gap-1.5 text-sm font-medium text-red-400">
+          <ShieldAlert size={14} /> Restore from a backup
+        </div>
+        <Help>
+          Replaces this machine's profiles, settings, and saved secrets with the
+          backup's. Takes effect after you restart Faro.
+        </Help>
+        <div className="mt-2 flex flex-col gap-2">
+          <div className="flex items-center gap-2">
+            <button type="button" className={btn} onClick={chooseFile} disabled={importing}>
+              Choose backup file…
+            </button>
+            {importPath && (
+              <span className="truncate text-xs text-text-dim" title={importPath}>
+                {importPath.split(/[\\/]/).pop()}
+              </span>
+            )}
+          </div>
+          {importPath && (
+            <input
+              type="password"
+              value={importPw}
+              onChange={(e) => {
+                setImportPw(e.target.value);
+                setPending(null);
+              }}
+              placeholder="Backup password"
+              className={input}
+              autoComplete="off"
+            />
+          )}
+          {importPath && !pending && (
+            <div>
+              <button
+                type="button"
+                className={btn}
+                onClick={doInspect}
+                disabled={importing || !importPw}
+              >
+                {importing ? "Checking…" : "Preview contents"}
+              </button>
+            </div>
+          )}
+          {pending && (
+            <div className="rounded-md border border-border bg-bg-subtle p-3 text-sm">
+              <div className="mb-1.5 font-medium">This backup contains</div>
+              <ul className="mb-2.5 list-inside list-disc text-text-muted">
+                <li>
+                  {pending.profiles} connection profile
+                  {pending.profiles === 1 ? "" : "s"}
+                </li>
+                <li>
+                  {pending.credentials} saved credential
+                  {pending.credentials === 1 ? "" : "s"} (keychain)
+                </li>
+                <li>app settings + state {pending.hasSync ? "+ sync pairs" : ""}</li>
+              </ul>
+              <button
+                type="button"
+                className={danger}
+                onClick={doImport}
+                disabled={importing}
+              >
+                {importing ? "Restoring…" : "Restore & overwrite current data"}
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function ToggleField({
