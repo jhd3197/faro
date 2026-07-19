@@ -47,7 +47,7 @@ thematic detail.
 | 9 | `9_on-demand-virtual-folders` | 🔄 Windows provider built (feature-flagged); Explorer verify left | OneDrive-style placeholders (Plan 2 Phase 3). Large, per-OS, Windows-first. |
 | 10 | `10_faro-cli-agent-dx` | ✅ built (live SSH-box + phone-agent smoke tests left) | faro-cli/Agent-Bridge remote exec/write DX. All six phases in: CLI version-drift + self-update, `agent script`/`--stdin`, `agent write`, MSYS path guard, background/detached jobs (SSH + agent arms), authenticated `fetch`. Independent of the scan foundation. |
 | 11 | `11_terminal-depth-and-snippets` | 🔄 Phases 1, 2, 4 built + runtime-verified (headless mock harness); Phase 3 (agent PTY) deferred — needs a paired phone | Terminal as a first-class surface: instance registry, split panes on one connection, snippets. Biggest everyday-UX win. |
-| 12 | `12_security-settings-and-portability` | ⬜ | Keychain-everything (fix the localStorage API key), settings in `faro.db` + pre-paint injection, structured errors, encrypted backup. Trust fundamentals. |
+| 12 | `12_security-settings-and-portability` | ✅ built (all 4 phases, runtime-verified) | Keychain-everything (fix the localStorage API key), settings in `faro.db` + pre-paint injection, structured errors, encrypted backup. Trust fundamentals. |
 | 13 | `13_remote-previews-and-protocol-depth` | ⬜ | Lazy remote image previews (viewport-budgeted), native drag-out, SCP fallback, port forwarding, Docker SSH E2E fixtures. |
 | 14 | `14_iconify-brand-icons` | ⬜ | Additive brand/protocol logos. Independent polish; do whenever. |
 | 15 | `15_scoped-connection-sharing` | 🅿️ deferred | Blocked on a login/auth foundation. |
@@ -306,7 +306,29 @@ localStorage into **`faro.db` with pre-paint window injection** (one source of
 truth, no theme flash), **structured `{kind, message}` errors** across IPC so
 toasts pattern-match instead of regexing strings, and **encrypted
 backup/restore** (Argon2id + AES-256-GCM container carrying profiles,
-`faro.db`, and all keychain credentials). ⬜
+`faro.db`, and all keychain credentials).
+
+- ✅ **Phase 1 — keychain the API key**: `credentials` module + one-way
+  `set_api_key`/`api_key_status`, `agent.rs` reads the key at call time, a
+  one-time localStorage→keychain migration, and a keychain manifest table so the
+  backup can enumerate secrets. Real Windows Credential Manager round-trip
+  verified.
+- ✅ **Phase 2 — settings in `faro.db`**: `settings` table + commands, the main
+  window built in `setup()` with an `initialization_script` that sets
+  `data-theme` before first paint, store seeds from the injection, one-time
+  localStorage→DB migration (migrate-then-verify). Verified: app boots with the
+  programmatic window; the real DB migrated 22 settings rows.
+- ✅ **Phase 3 — structured errors**: `FaroError {kind, message}` + classifier;
+  `remotefs` file ops + `connect` migrated; frontend `errors.ts` with a
+  kind-keyed `toastError`. Verified via a headless harness
+  (`scripts/verify-errors.mjs`): auth→reconnect, network→check-connection,
+  legacy strings still generic.
+- ✅ **Phase 4 — encrypted backup/restore**: `FAROBAK\x01` container (Argon2id
+  64 MiB + AES-256-GCM, header as AAD), carrying profiles + WAL-safe `faro.db`
+  snapshot + configs + all keychain credentials; staged restore applied at
+  startup; Settings danger-zone UI + `faro-cli backup export|import`. Verified
+  via the real CLI binary (round-trip + real-data export + wrong-password
+  rejection).
 
 ## Track N — Remote previews & protocol depth (Plan 13)
 Headlined by **lazy remote image previews** (a real user ask): global +
