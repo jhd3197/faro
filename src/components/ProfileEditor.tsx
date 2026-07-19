@@ -19,12 +19,9 @@ import {
   type SshKeyType,
 } from "@/lib/types";
 import {
-  ShieldCheck,
   ShieldOff,
-  Terminal as TerminalIcon,
   Cloud,
   Globe,
-  Download,
   Box,
   Eye,
   EyeOff,
@@ -42,6 +39,7 @@ import {
 } from "lucide-react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { cn } from "@/lib/cn";
+import { BrandIcon, protocolIcon } from "@/lib/brandIcons";
 import { generatePassword } from "@/lib/password";
 import { ipc } from "@/lib/ipc";
 import { toast } from "@/stores/toastStore";
@@ -354,6 +352,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
                     key={p}
                     active={protocol === p}
                     onClick={() => onProtocolChange(p)}
+                    protocol={p}
                     label={PROTOCOL_LABEL[p]}
                   />
                 ))}
@@ -1791,13 +1790,14 @@ function protocolHint(p: Protocol): string {
 function ProtocolButton({
   active,
   onClick,
+  protocol,
   label,
 }: {
   active: boolean;
   onClick: () => void;
+  protocol: Protocol;
   label: string;
 }) {
-  const Icon = protocolIcon(label);
   return (
     <button
       type="button"
@@ -1810,24 +1810,21 @@ function ProtocolButton({
           : "text-text-muted hover:bg-bg-hover hover:text-text")
       }
     >
-      <Icon size={14} className={active ? "text-accent" : "text-text-dim"} />
+      {/* Real brand/protocol logo. Colour marks (S3/Azure/Dropbox…) keep their
+          own palette; monochrome glyphs (SSH/FTP/HTTP/lighthouse) follow the
+          button's text colour via currentColor. Fixed 16px slot keeps labels
+          aligned regardless of each mark's aspect ratio. */}
+      <span
+        className={cn(
+          "flex h-4 w-4 shrink-0 items-center justify-center",
+          active ? "text-accent" : "text-text-dim"
+        )}
+      >
+        <BrandIcon icon={protocolIcon(protocol)} size={15} />
+      </span>
       <span className="truncate">{label}</span>
     </button>
   );
-}
-
-function protocolIcon(label: string) {
-  if (label === "FTPS") return ShieldCheck;
-  if (label === "FTP") return ShieldOff;
-  if (label === "S3" || label === "Azure" || label === "GCS") return Cloud;
-  if (label === "WebDAV") return Globe;
-  if (label === "HTTP") return Download;
-  if (label === "Dropbox") return Box;
-  if (label === "OneDrive") return Cloud;
-  if (label === "Google Drive") return Cloud;
-  if (label === "Box") return Box;
-  if (label === "Faro Agent") return MonitorSmartphone;
-  return TerminalIcon;
 }
 
 function Hint({

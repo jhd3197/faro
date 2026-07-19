@@ -12,8 +12,6 @@ import {
   Power,
   Shield,
   X,
-  Cloud,
-  Server,
   HardDrive,
   ChevronsLeft,
   ChevronsRight,
@@ -37,11 +35,11 @@ import { monogram } from "@/lib/format";
 import {
   PROTOCOL_DEFAULT_PORT,
   PROTOCOL_LABEL,
-  isObjectProtocol,
   type ConnectionProfile,
   type Protocol,
 } from "@/lib/types";
 import { cn } from "@/lib/cn";
+import { BrandIcon, protocolIcon } from "@/lib/brandIcons";
 
 type RowState = "focused" | "connected" | "connecting" | "error" | "idle";
 
@@ -933,6 +931,12 @@ function RailBubble({
       )}
     >
       <span style={{ color }}>{monogram(p.name)}</span>
+      {/* Protocol brand mark — a small top-left chip that says "S3 / Azure / SSH
+          / a Faro agent" at a glance. The colour monogram stays the connection's
+          primary identity; this only adds recognizability, never replaces it. */}
+      <span className="absolute -left-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-bg text-text-muted ring-1 ring-border">
+        <BrandIcon icon={protocolIcon(p.protocol)} size={11} />
+      </span>
       <StatusDot
         kind={
           connected
@@ -1381,8 +1385,6 @@ function RailSearch({
           </div>
         ) : (
           results.map((p) => {
-            const isObject = isObjectProtocol(p.protocol);
-            const ProtoIcon = isObject ? Cloud : Server;
             const online = connectedIds.has(p.id);
             return (
               <button
@@ -1394,7 +1396,11 @@ function RailSearch({
                   className="h-2 w-2 shrink-0 rounded-full"
                   style={{ background: p.color || fallbackColor }}
                 />
-                <ProtoIcon size={12} className="shrink-0 text-text-dim" />
+                {/* Real protocol/brand logo (S3, Azure, SSH, the Faro
+                    lighthouse…) instead of a generic cloud/server glyph. */}
+                <span className="flex h-4 w-4 shrink-0 items-center justify-center text-text-dim">
+                  <BrandIcon icon={protocolIcon(p.protocol)} size={14} />
+                </span>
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-[12px] font-medium">{p.name}</div>
                   <div className="truncate font-mono text-[10px] text-text-dim">

@@ -11,6 +11,7 @@
 
 import { Icon } from "@iconify/react/offline";
 import type { Protocol } from "@/lib/types";
+import { cn } from "@/lib/cn";
 import { BRAND_ICONS } from "./brandIconData";
 
 // Protocol → Iconify `prefix:name`. Colour `logos:` marks render in their own
@@ -45,8 +46,9 @@ export function isColorBrandIcon(icon: string): boolean {
 
 /** A thin, offline wrapper over Iconify's `<Icon>`. Renders the curated icon
  *  DATA (never a network name); returns `null` for an unknown key so callers can
- *  fall back to a monogram / lucide glyph. Height-driven so non-square brand
- *  marks keep their aspect ratio — center it inside a fixed box if you need one. */
+ *  fall back to a monogram / lucide glyph. `size` is a square bounding box: a
+ *  non-square brand mark (OneDrive, Azure) is letterboxed inside it via the
+ *  SVG's own `preserveAspectRatio`, so it never distorts or overflows the slot. */
 export function BrandIcon({
   icon,
   size = 16,
@@ -64,8 +66,9 @@ export function BrandIcon({
   return (
     <Icon
       icon={data}
+      width={size}
       height={size}
-      className={className}
+      className={cn("brand-icon", className)}
       role={title ? "img" : undefined}
       aria-label={title}
       aria-hidden={title ? undefined : true}
