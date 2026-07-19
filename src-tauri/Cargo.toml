@@ -31,6 +31,12 @@ tauri-plugin-dialog = "2"
 # instead of launching a second copy; the `deep-link` feature carries the URL.
 tauri-plugin-deep-link = "2"
 tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+# Desktop notifications (Plan 16 Phase 3): OS toasts for a small curated set of
+# events (transfer batch done/failed, folder-sync error, edit-in-place save
+# failure) so they surface when Faro isn't focused. The events are decided +
+# gated frontend-side (focus + the `notifications` setting); this just exposes
+# the OS toast API to the webview.
+tauri-plugin-notification = "2"
 url = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
