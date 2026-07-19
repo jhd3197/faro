@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { ipc } from "@/lib/ipc";
 import { toast } from "./toastStore";
+import { toastError, messageOf } from "@/lib/errors";
 import type { ConnectionProfile, SessionId } from "@/lib/types";
 import { useTerminals } from "./terminalsStore";
 
@@ -104,8 +105,11 @@ export const useConnections = create<ConnectionsState>((set, get) => ({
           : undefined
       );
     } catch (e) {
-      set({ connecting: false, error: String(e) });
-      toast.error("Connection failed", profile ? `${profile.name}: ${e}` : String(e));
+      // `connect` returns a structured {kind, message} error (Plan 12 Phase 3),
+      // so the toast is keyed off the kind (auth → reconnect, network → check
+      // connection, …) instead of regexing the message.
+      set({ connecting: false, error: messageOf(e) });
+      toastError(e, profile ? `Couldn't connect to ${profile.name}` : "Connection failed");
       throw e;
     }
   },

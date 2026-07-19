@@ -1,4 +1,5 @@
 use crate::agent::ChatRequest;
+use crate::error::{ErrorKind, FaroError};
 use crate::profiles::{AuthMethod, ConnectionProfile};
 use crate::remotefs::{Capabilities, DirEntry, RemoteFs};
 use crate::session::{HostDecision, JobHandle, Session, SshSession};
@@ -116,14 +117,20 @@ pub async fn connect(
     profile_id: String,
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<String, String> {
+) -> Result<String, FaroError> {
     let profile = state
         .profiles
         .get(&profile_id)
         .await
-        .map_err(err)?
-        .ok_or_else(|| format!("profile {profile_id} not found"))?;
-    let session_id = state.sessions.connect(profile, app).await.map_err(err)?;
+        .map_err(FaroError::from)?
+        .ok_or_else(|| {
+            FaroError::new(ErrorKind::NotFound, format!("profile {profile_id} not found"))
+        })?;
+    let session_id = state
+        .sessions
+        .connect(profile, app)
+        .await
+        .map_err(FaroError::from)?;
     // Re-apply a previously-granted Agent Bridge access for this profile (session
     // ids are per-connect, so the bridge tracks the persistent grant by profile).
     state
@@ -768,9 +775,9 @@ pub async fn rename_path(
     from: String,
     to: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<(), FaroError> {
     let fs = fs_for(&session_id, &state).await?;
-    fs.rename(&from, &to).await.map_err(err)
+    fs.rename(&from, &to).await.map_err(FaroError::from)
 }
 
 #[tauri::command]
@@ -779,9 +786,9 @@ pub async fn delete_path(
     path: String,
     recursive: bool,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<(), FaroError> {
     let fs = fs_for(&session_id, &state).await?;
-    fs.delete(&path, recursive).await.map_err(err)
+    fs.delete(&path, recursive).await.map_err(FaroError::from)
 }
 
 #[tauri::command]
@@ -789,9 +796,9 @@ pub async fn create_directory(
     session_id: String,
     path: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<(), FaroError> {
     let fs = fs_for(&session_id, &state).await?;
-    fs.create_dir(&path).await.map_err(err)
+    fs.create_dir(&path).await.map_err(FaroError::from)
 }
 
 #[tauri::command]
@@ -800,9 +807,9 @@ pub async fn chmod_path(
     path: String,
     mode: u32,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<(), FaroError> {
     let fs = fs_for(&session_id, &state).await?;
-    fs.chmod(&path, mode).await.map_err(err)
+    fs.chmod(&path, mode).await.map_err(FaroError::from)
 }
 
 // ---------- Duplicate ----------

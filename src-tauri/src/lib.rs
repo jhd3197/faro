@@ -14,6 +14,7 @@ pub mod credentials;
 pub mod db;
 mod deeplink;
 pub mod diff;
+pub mod error;
 mod diskscan;
 mod editor;
 mod foldersync;

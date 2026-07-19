@@ -118,6 +118,18 @@ interface Props {
   reloadToken?: number;
 }
 
+/** Extract a human message from any thrown value. Transport backends may reject
+ *  with a structured `{ kind, message }` object (Faro's Tauri commands do); those
+ *  would otherwise stringify to "[object Object]" in the error banner. */
+function errorText(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e && typeof e === "object" && typeof (e as { message?: unknown }).message === "string") {
+    return (e as { message: string }).message;
+  }
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
 type ModalState =
   | { type: "rename"; entry: DirEntry }
   | { type: "mkdir" }
@@ -210,7 +222,7 @@ export function FilePane({
         setSelected(new Set());
         setAnchor(null);
       } catch (e) {
-        setError(String(e));
+        setError(errorText(e));
       } finally {
         setLoading(false);
       }
@@ -520,7 +532,7 @@ export function FilePane({
           icon: <ExternalLink size={12} />,
           onClick: () => {
             fs.editFile!(sessionId!, single.path).catch((e) =>
-              setError(String(e))
+              setError(errorText(e))
             );
           },
         });
@@ -543,14 +555,14 @@ export function FilePane({
               onClick: () =>
                 fs
                   .archive!(sessionId!, single.path, "tar.gz")
-                  .catch((e) => setError(String(e))),
+                  .catch((e) => setError(errorText(e))),
             },
             {
               label: "Zip archive (.zip)",
               onClick: () =>
                 fs
                   .archive!(sessionId!, single.path, "zip")
-                  .catch((e) => setError(String(e))),
+                  .catch((e) => setError(errorText(e))),
             },
           ],
         });
@@ -568,7 +580,7 @@ export function FilePane({
           onClick: () =>
             fs
               .openTerminal!(sessionId!, single.path)
-              .catch((e) => setError(String(e))),
+              .catch((e) => setError(errorText(e))),
         });
       }
       // Analyze disk usage under this folder (treemap + size breakdown). Works
@@ -581,7 +593,7 @@ export function FilePane({
             sessionId &&
             fs
               .analyzeDiskUsage!(sessionId, single.path)
-              .catch((e) => setError(String(e))),
+              .catch((e) => setError(errorText(e))),
         });
       }
       // Compare this folder against another tree (Meld-style side-by-side diff).
@@ -594,7 +606,7 @@ export function FilePane({
             sessionId &&
             fs
               .compareDirectory!(sessionId, single.path)
-              .catch((e) => setError(String(e))),
+              .catch((e) => setError(errorText(e))),
         });
       }
       // Search this folder by name or content (Spotlight/grep over the backend).
@@ -607,7 +619,7 @@ export function FilePane({
             sessionId &&
             fs
               .searchDirectory!(sessionId, single.path)
-              .catch((e) => setError(String(e))),
+              .catch((e) => setError(errorText(e))),
         });
       }
       // Duplicate needs a server-side copy (cp over SSH) or local fs copy; object
@@ -704,7 +716,7 @@ export function FilePane({
       await fs.rename(sessionId, entry.path, to);
       await load(path);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -716,7 +728,7 @@ export function FilePane({
       }
       await load(path);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -726,7 +738,7 @@ export function FilePane({
       await fs.duplicate(sessionId, entry.path, entry.kind);
       await load(path);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -736,7 +748,7 @@ export function FilePane({
       await fs.mkdir(sessionId, joinPath(path, name));
       await load(path);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -751,7 +763,7 @@ export function FilePane({
       await fs.chmod(sessionId, entry.path, mode);
       await load(path);
     } catch (e) {
-      setError(String(e));
+      setError(errorText(e));
     }
   };
 
@@ -862,7 +874,7 @@ export function FilePane({
               sessionId &&
               fs
                 .analyzeDiskUsage!(sessionId, path)
-                .catch((e) => setError(String(e)))
+                .catch((e) => setError(errorText(e)))
             }
             disabled={!sessionId}
             className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"
@@ -877,7 +889,7 @@ export function FilePane({
               sessionId &&
               fs
                 .searchDirectory!(sessionId, path)
-                .catch((e) => setError(String(e)))
+                .catch((e) => setError(errorText(e)))
             }
             disabled={!sessionId}
             className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"

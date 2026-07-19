@@ -76,8 +76,27 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       return null;
     }
 
+    // ---- settings + credentials (Plan 12) ----
+    case "settings_get_all":
+      return {};
+    case "settings_set":
+    case "settings_set_all":
+    case "set_api_key":
+      return null;
+    case "api_key_status":
+      return false;
+
     // ---- sessions ----
     case "connect":
+      // Test hooks (Plan 12 Phase 3): sentinel ids reject like a migrated
+      // command — a structured {kind, message} error, exactly as Tauri delivers
+      // one. Drives scripts/verify-errors.mjs.
+      if (a.profileId === "__auth_fail__")
+        throw { kind: "auth", message: "Authentication failed for user demo" };
+      if (a.profileId === "__net_fail__")
+        throw { kind: "network", message: "Connection refused (os error 111)" };
+      if (a.profileId === "__str_fail__")
+        throw "legacy string error: something broke"; // un-migrated command shape
       return data.openSession(a.profileId);
     case "disconnect":
       data.closeSession(a.sessionId);
