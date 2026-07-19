@@ -96,6 +96,21 @@ const MIGRATIONS: &[&str] = &[
         created_ms INTEGER NOT NULL,
         used_ms    INTEGER NOT NULL
     ) WITHOUT ROWID;",
+    // v6 — environment-value backup (Plan 16 Phase 4, one-click PATH install).
+    // Before the *first* time we append Faro's bin dir to the per-user Windows
+    // `Path` (HKCU\Environment), we snapshot the exact prior value here so a later
+    // "Remove from PATH" can restore it faithfully — including its registry value
+    // type (REG_EXPAND_SZ must stay REG_EXPAND_SZ). `raw_value` is the value as a
+    // UTF-8 string (NULL if the value was absent); `vtype` is the winreg RegType
+    // discriminant so we rewrite with the original type. One row per key
+    // ('windows_user_path' today). Insert-once semantics preserve the true
+    // original across repeated add/remove cycles.
+    "CREATE TABLE env_backup (
+        key          TEXT PRIMARY KEY,
+        raw_value    TEXT,
+        vtype        INTEGER NOT NULL,
+        backed_up_ms INTEGER NOT NULL
+    ) WITHOUT ROWID;",
 ];
 
 /// A persisted per-file sync record — what the source looked like the last time
@@ -373,6 +388,41 @@ impl Db {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
         Ok(())
+    }
+
+    // ---- Environment-value backup (Plan 16 Phase 4, PATH install) ----
+
+    /// Snapshot the prior environment value **once**, before Faro's first write.
+    /// Idempotent: a second call with the same `key` is a no-op, so the stored
+    /// value always reflects the true pre-Faro state across add/remove cycles.
+    /// `vtype` is the winreg `RegType` discriminant; `raw_value` is `None` when the
+    /// value didn't exist yet.
+    pub fn env_backup_set_once(
+        &self,
+        key: &str,
+        raw_value: Option<&str>,
+        vtype: u32,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR IGNORE INTO env_backup (key, raw_value, vtype, backed_up_ms)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![key, raw_value, vtype, now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// The backed-up `(raw_value, vtype)` for `key`, or `None` if never captured.
+    pub fn env_backup_get(&self, key: &str) -> Result<Option<(Option<String>, u32)>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT raw_value, vtype FROM env_backup WHERE key = ?1",
+                [key],
+                |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)? as u32)),
+            )
+            .ok();
+        Ok(row)
     }
 
     /// Write a consistent, fully-checkpointed snapshot of the database to
@@ -679,6 +729,30 @@ mod tests {
         cleared.sort();
         assert_eq!(cleared, vec!["k1".to_string(), "k3".to_string()]);
         assert!(!db.thumb_touch("k1").unwrap());
+    }
+
+    #[test]
+    fn env_backup_captures_once() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(db.env_backup_get("windows_user_path").unwrap().is_none());
+
+        // First capture wins and sticks.
+        db.env_backup_set_once("windows_user_path", Some("C:\\A;C:\\B"), 2)
+            .unwrap();
+        // A second capture (after Faro already modified PATH) must NOT overwrite —
+        // the backup has to stay the true pre-Faro value.
+        db.env_backup_set_once("windows_user_path", Some("C:\\A;C:\\B;C:\\Faro\\bin"), 2)
+            .unwrap();
+
+        let (val, vtype) = db.env_backup_get("windows_user_path").unwrap().unwrap();
+        assert_eq!(val.as_deref(), Some("C:\\A;C:\\B"));
+        assert_eq!(vtype, 2);
+
+        // A NULL prior value (the value didn't exist) round-trips as None.
+        db.env_backup_set_once("other_key", None, 1).unwrap();
+        let (val, vtype) = db.env_backup_get("other_key").unwrap().unwrap();
+        assert_eq!(val, None);
+        assert_eq!(vtype, 1);
     }
 
     #[test]

@@ -134,6 +134,15 @@ rand = "0.8"
 # the unsafe surface tiny for code that can only be verified manually in Explorer.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# One-click "Add faro-cli to PATH" (Plan 16 Phase 4). After writing the per-user
+# Path under HKCU\Environment we broadcast WM_SETTINGCHANGE("Environment") so new
+# terminals pick it up without a logoff — that's the only Win32 call we need, so
+# the lightweight `windows-sys` FFI crate (already in the tree transitively) is
+# enough; no need for the heavier `windows` wrapper.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }
 # cloud-filter drives the hard part (connect + placeholders + hydration
 # callbacks over cldapi). The `windows` crate (same 0.58 cloud-filter pulls) is
 # used ONLY for `CfRegisterSyncRoot`/`CfUnregisterSyncRoot`, because the WinRT

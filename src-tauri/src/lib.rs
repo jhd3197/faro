@@ -23,6 +23,7 @@ pub mod importers;
 pub mod keys;
 mod known_hosts;
 pub mod oauth;
+mod path_integration;
 mod preview;
 pub mod profiles;
 pub mod remotefs;
@@ -327,6 +328,9 @@ pub fn run() {
             cli_updater::cli_updater_check,
             cli_updater::cli_updater_update,
             cli_updater::cli_updater_set_mode,
+            path_integration::path_status,
+            path_integration::path_add,
+            path_integration::path_remove,
             foldersync::foldersync_list,
             foldersync::foldersync_upsert,
             foldersync::foldersync_remove,
