@@ -49,8 +49,11 @@ thematic detail.
 | 11 | `11_terminal-depth-and-snippets` | 🔄 Phases 1, 2, 4 built + runtime-verified (headless mock harness); Phase 3 (agent PTY) deferred — needs a paired phone | Terminal as a first-class surface: instance registry, split panes on one connection, snippets. Biggest everyday-UX win. |
 | 12 | `12_security-settings-and-portability` | ✅ built (all 4 phases, runtime-verified) | Keychain-everything (fix the localStorage API key), settings in `faro.db` + pre-paint injection, structured errors, encrypted backup. Trust fundamentals. |
 | 13 | `13_remote-previews-and-protocol-depth` | 🔄 Phase 1 shipped + verified; Phase 3 protocol foundation landed | Lazy remote image previews (viewport-budgeted) done. Native drag-out, SCP browse/UI, port forwarding, Docker SSH E2E fixtures remain. |
-| 14 | `14_iconify-brand-icons` | ⬜ | Additive brand/protocol logos. Independent polish; do whenever. |
-| 15 | `15_scoped-connection-sharing` | 🅿️ deferred | Blocked on a login/auth foundation. |
+| 14 | `14_iconify-brand-icons` | ✅ Phases 1–3 shipped + runtime-verified (Phase 4 consolidation deferred) | Additive brand/protocol logos, bundled offline. |
+| 15 | `15_keyboard-shortcuts` | ⬜ | Remappable shortcuts + Settings Keyboard tab + file-browser keys (F2 rename & friends). Builds on the Plan 12 settings substrate. Independent polish; do whenever. |
+| 16 | `16_app-updater-and-notifications` | ⬜ | In-app auto-updater (signed, GitHub Releases manifest) + desktop notifications + one-click per-user PATH install. Trust/UX fundamentals for a shipping app. |
+| 17 | `17_transfer-queue-depth` | ⬜ | Real queue (bounded concurrency), pause/resume, retry, bandwidth throttle. Turns the transfer list into an actual queue. |
+| 99 | `99_scoped-connection-sharing` | 🚫 out of scope | Pulled from the numbered order; slated for removal. Design notes kept on file only. |
 
 Cross-project **Track D** (ServerKit ↔ Faro) has no plan file — it's a
 convergence effort tracked only in the Track section below.
@@ -177,10 +180,13 @@ Iconify, bundled offline. Deliberately does **not** touch the file-type icons
 UI icons.
 
 - ✅ Files already use Material Icon Theme; UI uses lucide. *(shipped/present)*
-- ⬜ **Phase 1–2** — Iconify offline foundation + protocol logos on the rail,
+- ✅ **Phase 1–2** — Iconify offline foundation + protocol logos on the rail,
   connection list, and New-Connection picker (logo *plus* the colour monogram).
-- ⬜ Phase 3 — tech badges elsewhere. ⬜ Phase 4 — (deferred) evaluate
-  consolidating lucide UI icons onto Iconify.
+  Curated 25-icon offline subset (`gen-brand-icons.mjs`); the build carries zero
+  `api.iconify.design` references. Verified headlessly (`verify-brand-icons.mjs`).
+- ✅ Phase 3 — vendor logos brand the S3/WebDAV provider presets (Cloudflare,
+  Backblaze, DigitalOcean, Oracle, IBM, Supabase, Nextcloud…). ⬜ Phase 4 —
+  (deferred) evaluate consolidating lucide UI icons onto Iconify.
 
 ## Track F — Disk Usage Explorer (Plan 4)
 
@@ -362,11 +368,46 @@ persisted rules + presets, and **Docker SSH E2E fixtures** (bastion / SCP-only
 - ⬜ **Phase 4** — port forwarding (persisted `forward_rules` + DB presets).
 - ⬜ **Phase 5** — Docker SSH E2E fixtures (bastion / SCP-only busybox / sudo).
 
-## Track J — Scoped connection sharing (Plan 15) — DEFERRED
-Share a box read-only / path-jailed / time-boxed. **Parked until a login/auth
-foundation exists** — the real use case (remote employee, link-based) needs auth
-regardless, so we hold the whole track rather than ship the LAN-only half. The
-scoped-grant model remains the permission backbone once login lands. 🅿️
+## Track J — Scoped connection sharing (Plan 99, was 15) — OUT OF SCOPE
+Share a box read-only / path-jailed / time-boxed. **Pulled from the numbered
+build order and slated for removal** — not being built any time soon (it was
+blocked on a login/auth foundation regardless). The plan file survives at
+`99_scoped-connection-sharing.md` for its design notes only; do not schedule
+work against it. 🚫
+
+## Track O — Keyboard shortcuts & remapping (Plan 15)
+Every app's expected shortcut surface: turn the hardcoded command-registry
+combos (`src/lib/commands.tsx`) into **data** — defaults + user overrides in
+`faro.db` (Plan 12's settings table, pre-paint injection) — with a **Settings →
+Keyboard tab** (searchable command list, click-to-record capture, conflict
+detection, reset). Then teach the dispatcher (`src/hooks/useShortcuts.ts`) about
+**non-modifier keys** with input-focus guards so `F2` rename, `Enter` open,
+`Delete`, `Backspace` go-up work in the file browser, and make the terminal
+chords (`terminalChords.ts`) remappable too. Independent polish; pairs naturally
+with Plan 14 (icons) as a UX-polish batch. ⬜
+
+## Track P — App updater, notifications & PATH install (Plan 16)
+The app at v1.3.22 has no self-update path (Plan 10 only covered `faro-cli`),
+no OS notifications, and no PATH integration (`install_missing` downloads the
+CLI and tells the user to wire PATH by hand). Add `tauri-plugin-updater` with
+**signed** artifacts + a GitHub Releases `latest.json` (check on launch,
+Settings → About "Check for updates", download-progress → restart),
+`tauri-plugin-notification` for a small curated set (transfer batch
+done/failed, sync error, edit-in-place save failure) behind an
+unfocused-only-by-default toggle, and a **one-click "Add faro-cli to PATH"**
+at the per-user level — `HKCU\Environment` on Windows (no admin needed; `setx`
+banned for its 1024-char truncation), `~/.local/bin` + a marker-guarded shell
+profile line elsewhere — with add/status/remove. Key custody is the main
+updater risk; PATH writes keep a `faro.db` backup so remove = restore. ⬜
+
+## Track Q — Transfer queue depth (Plan 17)
+`TransferManager` spawns every transfer immediately — `Queued` is a label, not a
+queue; `cancel` is the only control. Turn it into a real queue: bounded
+concurrency (semaphore + FIFO, reorderable), per-transfer pause/resume
+(park at a chunk boundary, resume re-runs the file), manual + classified
+auto-retry (Plan 12 error kinds), and a global token-bucket bandwidth throttle.
+All checkpoints live in the *shared* copy loops so the 11 backends get it for
+free. Panel gains pause/retry row actions, pause-all, and a throttle input. ⬜
 
 ## Near-term quick wins (small, high-value)
 - **Editable permissions dialog** — today Properties *shows* mode read-only; add
@@ -407,7 +448,7 @@ mirror.
    foundation, so it can slot in here — and its **Phase 0 (CLI version-drift
    check + update, exec-ceiling fix) is a live pain point that can be pulled
    forward at any time.** Ships before the polish/deferred plans (iconify #14,
-   scoped sharing #15).
+   keyboard shortcuts #15).
 8. **Track M — Security, settings & portability (Plan 12).** Trust
    fundamentals; the localStorage API-key fix is small and should land early.
 9. **Track L — Terminal depth & snippets (Plan 11).** The biggest everyday-UX
