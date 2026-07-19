@@ -129,23 +129,21 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
   },
 
   closeTab: (id) => {
-    set((s) => {
-      const idx = s.tabs.findIndex((t) => t.id === id);
-      if (idx === -1) return s;
-      // Store-driven disposal: tear down every pane the tab owned.
-      for (const paneId of leafIds(s.tabs[idx].root)) disposePane(paneId);
-      const tabs = s.tabs.filter((t) => t.id !== id);
-      let activeId = s.activeId;
-      if (s.activeId === id) {
-        const sessionId = s.tabs[idx].sessionId;
-        const sibling =
-          tabs.filter((t) => t.sessionId === sessionId).pop() ??
-          tabs[tabs.length - 1] ??
-          null;
-        activeId = sibling ? sibling.id : null;
-      }
-      return { tabs, activeId };
-    });
+    const s = get();
+    const tab = s.tabs.find((t) => t.id === id);
+    if (!tab) return;
+    // Store-driven disposal: tear down every pane the tab owned.
+    for (const paneId of leafIds(tab.root)) disposePane(paneId);
+    const tabs = s.tabs.filter((t) => t.id !== id);
+    let activeId = s.activeId;
+    if (s.activeId === id) {
+      const sibling =
+        tabs.filter((t) => t.sessionId === tab.sessionId).pop() ??
+        tabs[tabs.length - 1] ??
+        null;
+      activeId = sibling ? sibling.id : null;
+    }
+    set({ tabs, activeId });
   },
 
   setActive: (id) => set({ activeId: id }),
@@ -155,16 +153,16 @@ export const useTerminals = create<TerminalsState>((set, get) => ({
       tabs: s.tabs.map((t) => (t.id === id ? { ...t, title } : t)),
     })),
 
-  dropSessionTabs: (sessionId) =>
-    set((s) => {
-      for (const t of s.tabs) {
-        if (t.sessionId === sessionId)
-          for (const paneId of leafIds(t.root)) disposePane(paneId);
-      }
-      const tabs = s.tabs.filter((t) => t.sessionId !== sessionId);
-      const activeStillThere = tabs.some((t) => t.id === s.activeId);
-      return { tabs, activeId: activeStillThere ? s.activeId : tabs[0]?.id ?? null };
-    }),
+  dropSessionTabs: (sessionId) => {
+    const s = get();
+    for (const t of s.tabs) {
+      if (t.sessionId === sessionId)
+        for (const paneId of leafIds(t.root)) disposePane(paneId);
+    }
+    const tabs = s.tabs.filter((t) => t.sessionId !== sessionId);
+    const activeStillThere = tabs.some((t) => t.id === s.activeId);
+    set({ tabs, activeId: activeStillThere ? s.activeId : tabs[0]?.id ?? null });
+  },
 
   splitActivePane: (tabId, dir) =>
     set((s) => ({
