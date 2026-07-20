@@ -50,6 +50,11 @@ docs/plans/prompt.md
 # the global *.png rule above; listed explicitly so the intent is clear).
 docs/screenshots/*.png
 
+# …except the README poster and the funding QR codes — these are real
+# committed assets (same as ServerKit).
+!docs/screenshots/poster.png
+!docs/images/funding/*.png
+
 # Tauri updater signing key (Plan 16) — PRIVATE key, never commit. Belongs in
 # CI secret TAURI_SIGNING_PRIVATE_KEY. See docs/updater-key-custody.md.
 .updater/
