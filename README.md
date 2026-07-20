@@ -1,122 +1,44 @@
 <div align="center">
 
-<img width="800" alt="faro" src="https://github.com/user-attachments/assets/52c5a6d3-7967-45e0-be0c-f861bd8f5b0d" />
-
+<img width="100%" alt="Faro — Modern file access for servers and cloud" src="docs/screenshots/poster.png" />
 
 # Faro
 
 **A modern desktop client for SFTP, FTP, SSH, S3-compatible, WebDAV, and cloud storage.**
 
-[![Version](https://img.shields.io/badge/version-1.3.25-8b7ff6?style=flat-square)](https://github.com/jhd3197/faro/releases)
-[![License](https://img.shields.io/badge/license-MIT-8b7ff6?style=flat-square)](LICENSE)
-[![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-8b7ff6?style=flat-square)](https://tauri.app)
+Save a server once, then browse its files in a dual-pane view and open a terminal
+against the same session — plus an **Agent Bridge** that lets Claude Code (or any
+MCP agent) run commands on a box through your authenticated session, with
+per-command approval and zero credentials shared.
 
-*Servers · storage · sessions, all in one workspace.*
+English | [Español](docs/README.es.md) | [中文版](docs/README.zh-CN.md) | [Português](docs/README.pt.md)
 
-**🤖 New — [Agent Bridge](#-agent-bridge): hand a live server to Claude Code (or any MCP agent) — through your authenticated session, with per-command approval, and zero credentials shared.**
+<br>
+
+![Windows](https://img.shields.io/badge/Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white)
+![macOS](https://img.shields.io/badge/macOS-000000?style=for-the-badge&logo=apple&logoColor=white)
+![Linux](https://img.shields.io/badge/Linux-FCC624?style=for-the-badge&logo=linux&logoColor=black)
+[![Discord](https://img.shields.io/discord/1470639209059455008?style=for-the-badge&logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.gg/ZKk6tkCQfG)
+
+[![GitHub Stars](https://img.shields.io/github/stars/jhd3197/faro?style=flat-square&color=f5c542)](https://github.com/jhd3197/faro/stargazers)
+[![Downloads](https://img.shields.io/github/downloads/jhd3197/faro/total?style=flat-square)](https://github.com/jhd3197/faro/releases)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
+[![Version](https://img.shields.io/badge/version-1.3.25-8b7ff6.svg?style=flat-square)](https://github.com/jhd3197/faro/releases)
+[![Tauri](https://img.shields.io/badge/tauri-2-24C8D8.svg?style=flat-square&logo=tauri&logoColor=white)](https://tauri.app)
+[![Rust](https://img.shields.io/badge/rust-1.88+-DEA584.svg?style=flat-square&logo=rust&logoColor=black)](https://rust-lang.org)
+[![React](https://img.shields.io/badge/react-18-61DAFB.svg?style=flat-square&logo=react&logoColor=black)](https://reactjs.org)
+
+<br>
+
+[Download](#-quick-start) · [Screenshots](#-screenshots) · [Features](#-features) · [Agent Bridge](#-agent-bridge) · [Architecture](#-architecture) · [Roadmap](#-roadmap) · [Docs](#-documentation) · [Contributing](#-contributing) · [Discord](#-community)
 
 </div>
 
 ---
 
-## What it is
+## 🚀 Quick Start
 
-Faro is what you'd get if you let FileZilla, PuTTY, and a half-dozen cloud-storage browsers share one window and one connection list. Save a server once, open its files in the dual-pane browser and a terminal tab against the same SSH session, drag-and-drop transfers between sides, keep a folder continuously synced, edit remote files in your local editor with auto-upload on save — and run all of the same operations from a CLI when you don't feel like clicking.
-
-One connection list now spans **thirteen backends** — SFTP, FTP/FTPS, S3 (with presets for AWS, R2, B2, Wasabi, and a dozen more), Azure Blob, Google Cloud Storage, WebDAV, read-only HTTP, the Dropbox / OneDrive / Google Drive / Box clouds, and Faro's own paired **[Agent](#-faro-agent--control-another-machine)** — all behind one `RemoteFs` trait, so browse, transfer, sync, and the [disk-usage, diff, and search](#-explore-diff-and-search-any-backend) tools work the same on every one.
-
-And when you want an AI agent to actually *do* something on a box, the **[Agent Bridge](#-agent-bridge)** lets it run commands through the session you already opened — no remote install, no keys handed over, every command gated behind your approval.
-
-<!-- FARO:SHOTS:START -->
-## 📸 Screenshots
-
-> Captured from a mock-data build — every hostname, IP, username, and path below is fictional. See [`docs/screenshots/CAPTURE.md`](docs/screenshots/CAPTURE.md) for the shot list and how to reproduce them.
-
-<details open>
-<summary><strong>Dual-pane browser</strong> — Local and remote side by side, drag-and-drop transfers between them</summary>
-
-![Dual-pane browser](docs/screenshots/overview.png)
-
-</details>
-
-<details open>
-<summary><strong>Disk Usage Explorer</strong> — a WinDirStat-style treemap over <em>any</em> backend, with a size-ranked list and a server-side <code>du</code>/<code>find</code> fast path</summary>
-
-![Disk Usage Explorer](docs/screenshots/disk-usage.png)
-
-</details>
-
-<details>
-<summary><strong>Server rail</strong> — Discord-style connection bubbles, with an expandable labeled mode for spotting servers fast</summary>
-
-![Server rail](docs/screenshots/server-rail.png)
-
-</details>
-
-<details>
-<summary><strong>Integrated terminal</strong> — A real SSH shell tab against the same session you're browsing</summary>
-
-![Integrated terminal](docs/screenshots/terminal.png)
-
-</details>
-
-<details>
-<summary><strong>File actions</strong> — Right-click for duplicate, properties, "download folder as .tar.gz/.zip", and "open terminal here"</summary>
-
-![File actions context menu](docs/screenshots/context-menu.png)
-
-</details>
-
-<details>
-<summary><strong>Transfers</strong> — Queued downloads/uploads with progress and FileZilla-style overwrite prompts</summary>
-
-![Transfers panel](docs/screenshots/transfers.png)
-
-</details>
-
-<details>
-<summary><strong>Directory sync</strong> — Preview a one-way sync plan before anything moves</summary>
-
-![Directory sync](docs/screenshots/sync.png)
-
-</details>
-
-<details>
-<summary><strong>Agent Bridge</strong> — Approve (or auto-approve) each command an AI agent runs on a live session</summary>
-
-The headline feature: lend an AI agent your *already-authenticated* SSH session over a guarded localhost endpoint — no remote install, no keys shared, every command gated behind your approval.
-
-![Agent Bridge panel](docs/screenshots/agent-bridge.png)
-
-When an agent asks to run something, Faro prompts you with the exact command before anything touches the server:
-
-![Agent Bridge approval prompt](docs/screenshots/agent-bridge-approve.png)
-
-</details>
-
-<details>
-<summary><strong>S3 / object storage</strong> — Browse buckets like a filesystem alongside your SFTP and FTP servers</summary>
-
-![Object storage](docs/screenshots/object-storage.png)
-
-</details>
-
-<details>
-<summary><strong>New connection</strong> — One profile editor for all thirteen backends, with the protocol picker grouped in a rail so the list scales</summary>
-
-![New connection](docs/screenshots/new-connection.png)
-
-</details>
-
-<details>
-<summary><strong>Settings</strong> — Themes, terminal behavior (copy-on-select, scrollback), transfers, and the default editor</summary>
-
-![Settings](docs/screenshots/settings.png)
-
-</details>
-<!-- FARO:SHOTS:END -->
-
-## Download
+> ⏱️ Download, connect, transfer — in under a minute
 
 Grab the latest installer from the [**Releases**](https://github.com/jhd3197/faro/releases/latest) page — every push to `main` publishes fresh builds for all three desktop platforms plus the standalone `faro-cli`.
 
@@ -136,6 +58,98 @@ Builds are **unsigned** (no Apple Developer / Windows EV certificate yet), so ea
 - **Windows** — on the *"Windows protected your PC"* prompt, click **More info → Run anyway**.
 
 > Prefer to build from source? See [Develop](#develop) below.
+
+<!-- FARO:SHOTS:START -->
+## 📸 Screenshots
+
+> Captured from a mock-data build — every hostname, IP, username, and path below is fictional. See [`docs/screenshots/CAPTURE.md`](docs/screenshots/CAPTURE.md) for the shot list and how to reproduce them.
+
+|                          Dual-pane browser                          |                          Disk Usage Explorer                          |
+| :-----------------------------------------------------------------: | :-------------------------------------------------------------------: |
+|        ![Dual-pane browser](docs/screenshots/overview.png)          |       ![Disk Usage Explorer](docs/screenshots/disk-usage.png)         |
+| _Local and remote side by side, drag-and-drop transfers between them_ | _WinDirStat-style treemap over any backend, with a server-side fast path_ |
+
+|                             Server rail                             |                        Integrated terminal                        |
+| :-----------------------------------------------------------------: | :---------------------------------------------------------------: |
+|          ![Server rail](docs/screenshots/server-rail.png)           |          ![Integrated terminal](docs/screenshots/terminal.png)          |
+| _Discord-style connection bubbles, with an expandable labeled mode_ | _A real SSH shell tab against the same session you're browsing_ |
+
+|                             Agent Bridge                             |                          Object storage                          |
+| :------------------------------------------------------------------: | :--------------------------------------------------------------: |
+|        ![Agent Bridge](docs/screenshots/agent-bridge.png)        |        ![Object storage](docs/screenshots/object-storage.png)        |
+| _Approve (or auto-approve) each command an AI agent runs on a live session_ | _Browse S3 buckets like a filesystem alongside your SFTP servers_ |
+
+|                             Transfers                             |                          Directory sync                          |
+| :---------------------------------------------------------------: | :--------------------------------------------------------------: |
+|          ![Transfers panel](docs/screenshots/transfers.png)          |            ![Directory sync](docs/screenshots/sync.png)            |
+| _Queued downloads/uploads with progress and overwrite prompts_ | _Preview a one-way sync plan before anything moves_ |
+
+<details>
+<summary><strong>View all screenshots</strong></summary>
+
+<br>
+
+|                          File actions                          |                       Agent Bridge approval                        |
+| :------------------------------------------------------------: | :----------------------------------------------------------------: |
+| ![File actions context menu](docs/screenshots/context-menu.png) | ![Agent Bridge approval prompt](docs/screenshots/agent-bridge-approve.png) |
+| _Duplicate, properties, "download folder as .tar.gz/.zip", "open terminal here"_ | _Every agent command prompts with the exact command before it runs_ |
+
+|                          New connection                          |                             Settings                             |
+| :--------------------------------------------------------------: | :--------------------------------------------------------------: |
+|      ![New connection](docs/screenshots/new-connection.png)      |          ![Settings](docs/screenshots/settings.png)          |
+| _One profile editor for all thirteen backends, protocol picker in a rail_ | _Themes, terminal behavior, transfers, and the default editor_ |
+
+</details>
+<!-- FARO:SHOTS:END -->
+
+## 🎯 Features
+
+> **One connection list, thirteen backends.** Browse, transfer, sync, and the disk-usage / diff / search tools work the same on every one — all behind a single `RemoteFs` trait.
+
+### 📡 Backends & Storage
+
+| | |
+|---|---|
+| **SFTP / FTP / FTPS**<br>The classics, done right — one SSH session shared between the file browser and the terminal pane. | **S3-compatible**<br>Presets for AWS, Cloudflare R2, Backblaze B2, Wasabi, DigitalOcean Spaces, MinIO, Storj, Hetzner, Scaleway, Oracle OCI, IBM COS, Supabase, and generic self-hosted (Ceph RGW, Garage, SeaweedFS). |
+| **Azure Blob & Google Cloud Storage**<br>First-class object storage alongside your servers. | **WebDAV & HTTP(S)**<br>Nextcloud / ownCloud browsing, plus read-only HTTP autoindex and direct-URL sources. |
+| **Cloud drives**<br>Dropbox, OneDrive, Google Drive, and Box — loopback + PKCE OAuth, only the refresh token in your OS keychain. | **Faro Agent**<br>Faro's own paired agent as a backend — browse, transfer, and exec on a machine with no SSH server. |
+
+### 🔁 Transfers & Sync
+
+| | |
+|---|---|
+| **Drag-and-drop transfers**<br>Between panes, recursive directories, multi-select, overwrite/skip/rename policies, multipart upload for objects > 16 MB. | **Directory sync**<br>Preview a one-way plan (Additive or Mirror), then run it — on any two backends. |
+| **Continuous folder sync**<br>Attach a local folder to a remote path and it stays mirrored — watcher + poll reconciler, exclude patterns, mirror-delete cap. | **Edit in place**<br>Open a remote file in your local editor; auto-upload on every save, with a live status-bar pill. |
+
+### 🔎 Explore, Diff & Search
+
+| | |
+|---|---|
+| **Disk Usage Explorer**<br>WinDirStat/WizTree-style treemap + size-ranked tree over any backend, with a shell `du`/`find` fast path. | **Directory Diff**<br>Meld/Beyond-Compare for any two backends — including **remote ↔ remote** (staging vs prod, two buckets). Compare by size or `--hash`. |
+| **Fleet Search**<br>Find by name or content — `rg`/`grep` server-side on SSH and Agent servers, flat key listing on buckets. | **CLI parity**<br>All three are in `faro-cli` (`diff`, `search`) and exposed as MCP tools (`faro_diff`, `faro_search`). |
+
+### 🤖 AI & Automation
+
+| | |
+|---|---|
+| **Agent Bridge**<br>Lend your authenticated session to Claude Code or any MCP agent — localhost only, bearer token, per-command approval. [Details ↓](#-agent-bridge) | **Fleet Skills**<br>AI-authorable, multi-step shell workflows that fan out across servers — AI-authored skills land as proposals needing one human approval. |
+| **MCP-native**<br>Auto-discovered tools in Claude Code; a ready-to-paste `SKILL.md` for plain HTTP agents. | **Live audit log**<br>Every command, approval, and denial, right in the Bridge panel. |
+
+### 🖥️ Remote Machines & Sessions
+
+| | |
+|---|---|
+| **Faro Agent**<br>Control a Windows/macOS/Linux box with no SSH server — 6-digit pairing code, Noise-encrypted, key-pinned. [Details ↓](#-faro-agent--control-another-machine) | **Multi-tab terminals**<br>Real SSH shell tabs sharing one session per profile; tabs survive switches without re-establishing the channel. |
+| **Known-hosts verification**<br>Interactive fingerprint prompt; mismatched keys get a danger-toned UI so MITM attempts are obvious. | **ssh-agent everywhere**<br>`$SSH_AUTH_SOCK` on unix, OpenSSH-for-Windows pipe, and Pageant on Windows. |
+
+### 🛠️ Productivity
+
+| | |
+|---|---|
+| **Profile importers**<br>Bring connections in from `~/.ssh/config`, FileZilla's `sitemanager.xml`, and PuTTY sessions. | **Keyboard-first**<br>Command palette (Ctrl/⌘-K), sortable columns, breadcrumbs, in-pane filter, toasts, custom title bar with menus. |
+| **`faro-cli`**<br>Scripts every backend the GUI speaks, using the same saved profiles. [Details ↓](#cli) | **Capability-aware UI**<br>chmod/mkdir hide on backends that don't support them; protocol chips show what you're connected to. |
+
+---
 
 ## 🤖 Agent Bridge
 
@@ -164,41 +178,6 @@ This is the part that makes Faro more than a file client. Connect to a server on
 - 📋 **Live audit log** — every command, approval, and denial, right in the panel.
 
 Surface: `GET /health`, `GET /sessions`, `POST /exec`, and `POST /mcp` (MCP Streamable HTTP). It's a hand-rolled localhost server on the existing tokio runtime — **zero new dependencies.**
-
-## Backends
-
-Every backend is one `RemoteFs` implementation, so the dual-pane browser, the
-transfer queue, sync, disk-usage explorer, diff, and search all pick it up for
-free. Capability differences (no shell on a bucket, read-only on HTTP) hide the
-affordances they don't support rather than reinventing them.
-
-| Backend | Browse | Transfer | Sync | Shell |
-|---|:-:|:-:|:-:|:-:|
-| **SFTP** (SSH) | ✓ | ✓ | ✓ | ✓ |
-| **FTP** | ✓ | ✓ | ✓ | — |
-| **FTPS** (explicit) | ✓ | ✓ | ✓ | — |
-| **S3-compatible** (AWS, R2, B2, Wasabi, …) | ✓ | ✓ | ✓ | — |
-| **Azure Blob** | ✓ | ✓ | ✓ | — |
-| **Google Cloud Storage** | ✓ | ✓ | ✓ | — |
-| **WebDAV** (Nextcloud, ownCloud, …) | ✓ | ✓ | ✓ | — |
-| **HTTP(S)** (autoindex / direct URL) | ✓ | download | ← only | — |
-| **Dropbox** | ✓ | ✓ | ✓ | — |
-| **OneDrive** | ✓ | ✓ | ✓ | — |
-| **Google Drive** | ✓ | ✓ | ✓ | — |
-| **Box** | ✓ | ✓ | ✓ | — |
-| **Faro Agent** | ✓ | ✓ | ✓ | exec |
-
-**S3 presets** — pick a vendor and the endpoint/region template fills in: Amazon
-S3, Cloudflare R2, Backblaze B2, Wasabi, DigitalOcean Spaces, MinIO, Storj,
-Hetzner, Scaleway, Oracle OCI, IBM COS, Supabase, and a generic self-hosted
-option (Ceph RGW, Garage, SeaweedFS, …). Every non-AWS endpoint is treated the
-same under the hood — path-style addressing, access-key/secret credentials.
-
-**Cloud drives** authorize once through your browser (loopback + PKCE OAuth);
-Faro stores only the refresh token in your OS keychain and never sees your
-password. **HTTP(S)** is a read-only source — point it at an nginx/Apache
-autoindex to browse, or a direct URL to pull one artifact; uploads, renames, and
-deletes are refused.
 
 ## 🖥️ Faro Agent — control another machine
 
@@ -244,66 +223,67 @@ unrecognised peer is refused. The controlled machine keeps its **own** policy
 than its owner allowed. LAN discovery is mDNS; internet-wide reach (rendezvous +
 relay) is a later phase. See [`docs/remote-agent.md`](docs/remote-agent.md).
 
-## 🔎 Explore, diff, and search any backend
+## Backends
 
-The same `RemoteFs` trait that unifies browsing means the heavier tools work on
-**remote servers and buckets**, not just your local disk — with a shell fast
-path where the backend has one (`du` / `find` / `rg` over SSH and the Faro
-Agent) and object-store flat listing on buckets, so they stay fast at scale.
+Every backend is one `RemoteFs` implementation, so the dual-pane browser, the
+transfer queue, sync, disk-usage explorer, diff, and search all pick it up for
+free. Capability differences (no shell on a bucket, read-only on HTTP) hide the
+affordances they don't support rather than reinventing them.
 
-- **Disk Usage Explorer** — a WinDirStat/WizTree-style treemap plus a
-  size-ranked tree, opened as a workspace tab from the toolbar or a directory's
-  context menu. Color by type or depth, reveal / copy-path / delete straight
-  from the map, rescan in place. The strategy actually used (walk · shell `find`
-  · object-flat) shows as a header badge.
-- **Directory Diff** — Meld/Beyond-Compare for *any two* backends, including
-  **remote ↔ remote** (staging vs prod, two servers, two buckets) — something no
-  local diff tool can do. Compare by size, or `--hash` to confirm same-size
-  files by content.
-- **Fleet Search** — find by file **name or content** across a connection.
-  Content search runs `rg`/`grep` server-side on SSH and Agent servers and falls
-  back to a download-and-grep walk elsewhere; buckets name-match a flat key
-  listing. Streaming results, grouped content previews.
+| Backend | Browse | Transfer | Sync | Shell |
+|---|:-:|:-:|:-:|:-:|
+| **SFTP** (SSH) | ✓ | ✓ | ✓ | ✓ |
+| **FTP** | ✓ | ✓ | ✓ | — |
+| **FTPS** (explicit) | ✓ | ✓ | ✓ | — |
+| **S3-compatible** (AWS, R2, B2, Wasabi, …) | ✓ | ✓ | ✓ | — |
+| **Azure Blob** | ✓ | ✓ | ✓ | — |
+| **Google Cloud Storage** | ✓ | ✓ | ✓ | — |
+| **WebDAV** (Nextcloud, ownCloud, …) | ✓ | ✓ | ✓ | — |
+| **HTTP(S)** (autoindex / direct URL) | ✓ | download | ← only | — |
+| **Dropbox** | ✓ | ✓ | ✓ | — |
+| **OneDrive** | ✓ | ✓ | ✓ | — |
+| **Google Drive** | ✓ | ✓ | ✓ | — |
+| **Box** | ✓ | ✓ | ✓ | — |
+| **Faro Agent** | ✓ | ✓ | ✓ | exec |
 
-All three are also in **`faro-cli`** (`diff`, `search`) and, for the agent
-surface, exposed as MCP tools (`faro_diff`, `faro_search`).
+**Cloud drives** authorize once through your browser (loopback + PKCE OAuth);
+Faro stores only the refresh token in your OS keychain and never sees your
+password. **HTTP(S)** is a read-only source — point it at an nginx/Apache
+autoindex to browse, or a direct URL to pull one artifact; uploads, renames, and
+deletes are refused.
 
-## 🔁 Keep folders in sync
+---
 
-Beyond the one-shot **directory sync** dialog (preview a plan, then run it), Faro
-runs a **continuous folder-sync engine**: attach a local folder to a remote path
-and it stays mirrored — a filesystem watcher plus a poll reconciler push changes
-as they happen. One-way in either direction, **Additive** (copy only) or
-**Mirror** (also delete extras), with `.gitignore`-style **exclude patterns** and
-a **mirror-delete cap** so a Mirror pass can never run away and wipe a tree. A
-status-bar pill shows live pair state; pairs are configured in **Settings →
-Folder sync**.
+## 🏗️ Architecture
 
-## 🛠️ Fleet Skills
+```
+┌──────────────────────────────────────────────────────────────┐
+│  React + TypeScript + Tauri webview                          │
+│  Dual-pane browser · xterm.js terminal · sync / diff /       │
+│  disk-usage / search / skills panels · Agent Bridge          │
+└──────────────────────────┬───────────────────────────────────┘
+                           │  Tauri commands + events
+┌──────────────────────────┴───────────────────────────────────┐
+│  Rust core (faro_lib)                                        │
+│   RemoteFs → Local·Sftp·Ftp·Object(S3/Azure/GCS)·WebDav·     │
+│              Http·Dropbox·OneDrive·GDrive·Box·Agent           │
+│   SessionManager pools one session per profile               │
+│   TransferManager → concurrent file + directory transfers    │
+│   scan.rs (bounded walk + fast paths) → diskscan · diff ·    │
+│              search · sync::plan   ·   faro.db (SQLite)       │
+│   foldersync.rs → continuous watched sync pairs              │
+│   bridge.rs → localhost MCP/HTTP + approvals + Skills        │
+│   oauth.rs · importers/ · known_hosts + HostKeyVerifier      │
+└───────────────┬───────────────────────────┬──────────────────┘
+                │  same Rust core            │  Noise protocol
+┌───────────────┴──────────────┐  ┌──────────┴──────────────────┐
+│  faro-cli  (clap)            │  │  faro-agentd (controlled     │
+│  ls·cp·mv·rm·sync·diff·      │  │  machine): handshake · pin · │
+│  search·exec·agent·skill     │  │  policy · native exec + fs   │
+└──────────────────────────────┘  └─────────────────────────────┘
+```
 
-A **Skill** is a named, parameterized, multi-step shell workflow that fans out
-across one or many connected servers — and it's **AI-authorable**: the agent can
-compose and save Skills over MCP, but an AI-authored Skill lands as a *proposal*
-that needs one human approval before it can ever run. Runs go through the same
-per-command approval and live console as everything else on the Bridge. Author,
-approve, dry-run, and run them from the **Fleet Skills** panel, or drive them
-with `faro-cli skill list|run`.
-
-## Highlights
-
-- **🤖 Agent Bridge** — give Claude Code (or any MCP agent) command access to a connected server through your authenticated session, gated by per-command approval and no shared credentials. [Details ↑](#-agent-bridge)
-- **One SSH session, two surfaces** — the SFTP browser and the terminal pane share a single connection per profile. No PuTTY/FileZilla double-login dance.
-- **Known-hosts verification** with an interactive fingerprint prompt. Mismatched keys get a danger-toned UI so MITM attempts are obvious.
-- **ssh-agent everywhere** — `$SSH_AUTH_SOCK` on unix, OpenSSH-for-Windows pipe, and Pageant (PuTTY 0.78+) on Windows. `ssh-add` once, connect everywhere.
-- **Multi-tab terminals** sharing a single SSH session per profile. Tabs survive switches without re-establishing the channel.
-- **Drag-and-drop transfers** between panes, recursive directory transfers, multi-select, overwrite/skip/rename policies, multipart upload for objects > 16 MB.
-- **Directory sync, one-shot or continuous** — preview a one-way plan (Additive or Mirror) and run it, or attach a folder for [continuous background sync](#-keep-folders-in-sync) with exclude patterns and a mirror-delete cap. The planner walks any backend through the same trait, then hands the work to the transfer queue for progress.
-- **[Explore, diff, and search](#-explore-diff-and-search-any-backend)** — a remote-capable disk-usage treemap, directory diff (incl. remote↔remote), and name/content search, each with a server-side fast path where one exists.
-- **Profile importers** — bring connections in from `~/.ssh/config`, FileZilla's `sitemanager.xml`, and PuTTY's Windows registry / `~/.putty/sessions/`. The import dialog auto-detects each source's default location.
-- **Keyboard-first** — a command palette (Ctrl/⌘-K) reaches every action, with discoverable shortcuts, sortable detail columns, breadcrumbs, an in-pane filter, and toasts. Custom title bar with File/Edit/View/Help menus and integrated window controls.
-- **Capability-aware UI** — chmod and mkdir hide on backends that don't support them; terminal is SFTP/Agent-only; protocol chips show what you're connected to at a glance.
-- **`faro-cli`** scripts every backend the GUI speaks, using the same saved profiles. `faro-cli sync ./site prod:/var/www --mirror --dry-run` does what you'd hope.
-- **Edit in place** — right-click a remote file → opens in your default editor on a tempfile, watches it with `notify`, debounces, uploads back on every save. A pill in the status bar shows live edit sessions and lets you stop them.
+The wedge: **everything goes through one `RemoteFs` trait.** Adding a new backend means writing one trait impl and one builder; the dual-pane browser, the sync planner, the disk-usage / diff / search tools, the CLI, and the transfer engine all pick it up automatically.
 
 ## Develop
 
@@ -356,37 +336,6 @@ exec · profiles`, plus `agent` (drive the running Agent Bridge — `exec`,
 local (including Windows `C:\…`), `name:/path` references a saved profile — so
 `diff`/`sync` can span two remotes. It prompts on stdin for unknown host keys
 and never writes secrets to disk that the GUI hadn't already saved.
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│  React + TypeScript + Tauri webview                          │
-│  Dual-pane browser · xterm.js terminal · sync / diff /       │
-│  disk-usage / search / skills panels · Agent Bridge          │
-└──────────────────────────┬───────────────────────────────────┘
-                           │  Tauri commands + events
-┌──────────────────────────┴───────────────────────────────────┐
-│  Rust core (faro_lib)                                        │
-│   RemoteFs → Local·Sftp·Ftp·Object(S3/Azure/GCS)·WebDav·     │
-│              Http·Dropbox·OneDrive·GDrive·Box·Agent           │
-│   SessionManager pools one session per profile               │
-│   TransferManager → concurrent file + directory transfers    │
-│   scan.rs (bounded walk + fast paths) → diskscan · diff ·    │
-│              search · sync::plan   ·   faro.db (SQLite)       │
-│   foldersync.rs → continuous watched sync pairs              │
-│   bridge.rs → localhost MCP/HTTP + approvals + Skills        │
-│   oauth.rs · importers/ · known_hosts + HostKeyVerifier      │
-└───────────────┬───────────────────────────┬──────────────────┘
-                │  same Rust core            │  Noise protocol
-┌───────────────┴──────────────┐  ┌──────────┴──────────────────┐
-│  faro-cli  (clap)            │  │  faro-agentd (controlled     │
-│  ls·cp·mv·rm·sync·diff·      │  │  machine): handshake · pin · │
-│  search·exec·agent·skill     │  │  policy · native exec + fs   │
-└──────────────────────────────┘  └─────────────────────────────┘
-```
-
-The wedge: **everything goes through one `RemoteFs` trait.** Adding a new backend means writing one trait impl and one builder; the dual-pane browser, the sync planner, the disk-usage / diff / search tools, the CLI, and the transfer engine all pick it up automatically.
 
 ## Layout
 
@@ -443,6 +392,59 @@ choco uninstall rust
 $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 ```
 
+---
+
+## 🗺️ Roadmap
+
+- **v1.0** — one-way sync mode
+- **v1.1** — `faro-cli` binary
+- **v1.2** — edit-in-place external editor
+- **v1.3** — custom title bar with File/Edit/View/Help menus + integrated window controls; GitHub Actions release pipeline + CI
+- **v1.3** — UI density pass (named themes, command palette, sortable detail columns, breadcrumbs, in-pane filter, toasts); the **🤖 Agent Bridge** (AI-agent command access over native MCP); and **🖥️ Faro Agent** — control a paired Windows/macOS/Linux machine (browse, transfer, native exec) over an encrypted, pinned link, no SSH server required. Now with **in-app Remote control** (host the agent from the Faro app — no separate download), a single always-pairable daemon port, `faro-agentd install` service setup + one-line headless installer, and `faro://` deep links for one-click "Connect with Faro" from a hosting panel
+- **recent** — **more backends** (S3 presets for a dozen vendors, Google Cloud Storage, WebDAV, read-only HTTP, and the Dropbox / OneDrive / Google Drive / Box OAuth clouds); **Disk Usage Explorer**, **Directory Diff** (incl. remote↔remote), and **Fleet Search** over any backend; **Fleet Skills** (AI-authorable fleet automations); **continuous folder sync** with exclude patterns + mirror-delete guard; and a sharper **`faro-cli` / Agent-Bridge remote-exec DX** — background jobs, `agent write`, `agent script`/`--stdin`, authenticated `fetch`, and CLI version-drift self-update
+- **next** — SMB/CIFS backend (NAS / Windows shares); on-demand "virtual folder" placeholders (Windows-first, feature-flagged today); bidirectional sync + conflict resolution; brand/protocol logos on the rail and picker; Faro Agent internet reach (rendezvous + NAT hole-punch + relay fallback); transfer speed limits and queue editing (priority/retry/pause)
+- **release polish** — code signing (Apple Developer / Windows EV cert), Tauri auto-updater, landing page
+
+---
+
+## 📖 Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Remote Agent](docs/remote-agent.md) | Faro Agent protocol, pairing, and security model |
+| [Deep Links](docs/deep-links.md) | `faro://` one-click "Connect with Faro" links |
+| [Screenshot Capture](docs/screenshots/CAPTURE.md) | The shot list and how to reproduce README screenshots |
+| [Updater Key Custody](docs/updater-key-custody.md) | Signing-key handling for the Tauri updater |
+
+---
+
+## 🧱 Tech Stack
+
+| Layer | Technology |
+|-------|------------|
+| App shell | Tauri 2 (Rust) |
+| Frontend | React 18, TypeScript, Vite, Zustand, xterm.js, Tailwind CSS |
+| Backend core | Rust — one `RemoteFs` trait over 13 backends |
+| SSH | russh (SFTP + PTY), ssh-agent / Pageant integration |
+| Object storage | S3, Azure Blob, Google Cloud Storage SDKs |
+| Cloud drives | Loopback + PKCE OAuth (Dropbox, OneDrive, Google Drive, Box) |
+| Agent link | Noise protocol (X25519 + ChaCha20-Poly1305), mDNS discovery |
+| AI surface | MCP Streamable HTTP + localhost REST bridge |
+| State | Bundled SQLite (`faro.db`) |
+| CLI | `faro-cli` (clap) · `faro-agentd` headless daemon |
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome!
+
+```
+fork → feature branch → commit → push → pull request
+```
+
+**Priority areas:** new backends (one `RemoteFs` impl and it works everywhere), UI/UX polish, documentation, test coverage.
+
 ## Icons
 
 ```bash
@@ -452,17 +454,64 @@ npm run tauri icon src-tauri/icons/source.png
 
 `scripts/process-icon.py` handles cropping a black-bordered source PNG to its rounded-square art and writing `source.png` at the right size.
 
-## Roadmap
+---
 
-- **v1.0** — one-way sync mode
-- **v1.1** — `faro-cli` binary
-- **v1.2** — edit-in-place external editor
-- **v1.3** — custom title bar with File/Edit/View/Help menus + integrated window controls; GitHub Actions release pipeline + CI
-- **v1.3** — UI density pass (named themes, command palette, sortable detail columns, breadcrumbs, in-pane filter, toasts); the **🤖 Agent Bridge** (AI-agent command access over native MCP); and **🖥️ Faro Agent** — control a paired Windows/macOS/Linux machine (browse, transfer, native exec) over an encrypted, pinned link, no SSH server required. Now with **in-app Remote control** (host the agent from the Faro app — no separate download), a single always-pairable daemon port, `faro-agentd install` service setup + one-line headless installer, and `faro://` deep links for one-click "Connect with Faro" from a hosting panel
-- **recent** — **more backends** (S3 presets for a dozen vendors, Google Cloud Storage, WebDAV, read-only HTTP, and the Dropbox / OneDrive / Google Drive / Box OAuth clouds); **Disk Usage Explorer**, **Directory Diff** (incl. remote↔remote), and **Fleet Search** over any backend; **Fleet Skills** (AI-authorable fleet automations); **continuous folder sync** with exclude patterns + mirror-delete guard; and a sharper **`faro-cli` / Agent-Bridge remote-exec DX** — background jobs, `agent write`, `agent script`/`--stdin`, authenticated `fetch`, and CLI version-drift self-update *(this)*
-- **next** — SMB/CIFS backend (NAS / Windows shares); on-demand "virtual folder" placeholders (Windows-first, feature-flagged today); bidirectional sync + conflict resolution; brand/protocol logos on the rail and picker; Faro Agent internet reach (rendezvous + NAT hole-punch + relay fallback); transfer speed limits and queue editing (priority/retry/pause)
-- **release polish** — code signing (Apple Developer / Windows EV cert), Tauri auto-updater, landing page
+## 💛 Support Faro
 
-## License
+Faro is free and open source. If it saves you time, you can help keep it going:
+
+- ⭐ [Star the repo](https://github.com/jhd3197/faro) — it costs nothing and helps a lot
+- 💖 [GitHub Sponsors](https://github.com/sponsors/jhd3197)
+- ☕ [Buy Me a Coffee](https://buymeacoffee.com/jhd3197)
+
+### 💎 Crypto
+
+| | Asset | Network | Address |
+|:---:|---|---|---|
+| <img src="docs/images/funding/usdt-trc20.png" width="110" alt="QR code for the USDT TRC-20 donation address" /> | **USDT** | **TRC-20** · Tron | `TTiCtqLauF1iSW2YGB3b78KmRxRqoLCgeL` |
+| <img src="docs/images/funding/usdt-erc20.png" width="110" alt="QR code for the USDT and ETH ERC-20 donation address" /> | **USDT / ETH** | **ERC-20** · Ethereum | `0xD13D5355Fa214e8317fea2ff192a065BaeC13527` |
+| <img src="docs/images/funding/btc.png" width="110" alt="QR code for the Bitcoin donation address" /> | **BTC** | **Bitcoin** | `bc1qatx67n3qxdvuv3arc9j8aytk34f22g02k9c7vr` |
+| <img src="docs/images/funding/sol.png" width="110" alt="QR code for the Solana donation address" /> | **SOL** | **Solana** | `AWXzqtBEgUfteHPQtDegsZ6D5y57M3GGdKPD8rR7h6xu` |
+
+TRC-20 has the lowest fees — usually under a dollar — so it's the friendliest
+option for a small donation. ERC-20 gas can cost more than the donation itself.
+
+<sub>QR codes are generated locally by [`scripts/generate-funding-qr.mjs`](scripts/generate-funding-qr.mjs), which checksum-validates every address before encoding.</sub>
+
+---
+
+## 🔭 Related Projects
+
+**[ServerKit](https://github.com/jhd3197/ServerKit)** — A lightweight, modern server control panel for managing web apps, databases, Docker containers, and security — without the complexity of Kubernetes or the cost of managed platforms.
+
+> Faro is the desktop companion for hands-on file transfer, shells, and ad-hoc work across all your boxes; ServerKit manages your servers from the browser.
+
+**[LocalKit](https://github.com/jhd3197/LocalKit)** — Spin up local WordPress sites in one click. Each site runs as its own isolated Docker Compose project, and you can push code or push/pull databases straight to your ServerKit server through the `serverkit-localkit` extension.
+
+**[DeviceKit](https://github.com/jhd3197/DeviceKit)** — A unified Android device fleet & test-automation platform. Control a fleet of devices from one dashboard — run automations, stream screens in real time, catch visual regressions, and debug failures with AI-powered analysis.
+
+---
+
+## 💬 Community
+
+[![Discord](https://img.shields.io/badge/Discord-Join_Us-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/ZKk6tkCQfG)
+
+Join the Discord to ask questions, share feedback, or get help with your setup.
+
+---
+
+## 📄 License
 
 MIT — see [LICENSE](LICENSE).
+
+---
+
+<div align="center">
+
+**Faro** — Servers · storage · sessions, all in one workspace.
+
+[Report Bug](https://github.com/jhd3197/faro/issues) · [Request Feature](https://github.com/jhd3197/faro/issues)
+
+Made with ❤️ by [Juan Denis](https://juandenis.com)
+
+</div>
