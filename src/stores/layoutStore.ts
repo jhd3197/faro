@@ -22,10 +22,6 @@ interface LayoutState {
   setConsoleOpen: (open: boolean) => void;
   toggleConsole: () => void;
 
-  chatOpen: boolean;
-  setChatOpen: (open: boolean) => void;
-  toggleChat: () => void;
-
   dialog: AppDialog | null;
   openDialog: (d: AppDialog) => void;
   closeDialog: () => void;
@@ -65,10 +61,6 @@ export const useLayout = create<LayoutState>((set) => ({
   consoleOpen: false,
   setConsoleOpen: (open) => set({ consoleOpen: open }),
   toggleConsole: () => set((s) => ({ consoleOpen: !s.consoleOpen })),
-
-  chatOpen: false,
-  setChatOpen: (open) => set({ chatOpen: open }),
-  toggleChat: () => set((s) => ({ chatOpen: !s.chatOpen })),
 
   dialog: null,
   openDialog: (d) => set({ dialog: d }),

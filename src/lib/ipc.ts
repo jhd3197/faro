@@ -384,11 +384,6 @@ export const ipc = {
   backupImport: (path: string, password: string) =>
     invoke<BackupSummary>("backup_import", { path, password }),
 
-  agentChat: (req: {
-    sessionId: string | null;
-    prompt: string;
-    history: Array<{ role: "user" | "assistant"; content: string }>;
-  }) => invoke<{ content: string }>("agent_chat_cmd", { req }),
   respondToBridgeApproval: (requestId: string, decision: ApprovalDecision) =>
     invoke<void>("respond_to_bridge_approval", { requestId, decision }),
   bridgeActivity: () => invoke<BridgeActivity[]>("bridge_activity"),

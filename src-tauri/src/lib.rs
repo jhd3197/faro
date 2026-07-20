@@ -8,7 +8,6 @@ use tauri::Manager;
 pub mod backup;
 pub mod bridge;
 pub mod commands;
-pub mod agent;
 mod agent_host;
 mod cli_updater;
 pub mod credentials;
@@ -411,7 +410,6 @@ pub fn run() {
             commands::backup_export,
             commands::backup_inspect,
             commands::backup_import,
-            commands::agent_chat_cmd,
             commands::respond_to_bridge_approval,
             commands::bridge_activity,
             commands::bridge_clear_activity,

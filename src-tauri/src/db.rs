@@ -68,7 +68,7 @@ const MIGRATIONS: &[&str] = &[
     // service-credential it writes here (service + account). The encrypted
     // backup (Phase 4) reads this to know which secrets to pull. OAuth tokens
     // are derived from profiles instead, so this table only holds the app's own
-    // service keys (the Anthropic API key today).
+    // service keys.
     "CREATE TABLE keychain_manifest (
         service TEXT NOT NULL,
         account TEXT NOT NULL,

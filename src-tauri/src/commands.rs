@@ -1,4 +1,3 @@
-use crate::agent::ChatRequest;
 use crate::error::{ErrorKind, FaroError};
 use crate::profiles::{AuthMethod, ConnectionProfile};
 use crate::remotefs::{Capabilities, DirEntry, RemoteFs};
@@ -1614,19 +1613,6 @@ pub async fn backup_import(
     let dir = app_data_dir(&app)?;
     // defer = true: the GUI has files open, so stage + swap on next startup.
     crate::backup::import(&dir, &password, Path::new(&path), true).map_err(FaroError::from)
-}
-
-/// Send a message to the built-in Agent chat. The backend calls Anthropic's
-/// API with the Faro bridge tools and returns the assistant's final response.
-#[tauri::command]
-pub async fn agent_chat_cmd(
-    req: ChatRequest,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<crate::agent::ChatResponse, String> {
-    crate::agent::agent_chat(&app, &state.bridge, req)
-        .await
-        .map_err(|e| e.to_string())
 }
 
 /// Register Faro's MCP server with Claude Code so the user doesn't have to
