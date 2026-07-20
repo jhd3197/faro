@@ -255,8 +255,6 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       return data.savedCommands;
     case "bridge_set_active_session":
       return null;
-    case "agent_chat_cmd":
-      return { content: "The API service is healthy — 37 days uptime, load 0.08." };
     case "export_agent_log":
       return "C:\\Users\\demo\\Downloads\\faro-agent-console.txt";
 

@@ -31,7 +31,6 @@ import {
   AlertTriangle,
   Radio,
   Columns2,
-  MessageSquare,
   FolderSync,
 } from "lucide-react";
 import { useEditor } from "./stores/editorStore";
@@ -40,7 +39,7 @@ import { useBridge } from "./stores/bridgeStore";
 import { useSync } from "./stores/syncStore";
 import { useSettings } from "./stores/settingsStore";
 import { onDeepLink } from "./lib/ipc";
-import { runSecretMigration, runSettingsMigration } from "./lib/secretMigration";
+import { runSettingsMigration } from "./lib/secretMigration";
 import { initNotifications } from "./lib/notifications";
 import { openTerminalWindow } from "./lib/popout";
 import { toast } from "./stores/toastStore";
@@ -52,7 +51,6 @@ import { CommandPalette } from "./components/CommandPalette";
 import { KeyboardShortcutsDialog } from "./components/KeyboardShortcutsDialog";
 import { AgentBridge, AgentBridgeHost } from "./components/AgentBridge";
 import { AgentConsoleDock } from "./components/AgentConsole";
-import { AgentChatDock } from "./components/AgentChat";
 import { DiskUsageHost } from "./components/DiskUsage";
 import { DirectoryDiffHost } from "./components/DirectoryDiff";
 import { FleetSearchHost } from "./components/FleetSearch";
@@ -73,7 +71,6 @@ export default function App() {
   const toggleTerminal = useLayout((s) => s.toggleTerminal);
   const terminalVisible = !!activeSessionId && terminalOpen && supportsTerminal;
   const consoleOpen = useLayout((s) => s.consoleOpen);
-  const chatOpen = useLayout((s) => s.chatOpen);
   const browserLayout = useSettings((s) => s.browserLayout);
   const dialog = useLayout((s) => s.dialog);
   const closeDialog = useLayout((s) => s.closeDialog);
@@ -107,10 +104,8 @@ export default function App() {
     };
   }, []);
 
-  // One-time migrations off localStorage (Plan 12): the plaintext API key into
-  // the OS keychain (Phase 1), and app settings into faro.db (Phase 2).
+  // One-time migration of app settings from localStorage into faro.db (Plan 12).
   useEffect(() => {
-    void runSecretMigration();
     void runSettingsMigration();
   }, []);
 
@@ -160,11 +155,6 @@ export default function App() {
           {consoleOpen && (
             <div className="h-64 border-t border-border">
               <AgentConsoleDock />
-            </div>
-          )}
-          {chatOpen && (
-            <div className="h-80 border-t border-border">
-              <AgentChatDock />
             </div>
           )}
           {/* The terminal dock stays mounted even when hidden so background
@@ -247,8 +237,6 @@ function StatusBar({
   const bridgeDialogOpen = useLayout((s) => s.dialog === "agentBridge");
   const consoleOpen = useLayout((s) => s.consoleOpen);
   const toggleConsole = useLayout((s) => s.toggleConsole);
-  const chatOpen = useLayout((s) => s.chatOpen);
-  const toggleChat = useLayout((s) => s.toggleChat);
   const browserLayout = useSettings((s) => s.browserLayout);
   const setBrowserLayout = useSettings((s) => s.setBrowserLayout);
 
@@ -474,14 +462,6 @@ function StatusBar({
         title="Agent console — live view of what the agent is doing over the bridge"
       >
         Console
-      </PillButton>
-      <PillButton
-        active={chatOpen}
-        onClick={toggleChat}
-        icon={<MessageSquare size={11} />}
-        title="AI chat — ask an AI assistant to work on your servers"
-      >
-        Chat
       </PillButton>
       <PillButton
         active={browserLayout === "dual"}

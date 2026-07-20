@@ -27,7 +27,7 @@
 //! - `profiles.json` — connection profiles (secrets already live in the keychain)
 //! - `faro.db` — a WAL-safe snapshot of the state DB (settings, sync index, …)
 //! - `bridge.json`, `foldersync.json` — subsystem configs
-//! - every keychain credential — the Anthropic API key (via the `faro.db`
+//! - every keychain credential — the app's service keys (via the `faro.db`
 //!   manifest) plus each cloud profile's OAuth tokens, so the restored machine
 //!   works without re-authorizing anything.
 //!
@@ -329,7 +329,7 @@ fn collect_credentials(dir: &Path, db: &Db) -> Vec<Cred> {
         }
     };
 
-    // App service keys (Anthropic API key, future keys) recorded in the manifest.
+    // App service keys recorded in the manifest.
     if let Ok(list) = db.list_keychain() {
         for (service, account) in list {
             take(&service, &account, &mut out, &mut seen);

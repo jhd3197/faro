@@ -3,13 +3,11 @@
 //! The rule is strict: **credentials never cross the IPC boundary as values**.
 //! The frontend can *write* a secret (one-way `set`) and *ask whether one
 //! exists* (`has`), but never *read* it back. Rust fetches the value from the
-//! keychain at the moment of use (e.g. `agent.rs` reads the Anthropic key right
-//! before calling the API).
+//! keychain at the moment of use.
 //!
 //! This mirrors the OAuth-token path in `oauth.rs` — same `keyring` crate, same
-//! native backends — but for non-profile service keys (the AI API key today,
-//! future provider keys tomorrow). Everything lives under one service name,
-//! keyed by *purpose*.
+//! native backends — but for non-profile service keys. Everything lives under
+//! one service name, keyed by *purpose*.
 //!
 //! Because Windows DPAPI and macOS Keychain can't *enumerate* entries, every
 //! write is also recorded in a small `faro.db` manifest (`db::record_keychain`)
@@ -20,9 +18,6 @@ use anyhow::{anyhow, Context, Result};
 /// The single keychain service that holds Faro's own service credentials.
 /// Reverse-DNS so it's unambiguous in Credential Manager / Keychain Access.
 pub const SERVICE: &str = "com.faro.credentials";
-
-/// Purpose key for the built-in Agent chat's Anthropic API key.
-pub const ANTHROPIC_API_KEY: &str = "anthropic-api-key";
 
 /// Write (or overwrite) a secret for `purpose`. An empty value clears it.
 pub fn set_secret(purpose: &str, value: &str) -> Result<()> {

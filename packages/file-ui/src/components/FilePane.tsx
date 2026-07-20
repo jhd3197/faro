@@ -75,6 +75,9 @@ function isWindowsPath(path: string): boolean {
 
 // Build clickable breadcrumb segments for the address bar. Windows-style
 // paths keep drive/UNC prefix + backslashes, everything else is POSIX "/".
+// Relative POSIX paths (e.g. "." or "./public_html" — the SFTP default home
+// when the profile has no start dir) must stay relative: turning them
+// absolute ("/./...") would point the backend at a nonexistent path.
 function parseSegments(path: string): Segment[] {
   if (!path || path === ".") return [{ label: path || "/", path: path || "/" }];
   if (path === "/") return [{ label: "/", path: "/" }];
@@ -90,6 +93,13 @@ function parseSegments(path: string): Segment[] {
     for (let i = isUnc ? 2 : 1; i < parts.length; i++) {
       acc = acc.endsWith("\\") ? acc + parts[i] : acc + "\\" + parts[i];
       segs.push({ label: parts[i], path: acc });
+    }
+  } else if (!path.startsWith("/")) {
+    // Relative POSIX path: no root crumb, segments accumulate relatively.
+    let acc = "";
+    for (const p of parts) {
+      acc = acc ? acc + "/" + p : p;
+      segs.push({ label: p, path: acc });
     }
   } else {
     segs.push({ label: "/", path: "/" });
@@ -456,18 +466,23 @@ export function FilePane({
   const goUp = () => {
     const isWin = isWindowsPath(path);
     const isUnc = path.startsWith("\\\\");
+    // Relative POSIX path (e.g. "." / "./public_html" — the SFTP default
+    // home): going up must stay relative, and the relative root itself has
+    // no parent to go to.
+    const isRelative = !isWin && !path.startsWith("/");
     const parts = path.split(/[/\\]/).filter(Boolean);
     const rootParts = isUnc ? 2 : 1; // UNC root is \\server\share
     if (parts.length <= rootParts) {
-      onPathChange(isWin ? path : "/");
+      onPathChange(isWin || isRelative ? path : "/");
       return;
     }
     parts.pop();
     let next: string;
     if (isUnc) next = "\\\\" + parts.join("\\");
     else if (isWin) next = parts.length === 1 ? parts[0] + "\\" : parts.join("\\");
+    else if (isRelative) next = parts.join("/");
     else next = "/" + parts.join("/");
-    onPathChange(next || "/");
+    onPathChange(next || (isRelative ? "." : "/"));
   };
 
   const joinPath = (parent: string, name: string) => {

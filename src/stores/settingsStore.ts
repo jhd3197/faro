@@ -158,29 +158,6 @@ interface SettingsState {
 
 const STORAGE_KEY = "faro.settings.v1";
 
-// Legacy secret capture (Plan 12 Phase 1). The Anthropic API key used to live in
-// this same localStorage blob. Grab it *synchronously at module load* — before
-// any persist() below can strip it — so it can be migrated into the OS keychain
-// (see `runSecretMigration` in lib/secretMigration.ts). Reading it here does not
-// leave it in the store; the field is gone from SettingsState entirely.
-let legacyAnthropicKey: string | null = null;
-try {
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (raw) {
-    const k = (JSON.parse(raw)?.anthropicApiKey ?? "").trim();
-    if (k) legacyAnthropicKey = k;
-  }
-} catch {
-  // ignore
-}
-
-/** Take (and forget) any pre-keychain Anthropic key found in localStorage. */
-export function takeLegacyAnthropicKey(): string | null {
-  const k = legacyAnthropicKey;
-  legacyAnthropicKey = null;
-  return k;
-}
-
 type Persisted = Omit<
   SettingsState,
   | "setAppTheme"
