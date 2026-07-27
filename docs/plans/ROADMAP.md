@@ -53,6 +53,7 @@ thematic detail.
 | 15 | `15_keyboard-shortcuts` | ⬜ | Remappable shortcuts + Settings Keyboard tab + file-browser keys (F2 rename & friends). Builds on the Plan 12 settings substrate. Independent polish; do whenever. |
 | 16 | `16_app-updater-and-notifications` | ⬜ | In-app auto-updater (signed, GitHub Releases manifest) + desktop notifications + one-click per-user PATH install. Trust/UX fundamentals for a shipping app. |
 | 17 | `17_transfer-queue-depth` | ⬜ | Real queue (bounded concurrency), pause/resume, retry, bandwidth throttle. Turns the transfer list into an actual queue. |
+| 18 | `18_jump-hosts-proxyjump` | ⬜ | Jump hosts (ProxyJump) through the single `ssh_connect` choke point + optional cloudflared integration. Unlocks locked-down (IP-allowlisted / tunnel-fronted) servers. Consumes Plan 13's bastion E2E fixture. |
 | 99 | `99_scoped-connection-sharing` | 🚫 out of scope | Pulled from the numbered order; slated for removal. Design notes kept on file only. |
 
 Cross-project **Track D** (ServerKit ↔ Faro) has no plan file — it's a
@@ -409,6 +410,20 @@ auto-retry (Plan 12 error kinds), and a global token-bucket bandwidth throttle.
 All checkpoints live in the *shared* copy loops so the 11 backends get it for
 free. Panel gains pause/retry row actions, pause-all, and a throttle input. ⬜
 
+## Track R — Jump hosts & Zero-Trust connectivity (Plan 18)
+Locked-down servers (IP allowlists, Cloudflare Tunnels) are unreachable to
+Faro today: `ssh_connect` only does direct TCP. Add a `jump_host` profile
+reference so any SSH profile can serve as a bastion — russh's
+`channel_open_direct_tcpip` + `connect_stream` make it the native `ssh -J`
+mechanism with per-hop auth and host-key prompts for free — with the jump
+chain held alive inside `SshSession` and rebuilt on reconnect. GUI gets a
+jump-host dropdown, the OpenSSH importer learns `ProxyJump`, and an optional
+later phase spawns `cloudflared access tcp` for Cloudflare-fronted hosts
+(the manual `localhost:<port>` flow works today with zero code). SFTP, SCP,
+terminal, `faro-cli`, and the Agent Bridge all inherit it through the single
+connect choke point; `faro-agentd` (non-SSH transport) is out of scope.
+Verified against Plan 13 Phase 5's bastion Docker fixture. ⬜
+
 ## Near-term quick wins (small, high-value)
 - **Editable permissions dialog** — today Properties *shows* mode read-only; add
   a FileZilla-style chmod editor (rwx checkboxes + octal). Backend (`chmod_path`,
@@ -459,6 +474,11 @@ mirror.
 11. **Track D option (b)** — ServerKit installs `faro-agentd` as a managed
    service; every server becomes syncable via Track A.
 12. **Track C Windows on-demand** — the large, later effort.
+13. **Track R — Jump hosts & Zero-Trust connectivity (Plan 18).** Small,
+    high-leverage, and independent of the scan foundation — one backend
+    function plus a dropdown. Can be pulled forward whenever a locked-down
+    server blocks real work; its E2E verification leans on Plan 13 Phase 5's
+    bastion fixture, so it lands after (or together with) that.
 
 To execute any of these tracks end-to-end in a fresh session, use the local
 `docs/plans/prompt.md` runbook — set its one plan-filename knob and paste it.
