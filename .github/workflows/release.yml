@@ -211,6 +211,35 @@ jobs:
           args: ${{ matrix.platform.args }}${{ steps.updater.outputs.sign == 'true' && ' --config updater-release.conf.json' || '' }}
           projectPath: src-tauri
 
+      # Portable build: Tauri has no "portable" bundle target, so we just zip
+      # the unpacked .exe the build above already produced. Caveats (documented
+      # in the release notes): needs WebView2 on the machine, settings still
+      # live in %APPDATA%, and faro:// deep links aren't registered.
+      - name: Windows — package portable zip
+        if: matrix.platform.runner == 'windows-latest'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ needs.prepare.outputs.tag }}"
+          version="${{ needs.prepare.outputs.version }}"
+          exe=""
+          for candidate in \
+            src-tauri/target/release/Faro.exe \
+            src-tauri/target/release/faro.exe; do
+            if [ -f "$candidate" ]; then exe="$candidate"; break; fi
+          done
+          if [ -z "$exe" ]; then
+            echo "::error::Could not find the built Faro exe under src-tauri/target/release"
+            exit 1
+          fi
+          mkdir -p dist-portable/Faro-portable
+          cp "$exe" dist-portable/Faro-portable/Faro.exe
+          (cd dist-portable && 7z a "Faro_${version}_x64-portable.zip" Faro-portable >/dev/null)
+          gh release upload "$tag" "dist-portable/Faro_${version}_x64-portable.zip" \
+            --repo "${{ github.repository }}" --clobber
+
   # ---- 3. Standalone CLI binary (all platforms) ---------------------------
   cli:
     needs: [prepare, gui]
@@ -360,6 +389,20 @@ jobs:
     needs: [prepare, gui, cli, daemon]
     runs-on: ubuntu-latest
     steps:
+      - name: Generate SHA256 checksums for all assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ needs.prepare.outputs.tag }}"
+          mkdir -p assets
+          gh release download "$tag" --repo "${{ github.repository }}" \
+            --dir assets --clobber --skip-existing
+          (cd assets && sha256sum -- * > ../SHA256SUMS.txt)
+          gh release upload "$tag" SHA256SUMS.txt \
+            --repo "${{ github.repository }}" --clobber
+
       - name: Compose download notes & publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -382,7 +425,7 @@ jobs:
             row="| [\`${name}\`](${base}/${name}) | ${hs} |"$'\n'
             case "$name" in
               *.dmg|*.app.tar.gz)      mac="${mac}${row}" ;;
-              *-setup.exe|*.msi)       win="${win}${row}" ;;
+              *-setup.exe|*.msi|*-portable.zip) win="${win}${row}" ;;
               *.AppImage|*.deb|*.rpm)  lin="${lin}${row}" ;;
               faro-agentd-*)           daemon="${daemon}${row}" ;;
               faro-cli-*)              cli="${cli}${row}" ;;
@@ -416,6 +459,8 @@ jobs:
             printf '%s' "$win"
             echo
             echo "> ⚠️ **Windows SmartScreen:** unsigned installer, so you'll see *\"Windows protected your PC.\"* Click **More info → Run anyway**. The \`-setup.exe\` is the NSIS installer; the \`.msi\` is for managed/MDM deployments."
+            echo ">"
+            echo "> 👜 **Portable:** the \`-portable.zip\` needs no install — unzip and run \`Faro.exe\`. Requires WebView2 (preinstalled on Windows 11 and most Windows 10). Note: settings still live in \`%APPDATA%\`, and \`faro://\` deep links are only registered by the installer."
             echo
             echo "**Linux** (x64)"
             echo
@@ -454,6 +499,8 @@ jobs:
             echo "> Same unsigned-binary caveats as the CLI (macOS \`xattr -c\`, Windows SmartScreen). The link is end-to-end encrypted and key-pinned; the daemon keeps its own exec/write policy — see the [Faro Agent docs](https://github.com/${REPO}/blob/main/docs/remote-agent.md)."
             echo
             echo "---"
+            echo "**Verify your download:** \`SHA256SUMS.txt\` has a checksum for every file above — \`sha256sum -c SHA256SUMS.txt\` (Linux/macOS) or \`certutil -hashfile <file> SHA256\` (Windows)."
+            echo
             echo "See the [README](https://github.com/${REPO}/blob/main/README.md) for the full feature tour and the Agent Bridge setup."
           } > notes.md
 

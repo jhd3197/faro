@@ -58,3 +58,4 @@ docs/screenshots/*.png
 # Tauri updater signing key (Plan 16) — PRIVATE key, never commit. Belongs in
 # CI secret TAURI_SIGNING_PRIVATE_KEY. See docs/updater-key-custody.md.
 .updater/
+/graphify-out
