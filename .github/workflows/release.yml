@@ -398,7 +398,7 @@ jobs:
           tag="${{ needs.prepare.outputs.tag }}"
           mkdir -p assets
           gh release download "$tag" --repo "${{ github.repository }}" \
-            --dir assets --clobber --skip-existing
+            --dir assets --clobber
           (cd assets && sha256sum -- * > ../SHA256SUMS.txt)
           gh release upload "$tag" SHA256SUMS.txt \
             --repo "${{ github.repository }}" --clobber
