@@ -97,14 +97,14 @@ Builds are **unsigned** (no Apple Developer / Windows EV certificate yet), so ea
 |                          New connection                          |                             Settings                             |
 | :--------------------------------------------------------------: | :--------------------------------------------------------------: |
 |      ![New connection](docs/screenshots/new-connection.png)      |          ![Settings](docs/screenshots/settings.png)          |
-| _One profile editor for all thirteen backends, protocol picker in a rail_ | _Themes, terminal behavior, transfers, and the default editor_ |
+| _One profile editor for all fourteen backends, protocol picker in a rail_ | _Themes, terminal behavior, transfers, and the default editor_ |
 
 </details>
 <!-- FARO:SHOTS:END -->
 
 ## 🎯 Features
 
-> **One connection list, thirteen backends.** Browse, transfer, sync, and the disk-usage / diff / search tools work the same on every one — all behind a single `RemoteFs` trait.
+> **One connection list, fourteen backends.** Browse, transfer, sync, and the disk-usage / diff / search tools work the same on every one — all behind a single `RemoteFs` trait.
 
 ### 📡 Backends & Storage
 
@@ -401,8 +401,8 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 - **v1.2** — edit-in-place external editor
 - **v1.3** — custom title bar with File/Edit/View/Help menus + integrated window controls; GitHub Actions release pipeline + CI
 - **v1.3** — UI density pass (named themes, command palette, sortable detail columns, breadcrumbs, in-pane filter, toasts); the **🤖 Agent Bridge** (AI-agent command access over native MCP); and **🖥️ Faro Agent** — control a paired Windows/macOS/Linux machine (browse, transfer, native exec) over an encrypted, pinned link, no SSH server required. Now with **in-app Remote control** (host the agent from the Faro app — no separate download), a single always-pairable daemon port, `faro-agentd install` service setup + one-line headless installer, and `faro://` deep links for one-click "Connect with Faro" from a hosting panel
-- **recent** — **more backends** (S3 presets for a dozen vendors, Google Cloud Storage, WebDAV, read-only HTTP, and the Dropbox / OneDrive / Google Drive / Box OAuth clouds); **Disk Usage Explorer**, **Directory Diff** (incl. remote↔remote), and **Fleet Search** over any backend; **Fleet Skills** (AI-authorable fleet automations); **continuous folder sync** with exclude patterns + mirror-delete guard; and a sharper **`faro-cli` / Agent-Bridge remote-exec DX** — background jobs, `agent write`, `agent script`/`--stdin`, authenticated `fetch`, and CLI version-drift self-update
-- **next** — SMB/CIFS backend (NAS / Windows shares); **Shopify backend** (browse/edit store themes like an FTP site — plan 18); on-demand "virtual folder" placeholders (Windows-first, feature-flagged today); bidirectional sync + conflict resolution; brand/protocol logos on the rail and picker; Faro Agent internet reach (rendezvous + NAT hole-punch + relay fallback); transfer speed limits and queue editing (priority/retry/pause)
+- **recent** — **more backends** (S3 presets for a dozen vendors, Google Cloud Storage, WebDAV, read-only HTTP, the Dropbox / OneDrive / Google Drive / Box OAuth clouds, and **Shopify** — browse/edit store themes like an FTP site); **Disk Usage Explorer**, **Directory Diff** (incl. remote↔remote), and **Fleet Search** over any backend; **Fleet Skills** (AI-authorable fleet automations); **continuous folder sync** with exclude patterns + mirror-delete guard; and a sharper **`faro-cli` / Agent-Bridge remote-exec DX** — background jobs, `agent write`, `agent script`/`--stdin`, authenticated `fetch`, and CLI version-drift self-update
+- **next** — SMB/CIFS backend (NAS / Windows shares); on-demand "virtual folder" placeholders (Windows-first, feature-flagged today); bidirectional sync + conflict resolution; brand/protocol logos on the rail and picker; Faro Agent internet reach (rendezvous + NAT hole-punch + relay fallback); transfer speed limits and queue editing (priority/retry/pause)
 - **release polish** — code signing (Apple Developer / Windows EV cert), Tauri auto-updater, landing page
 
 ---
@@ -424,7 +424,7 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 |-------|------------|
 | App shell | Tauri 2 (Rust) |
 | Frontend | React 18, TypeScript, Vite, Zustand, xterm.js, Tailwind CSS |
-| Backend core | Rust — one `RemoteFs` trait over 13 backends |
+| Backend core | Rust — one `RemoteFs` trait over 14 backends |
 | SSH | russh (SFTP + PTY), ssh-agent / Pageant integration |
 | Object storage | S3, Azure Blob, Google Cloud Storage SDKs |
 | Cloud drives | Loopback + PKCE OAuth (Dropbox, OneDrive, Google Drive, Box) |

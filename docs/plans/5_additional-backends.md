@@ -137,6 +137,20 @@ Then sequence by API friction, **not** brand size:
 5. *(Optional, not built)* **pCloud** — path-based API, small effort, smaller
    audience.
 
+### Phase 6 — Shopify (themes as a filesystem) — ✅ shipped (Plan 18 Phase 1)
+Shipped per **`docs/plans/18_shopify-backend.md`**, following this plan's
+recipe exactly: `session/shopify.rs` (`ShopifySession`: Admin REST client,
+~2 req/s pacing + 429 `Retry-After` + 5xx backoff, static Admin token or
+client-credentials exchange cached with a 5-min margin, credential in the OS
+keychain as `shopify:{profile_id}` — no OAuth loopback) + `remotefs/shopify.rs`
+(`ShopifyFs`: themes as root dirs, directories inferred from asset-key
+prefixes, rename = PUT+DELETE, `.faro-keep` placeholders for mkdir, no chmod,
+`change_signal: MtimeSize`). In-place Liquid editing rides the editor arms;
+`ProfileEditor` gets a non-OAuth `ShopifySection` (store domain + token or
+client ID/secret). Verified by unit tests + a live `#[ignore]` roundtrip
+against `tests/shopify_mock.py`. Phases 2 (store media) and 3 (content as
+virtual files) remain in plan 18.
+
 All four reuse `oauth.rs` (loopback+PKCE+keychain) and the shared
 `RefreshingToken` (proactive refresh + 401-retry). Each needs the same
 maintainer step to go live: register the provider app with redirect
