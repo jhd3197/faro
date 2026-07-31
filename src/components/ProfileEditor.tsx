@@ -229,7 +229,10 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
   /// pairing flow (which must persist the profile before it can pair by id).
   const buildProfile = (): ConnectionProfile => {
     let auth: AuthMethod;
-    if (authKind === "password") {
+    if (profile?.auth.kind === "keyref") {
+      // Grant-managed key: lives in the OS keychain, never edited here.
+      auth = profile.auth;
+    } else if (authKind === "password") {
       auth = { kind: "password", password };
     } else if (authKind === "key") {
       auth = { kind: "key", path: keyPath, passphrase: passphrase || undefined };
@@ -279,6 +282,10 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
       agentKey: isAgent ? agentKey : undefined,
       group: group.trim() || undefined,
       sortOrder: profile?.sortOrder,
+      // Bastion hop (grant-imported only): carried through untouched.
+      jumpHost: profile?.jumpHost,
+      jumpPort: profile?.jumpPort,
+      jumpUsername: profile?.jumpUsername,
     };
   };
 
@@ -552,6 +559,22 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
               />
             </Field>
 
+            {profile?.jumpHost && (
+              <Hint>
+                via bastion{" "}
+                <span className="font-mono text-text-dim">
+                  {profile.jumpUsername ? `${profile.jumpUsername}@` : ""}
+                  {profile.jumpHost}:{profile.jumpPort ?? 22}
+                </span>
+              </Hint>
+            )}
+
+            {profile?.auth.kind === "keyref" ? (
+              <Hint>
+                Managed key (access grant) — stored in your OS keychain.
+              </Hint>
+            ) : (
+              <>
             <Field label="Auth">
               <select
                 value={authKind}
@@ -597,6 +620,8 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
                 username={username}
                 host={host}
               />
+            )}
+              </>
             )}
           </>
         )}

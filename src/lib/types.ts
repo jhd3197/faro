@@ -4,7 +4,10 @@
 export type AuthMethod =
   | { kind: "password"; password: string }
   | { kind: "key"; path: string; passphrase?: string }
-  | { kind: "agent" };
+  | { kind: "agent" }
+  // Grant-imported profile: the private key lives in the OS keychain under
+  // `keyRef`; it never crosses IPC. Not user-selectable in the editor.
+  | { kind: "keyref"; keyRef: string };
 
 // ---- In-app SSH key generation (mirrors src-tauri/src/keys.rs) ----
 
@@ -85,6 +88,11 @@ export interface ConnectionProfile {
   /** Manual drag-and-drop position in the rail. Absent = sorted after ordered
    *  profiles, by protocol then name. */
   sortOrder?: number;
+  // Bastion/ProxyJump hop (grant-imported profiles only for now — read-only in
+  // the editor). Connect to jumpHost, then tunnel to the target.
+  jumpHost?: string;
+  jumpPort?: number;
+  jumpUsername?: string;
 }
 
 export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {
@@ -232,6 +240,46 @@ export interface DeepLink {
   region?: string;
   endpoint?: string;
   account?: string;
+  // faro://grant: issuer base URL + redemption token (docs/grant-links.md).
+  issuer?: string;
+  token?: string;
+}
+
+// ---- Access grants (faro://grant; docs/grant-links.md) ----
+
+/** Bastion/ProxyJump hop described by a grant manifest. */
+export interface GrantJump {
+  host: string;
+  port?: number;
+  username?: string;
+}
+
+export interface GrantConnection {
+  name?: string;
+  protocol: string;
+  host: string;
+  port?: number;
+  username: string;
+  path?: string;
+  jump?: GrantJump;
+}
+
+/** What the issuer offers (fetched before consent, shown in the dialog). */
+export interface GrantManifest {
+  version: number;
+  issuer: string;
+  name: string;
+  group?: string;
+  expiresAt?: string;
+  auth: { type: string };
+  connections: GrantConnection[];
+}
+
+/** Result of the key-exchange + import after the user accepts a grant. */
+export interface GrantImportResult {
+  group: string;
+  imported: ConnectionProfile[];
+  failed: { name: string; error: string }[];
 }
 
 // ---- Importers ----

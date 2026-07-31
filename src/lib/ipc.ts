@@ -43,6 +43,8 @@ import type {
   CliUpdateMode,
   PathStatus,
   DeepLink,
+  GrantManifest,
+  GrantImportResult,
   SyncPair,
   PairView,
   VirtualFsRootStatus,
@@ -310,6 +312,16 @@ export const ipc = {
 
   saveImportedProfiles: (previews: ProfilePreview[]) =>
     invoke<number>("save_imported_profiles", { previews }),
+
+  // ---- Access grants (faro://grant; docs/grant-links.md) ----
+  /** Fetch the manifest a grant token offers (before consent). */
+  fetchGrantManifest: (issuer: string, token: string) =>
+    invoke<GrantManifest>("fetch_grant_manifest", { issuer, token }),
+
+  /** After consent: generate a key, upload the public half, import the
+   *  granted servers as ordinary profiles. */
+  acceptGrant: (issuer: string, token: string, manifest: GrantManifest) =>
+    invoke<GrantImportResult>("accept_grant", { issuer, token, manifest }),
 
   syncPlan: (
     sessionId: SessionId,

@@ -196,6 +196,58 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
     case "save_imported_profiles":
       return 0;
 
+    // ---- access grants (faro://grant) ----
+    // A canned two-server manifest so the consent dialog renders end-to-end
+    // in the demo; accepting "imports" them into a rail group.
+    case "fetch_grant_manifest":
+      return {
+        version: 1,
+        issuer: "ServerKit · panel.demo.dev",
+        name: "Client X — 2 servers",
+        group: "Agency / Client X",
+        expiresAt: new Date(Date.now() + 7 * 86400_000).toISOString(),
+        auth: { type: "key-install" },
+        connections: [
+          {
+            name: "web-1",
+            protocol: "sftp",
+            host: "10.0.0.11",
+            port: 22,
+            username: "deploy",
+            path: "/var/www",
+            jump: { host: "bastion.demo.dev", port: 22, username: "faro-grant" },
+          },
+          {
+            name: "db-1",
+            protocol: "sftp",
+            host: "10.0.0.12",
+            port: 22,
+            username: "deploy",
+          },
+        ],
+      };
+    case "accept_grant": {
+      const manifest = a.manifest;
+      const imported = (manifest?.connections ?? []).map(
+        (c: any, i: number) => ({
+          id: `grant-${i}`,
+          name: c.name || c.host,
+          protocol: "sftp",
+          host: c.host,
+          port: c.port ?? 22,
+          username: c.username,
+          auth: { kind: "keyref", keyRef: `grant-key:grant-${i}` },
+          defaultRemotePath: c.path,
+          group: manifest?.group ?? manifest?.issuer,
+          jumpHost: c.jump?.host,
+          jumpPort: c.jump?.port,
+          jumpUsername: c.jump?.username,
+        })
+      );
+      data.setProfiles([...data.profiles, ...imported]);
+      return { group: manifest?.group ?? "Grants", imported, failed: [] };
+    }
+
     // ---- sync ----
     case "sync_plan":
       return data.syncPlan(a.localPath, a.remotePath);
