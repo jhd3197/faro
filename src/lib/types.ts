@@ -61,6 +61,7 @@ export type Protocol =
   | "onedrive"
   | "gdrive"
   | "box"
+  | "shopify"
   | "faro-agent";
 
 export interface ConnectionProfile {
@@ -108,6 +109,7 @@ export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {
   onedrive: 443,
   gdrive: 443,
   box: 443,
+  shopify: 443,
   "faro-agent": 8722,
 };
 
@@ -124,6 +126,7 @@ export const PROTOCOL_LABEL: Record<Protocol, string> = {
   onedrive: "OneDrive",
   gdrive: "Google Drive",
   box: "Box",
+  shopify: "Shopify",
   "faro-agent": "Faro Agent",
 };
 
