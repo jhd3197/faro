@@ -279,6 +279,11 @@ async fn read_head(session: Option<&Session>, path: &str, max: u64) -> Result<Ve
             collect_capped(resp.bytes_stream().map(|r| r.map_err(anyhow::Error::from)), max).await
         }
         Some(Session::Agent(agent)) => read_agent(agent, path, max).await,
+        Some(Session::Shopify(sh)) => {
+            // No ranged read in the Assets API — the file comes back whole.
+            let data = crate::remotefs::shopify::read_asset(sh, path).await?;
+            Ok(data.into_iter().take(max as usize).collect())
+        }
         Some(other) => bail!("preview not supported for {} yet", other.protocol()),
     }
 }

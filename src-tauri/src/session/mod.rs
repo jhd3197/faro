@@ -1214,6 +1214,10 @@ pub async fn open_session(
             let bx = box_connect(profile).await?;
             Ok(Session::Box(Arc::new(bx)))
         }
+        "shopify" => {
+            let sh = shopify_connect(profile).await?;
+            Ok(Session::Shopify(Arc::new(sh)))
+        }
         other => Err(anyhow!("unsupported protocol: {other}")),
     }
 }
@@ -1569,6 +1573,7 @@ pub enum Session {
     OneDrive(Arc<OneDriveSession>),
     GDrive(Arc<GDriveSession>),
     Box(Arc<BoxSession>),
+    Shopify(Arc<ShopifySession>),
     Agent(Arc<AgentSession>),
 }
 
@@ -1584,6 +1589,7 @@ impl Session {
             Self::OneDrive(s) => &s.profile,
             Self::GDrive(s) => &s.profile,
             Self::Box(s) => &s.profile,
+            Self::Shopify(s) => &s.profile,
             Self::Agent(s) => &s.profile,
         }
     }
@@ -1599,6 +1605,7 @@ impl Session {
             Self::OneDrive(_) => "onedrive",
             Self::GDrive(_) => "gdrive",
             Self::Box(_) => "box",
+            Self::Shopify(_) => "shopify",
             Self::Agent(_) => "faro-agent",
         }
     }
@@ -1711,6 +1718,12 @@ impl SessionManager {
                 let id = bx.id.clone();
                 (id, Session::Box(Arc::new(bx)))
             }
+            "shopify" => {
+                let _ = app; // Credential loaded from the keychain; no prompt.
+                let sh = shopify_connect(&profile).await?;
+                let id = sh.id.clone();
+                (id, Session::Shopify(Arc::new(sh)))
+            }
             "faro-agent" => {
                 let agent = AgentSession::connect(profile).await?;
                 let id = agent.id.clone();
@@ -1806,6 +1819,9 @@ impl SessionManager {
                 }
                 Session::Box(_) => {
                     // Box is stateless HTTP — nothing to close.
+                }
+                Session::Shopify(_) => {
+                    // Shopify is stateless HTTP — nothing to close.
                 }
                 Session::Agent(agent) => {
                     agent.disconnect().await;
