@@ -66,6 +66,14 @@ pub async fn delete_profile(
             "box" => crate::oauth::delete_tokens(crate::session::boxdrive::BOX_SERVICE, &id),
             _ => {}
         }
+        // Grant-imported profiles hold their private key in the OS keychain
+        // under `grant-key:<profile-id>` — remove it with the profile.
+        if let AuthMethod::KeyRef { key_ref } = &p.auth {
+            crate::credentials::delete_secret(key_ref);
+            let _ = state
+                .db
+                .forget_keychain(crate::credentials::SERVICE, key_ref);
+        }
     }
     state.profiles.delete(&id).await.map_err(err)
 }
@@ -263,6 +271,9 @@ pub async fn dropbox_authorize(profile_id: String) -> Result<DropboxAuthResult, 
         agent_key: None,
         group: None,
         sort_order: None,
+        jump_host: None,
+        jump_port: None,
+        jump_username: None,
     };
     let account_label = match crate::session::dropbox_connect(&probe).await {
         Ok(session) => session.account_label().await.unwrap_or_default(),
@@ -302,6 +313,9 @@ pub async fn onedrive_authorize(profile_id: String) -> Result<DropboxAuthResult,
         agent_key: None,
         group: None,
         sort_order: None,
+        jump_host: None,
+        jump_port: None,
+        jump_username: None,
     };
     let account_label = match crate::session::onedrive_connect(&probe).await {
         Ok(session) => session.account_label().await.unwrap_or_default(),
@@ -336,6 +350,9 @@ pub async fn gdrive_authorize(profile_id: String) -> Result<DropboxAuthResult, S
         agent_key: None,
         group: None,
         sort_order: None,
+        jump_host: None,
+        jump_port: None,
+        jump_username: None,
     };
     let account_label = match crate::session::gdrive_connect(&probe).await {
         Ok(session) => session.account_label().await.unwrap_or_default(),
@@ -370,6 +387,9 @@ pub async fn box_authorize(profile_id: String) -> Result<DropboxAuthResult, Stri
         agent_key: None,
         group: None,
         sort_order: None,
+        jump_host: None,
+        jump_port: None,
+        jump_username: None,
     };
     let account_label = match crate::session::box_connect(&probe).await {
         Ok(session) => session.account_label().await.unwrap_or_default(),

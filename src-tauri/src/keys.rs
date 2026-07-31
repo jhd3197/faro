@@ -201,6 +201,26 @@ pub fn generate(req: &GenerateKeyRequest) -> Result<GeneratedKey> {
     })
 }
 
+/// Generate an ed25519 keypair entirely in memory, returning the OpenSSH
+/// public-key line and the unencrypted OpenSSH-format private-key PEM. Nothing
+/// touches disk — used by the grant-accept flow, which uploads the public half
+/// and stores the private half straight into the OS keychain. CPU-bound, so
+/// callers run this on the blocking pool.
+pub fn generate_ed25519_in_memory(comment: &str) -> Result<(String, String)> {
+    let mut rng = OsRng;
+    let mut key = PrivateKey::random(&mut rng, Algorithm::Ed25519)
+        .map_err(|e| anyhow!("generating Ed25519 key: {e}"))?;
+    key.set_comment(comment);
+    let pub_line = key
+        .public_key()
+        .to_openssh()
+        .map_err(|e| anyhow!("encoding public key: {e}"))?;
+    let pem = key
+        .to_openssh(LineEnding::LF)
+        .map_err(|e| anyhow!("encoding private key: {e}"))?;
+    Ok((pub_line, pem.to_string()))
+}
+
 /// Derive the public-key line + fingerprint for an *existing* private key path,
 /// so the user can copy it without regenerating. Needs the passphrase if the key
 /// is encrypted.
@@ -346,6 +366,19 @@ mod tests {
     #[test]
     fn expand_tilde_leaves_plain_paths_alone() {
         assert_eq!(expand_tilde("/etc/ssh/key"), PathBuf::from("/etc/ssh/key"));
+    }
+
+    #[test]
+    fn in_memory_ed25519_roundtrips_through_russh() {
+        let (pub_line, pem) = generate_ed25519_in_memory("faro-grant").expect("keygen");
+        assert!(pub_line.starts_with("ssh-ed25519 "));
+        assert!(pub_line.ends_with(" faro-grant"));
+        assert!(pem.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
+        // The exact decode call the grant connect path makes on the stored PEM.
+        let keypair = russh_keys::decode_secret_key(&pem, None).expect("decode");
+        let derived = keypair.clone_public_key().expect("public key");
+        let body = |line: &str| line.split(' ').take(2).collect::<Vec<_>>().join(" ");
+        assert_eq!(body(&pub_line), format!("ssh-ed25519 {}", derived.public_key_base64()));
     }
 
     /// Real-world interop: OpenSSH's own `ssh-keygen` must accept the private key

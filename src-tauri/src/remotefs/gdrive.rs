@@ -276,6 +276,9 @@ mod tests {
             agent_key: None,
             group: None,
             sort_order: None,
+            jump_host: None,
+            jump_port: None,
+            jump_username: None,
         };
         let session = Arc::new(gdrive_connect(&profile).await.expect("connect"));
 

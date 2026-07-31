@@ -140,6 +140,11 @@ pub async fn ftp_connect(profile: &ConnectionProfile) -> Result<FtpSession> {
                 "FTP does not support ssh-agent auth; switch to password"
             ))
         }
+        AuthMethod::KeyRef { .. } => {
+            return Err(anyhow!(
+                "FTP does not support keychain key auth; switch to password"
+            ))
+        }
     };
     let want_tls = profile.protocol.eq_ignore_ascii_case("ftps");
 

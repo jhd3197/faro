@@ -44,6 +44,11 @@ pub struct DeepLink {
     pub region: Option<String>,
     pub endpoint: Option<String>,
     pub account: Option<String>,
+    // Access grants (`faro://grant` only): the issuing service's base URL and
+    // the redemption token. Neither is a credential — the token only fetches a
+    // manifest; the user consents before anything is imported.
+    pub issuer: Option<String>,
+    pub token: Option<String>,
 }
 
 /// Parse one `faro://…` URL. Returns `None` for a non-`faro` scheme or an
@@ -80,6 +85,8 @@ pub fn parse(raw: &str) -> Option<DeepLink> {
             "region" => dl.region = Some(v),
             "endpoint" => dl.endpoint = Some(v),
             "account" => dl.account = Some(v),
+            "issuer" => dl.issuer = Some(v),
+            "token" => dl.token = Some(v),
             // Deliberately ignored — links must not carry credentials.
             "password" | "secret" | "passphrase" => {
                 tracing::warn!("ignoring credential param '{k}' in a faro:// link");
@@ -99,7 +106,8 @@ pub fn handle_urls(app: &AppHandle, urls: &[url::Url]) {
             Some(dl)
                 if dl.action == "connect"
                     || dl.action == "pair"
-                    || dl.action == "terminal" =>
+                    || dl.action == "terminal"
+                    || dl.action == "grant" =>
             {
                 if let Err(e) = app.emit("deep-link://open", &dl) {
                     tracing::warn!("failed to forward deep link: {e}");
@@ -161,5 +169,39 @@ mod tests {
     fn rejects_foreign_scheme() {
         assert!(parse("https://example.com").is_none());
         assert!(parse("ssh://example.com").is_none());
+    }
+
+    #[test]
+    fn parses_grant_link() {
+        let dl = parse(
+            "faro://grant?issuer=https%3A%2F%2Fpanel.agency.com&token=gr_9f2kQ7abcd1234&name=Client%20X",
+        )
+        .unwrap();
+        assert_eq!(dl.action, "grant");
+        assert_eq!(dl.issuer.as_deref(), Some("https://panel.agency.com"));
+        assert_eq!(dl.token.as_deref(), Some("gr_9f2kQ7abcd1234"));
+        assert_eq!(dl.name.as_deref(), Some("Client X"));
+    }
+
+    #[test]
+    fn grant_link_keeps_token_and_issuer_separate() {
+        let dl = parse("faro://grant?issuer=https://panel.example&token=abcDEF_123-xyz456").unwrap();
+        assert_eq!(dl.issuer.as_deref(), Some("https://panel.example"));
+        assert_eq!(dl.token.as_deref(), Some("abcDEF_123-xyz456"));
+        // Neither param leaks into the host/code fields of other actions.
+        assert!(dl.host.is_none());
+        assert!(dl.code.is_none());
+    }
+
+    #[test]
+    fn grant_link_still_strips_credentials() {
+        let dl = parse(
+            "faro://grant?issuer=https://panel.example&token=abcDEF_123-xyz456&password=hunter2&secret=x",
+        )
+        .unwrap();
+        assert_eq!(dl.token.as_deref(), Some("abcDEF_123-xyz456"));
+        // No field on DeepLink can hold the credential params; they're ignored.
+        let json = serde_json::to_string(&dl).unwrap();
+        assert!(!json.contains("hunter2"));
     }
 }
