@@ -157,6 +157,11 @@ prefilled SFTP handoff).
 
 - ✅ Shallow: `serverkit-faro` `faro://connect` deep-link (prefill only, no
   credentials). *Shipped.*
+- 🚧 **Delegated access grants** (`faro://grant`): an issuer (ServerKit
+  extension) mints a token; Faro consents, generates an on-device key, and
+  imports N servers — with optional bastion hop for a static source IP. Open
+  protocol in `docs/grant-links.md`, plan in Plan 19. *Faro side in progress;
+  ServerKit issuer extension is the follow-up.*
 - ⬜ **Deep: embed/expose `faro-agentd` on ServerKit hosts.** Two options:
   (a) ServerKit's Go agent speaks the Faro Noise protocol natively (port a
   minimal `faro-agent-proto` responder to Go), or (b) ServerKit installs the

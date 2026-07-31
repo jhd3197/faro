@@ -9,7 +9,15 @@ export type AppDialog =
   | "newConnection"
   | "import"
   | "about"
-  | "agentBridge";
+  | "agentBridge"
+  | "grant";
+
+/** Seed for the grant consent dialog, parsed from a faro://grant deep link. */
+export interface GrantPrefill {
+  issuer: string;
+  token: string;
+  name?: string;
+}
 
 interface LayoutState {
   terminalOpen: boolean;
@@ -31,6 +39,11 @@ interface LayoutState {
   // when the editor closes.
   connectionPrefill: Partial<ConnectionProfile> | null;
   openNewConnection: (prefill?: Partial<ConnectionProfile>) => void;
+
+  // Seed for the grant consent dialog (faro://grant deep link). Cleared when
+  // the dialog closes.
+  grantPrefill: GrantPrefill | null;
+  openGrant: (prefill: GrantPrefill) => void;
 
   // When true, the file browser shows the LOCAL filesystem instead of the
   // active server. Toggled by the rail's "Local" home bubble; cleared when a
@@ -64,11 +77,15 @@ export const useLayout = create<LayoutState>((set) => ({
 
   dialog: null,
   openDialog: (d) => set({ dialog: d }),
-  closeDialog: () => set({ dialog: null, connectionPrefill: null }),
+  closeDialog: () =>
+    set({ dialog: null, connectionPrefill: null, grantPrefill: null }),
 
   connectionPrefill: null,
   openNewConnection: (prefill) =>
     set({ dialog: "newConnection", connectionPrefill: prefill ?? null }),
+
+  grantPrefill: null,
+  openGrant: (prefill) => set({ dialog: "grant", grantPrefill: prefill }),
 
   browseLocal: false,
   setBrowseLocal: (v) => set({ browseLocal: v }),

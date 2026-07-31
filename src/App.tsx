@@ -12,6 +12,7 @@ import { HostKeyModal } from "./components/HostKeyModal";
 import { AuthPromptModal } from "./components/AuthPromptModal";
 import { TitleBar } from "./components/TitleBar";
 import { ProfileEditor } from "./components/ProfileEditor";
+import { GrantDialog } from "./components/GrantDialog";
 import { ImportDialog } from "./components/ImportDialog";
 import { AboutDialog } from "./components/AboutDialog";
 import { useConnections } from "./stores/connectionsStore";
@@ -130,6 +131,7 @@ export default function App() {
         />
       )}
       {dialog === "import" && <ImportDialog onClose={closeDialog} />}
+      {dialog === "grant" && <GrantDialog onClose={closeDialog} />}
       {dialog === "about" && <AboutDialog onClose={closeDialog} />}
       {dialog === "agentBridge" && <AgentBridge onClose={closeDialog} />}
       <HostKeyModal />
@@ -551,8 +553,22 @@ function PillButton({
 /// (no new connection is ever made), otherwise it falls back to the editor.
 function DeepLinkListener() {
   const openNewConnection = useLayout((s) => s.openNewConnection);
+  const openGrant = useLayout((s) => s.openGrant);
   useEffect(() => {
     const un = onDeepLink((dl) => {
+      if (dl.action === "grant") {
+        // Access grant: never prefill the editor — open the consent dialog,
+        // which fetches the manifest and only acts on Accept.
+        if (dl.issuer && dl.token) {
+          openGrant({ issuer: dl.issuer, token: dl.token, name: dl.name });
+        } else {
+          toast.error(
+            "Invalid grant link",
+            "The link is missing its issuer or token."
+          );
+        }
+        return;
+      }
       if (dl.action === "terminal") {
         const { profiles, sessions } = useConnections.getState();
         const norm = (v?: string | null) => (v ?? "").trim().toLowerCase();
@@ -597,14 +613,14 @@ function DeepLinkListener() {
     return () => {
       void un.then((f) => f());
     };
-  }, [openNewConnection]);
+  }, [openNewConnection, openGrant]);
   return null;
 }
 
 /// Map a parsed deep link to editor seed values. `pair` links become a
 /// faro-agent profile; everything else a server profile of the named protocol.
 function deepLinkToPrefill(dl: DeepLink): Partial<ConnectionProfile> {
-  const known: Protocol[] = ["sftp", "ftp", "ftps", "s3", "azure", "gcs", "webdav", "http", "dropbox", "onedrive", "gdrive", "box", "faro-agent"];
+  const known: Protocol[] = ["sftp", "ftp", "ftps", "s3", "azure", "gcs", "webdav", "http", "dropbox", "onedrive", "gdrive", "box", "shopify", "faro-agent"];
   const protocol: Protocol =
     dl.action === "pair"
       ? "faro-agent"

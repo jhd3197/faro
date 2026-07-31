@@ -18,6 +18,7 @@ pub mod error;
 mod diskscan;
 mod editor;
 mod foldersync;
+pub mod grant;
 pub mod importers;
 pub mod keys;
 mod known_hosts;
@@ -407,6 +408,8 @@ pub fn run() {
             commands::settings_set,
             commands::settings_delete,
             commands::settings_set_all,
+            grant::fetch_grant_manifest,
+            grant::accept_grant,
             commands::backup_export,
             commands::backup_inspect,
             commands::backup_import,

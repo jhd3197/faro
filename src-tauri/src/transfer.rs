@@ -1,6 +1,6 @@
 use crate::session::{
     BoxSession, DropboxSession, FtpSession, GDriveSession, HttpSession, ObjectSession,
-    OneDriveSession, Session, SshSession, WebdavSession,
+    OneDriveSession, Session, ShopifySession, SshSession, WebdavSession,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -306,6 +306,16 @@ impl TransferManager {
                     )
                     .await
                 }
+                Session::Shopify(sh) => {
+                    mgr.run_shopify_download(
+                        &id_for_task,
+                        sh.clone(),
+                        &remote_path,
+                        &final_path,
+                        &app,
+                    )
+                    .await
+                }
                 Session::Agent(agent) => {
                     mgr.run_agent_download(
                         &id_for_task,
@@ -548,6 +558,16 @@ impl TransferManager {
                     mgr.run_box_upload(
                         &id_for_task,
                         bx.clone(),
+                        &local,
+                        &final_remote,
+                        &app,
+                    )
+                    .await
+                }
+                Session::Shopify(sh) => {
+                    mgr.run_shopify_upload(
+                        &id_for_task,
+                        sh.clone(),
                         &local,
                         &final_remote,
                         &app,
@@ -1281,6 +1301,54 @@ impl TransferManager {
         Ok(())
     }
 
+    /// Download a Shopify theme asset. The Assets API answers with the whole
+    /// file as JSON (`value`/base64 `attachment`), so there is nothing to
+    /// stream — read it, write it out, report at completion like the FTP path.
+    async fn run_shopify_download(
+        &self,
+        id: &str,
+        session: Arc<ShopifySession>,
+        remote_path: &str,
+        local_path: &Path,
+        app: &AppHandle,
+    ) -> Result<()> {
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+        let _ = app; // single-shot API: progress is reported at completion.
+
+        let data = crate::remotefs::shopify::read_asset(&session, remote_path).await?;
+        let mut file = tokio::fs::File::create(local_path)
+            .await
+            .with_context(|| format!("create {}", local_path.display()))?;
+        file.write_all(&data).await?;
+        file.flush().await?;
+        self.update(id, |t| t.transferred = data.len() as u64).await;
+        Ok(())
+    }
+
+    /// Upload a file as a Shopify theme asset (create and update are the same
+    /// PUT; theme files are small, so a single-shot write is the whole story).
+    async fn run_shopify_upload(
+        &self,
+        id: &str,
+        session: Arc<ShopifySession>,
+        local_path: &Path,
+        remote_path: &str,
+        app: &AppHandle,
+    ) -> Result<()> {
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+        let _ = app; // Shopify reports at completion, like the Dropbox path.
+
+        let data = tokio::fs::read(local_path)
+            .await
+            .with_context(|| format!("read {}", local_path.display()))?;
+        let size = data.len() as u64;
+        crate::remotefs::shopify::write_asset(&session, remote_path, &data).await?;
+        self.update(id, |t| t.transferred = size).await;
+        Ok(())
+    }
+
     /// Stream a OneDrive download: GET the item's `/content` (Graph 302s to a
     /// pre-authorized URL, which reqwest follows), written chunk by chunk.
     async fn run_onedrive_download(
@@ -1718,6 +1786,7 @@ fn fs_for_session(session: &Arc<Session>) -> Box<dyn crate::remotefs::RemoteFs> 
         Session::OneDrive(od) => Box::new(crate::remotefs::onedrive::OneDriveFs::new(od.clone())),
         Session::GDrive(gd) => Box::new(crate::remotefs::gdrive::GDriveFs::new(gd.clone())),
         Session::Box(bx) => Box::new(crate::remotefs::boxdrive::BoxFs::new(bx.clone())),
+        Session::Shopify(sh) => Box::new(crate::remotefs::shopify::ShopifyFs::new(sh.clone())),
         Session::Agent(agent) => Box::new(crate::remotefs::agent::AgentFs::new(agent.clone())),
     }
 }
@@ -1802,6 +1871,7 @@ async fn remote_size(session: &Arc<Session>, path: &str) -> Result<u64> {
         Session::OneDrive(od) => Ok(od.size(&crate::remotefs::onedrive::item_ref(path)).await),
         Session::GDrive(gd) => Ok(gd.size(path).await),
         Session::Box(bx) => Ok(bx.size(path).await),
+        Session::Shopify(sh) => Ok(crate::remotefs::shopify::asset_size(sh, path).await),
         Session::Agent(agent) => Ok(agent_stat(agent, path).await.0),
     }
 }
@@ -1981,6 +2051,25 @@ async fn remote_resolve(
                 }
             })
         }
+        Session::Shopify(sh) => {
+            let exists = crate::remotefs::shopify::asset_exists(sh, initial_remote).await;
+            Ok(match policy {
+                OverwritePolicy::Overwrite => (initial_remote.to_string(), false),
+                OverwritePolicy::Skip => (initial_remote.to_string(), exists),
+                OverwritePolicy::Rename if !exists => (initial_remote.to_string(), false),
+                OverwritePolicy::Rename => {
+                    let mut candidate = initial_remote.to_string();
+                    for i in 1..=999 {
+                        let (stem, ext) = split_ext(initial_remote);
+                        candidate = format!("{stem}_{i}{ext}");
+                        if !crate::remotefs::shopify::asset_exists(sh, &candidate).await {
+                            break;
+                        }
+                    }
+                    (candidate, false)
+                }
+            })
+        }
         Session::Agent(agent) => {
             let (_, exists) = agent_stat(agent, initial_remote).await;
             Ok(match policy {
@@ -2002,7 +2091,6 @@ async fn remote_resolve(
         }
     }
 }
-
 fn split_ext(path: &str) -> (&str, &str) {
     match path.rfind('.') {
         Some(dot) if dot > path.rfind('/').unwrap_or(0) => (&path[..dot], &path[dot..]),

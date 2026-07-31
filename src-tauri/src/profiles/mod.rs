@@ -15,6 +15,11 @@ pub enum AuthMethod {
         passphrase: Option<String>,
     },
     Agent,
+    /// A reference to private-key material stored in the OS keychain (under
+    /// `key_ref`, e.g. `grant-key:<profile-id>`), never on disk. The connect
+    /// path resolves it via `credentials::get_secret` at connect time.
+    #[serde(rename_all = "camelCase")]
+    KeyRef { key_ref: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +64,16 @@ pub struct ConnectionProfile {
     pub group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_order: Option<u32>,
+    // Single-hop bastion (ProxyJump). When `jump_host` is set, the SSH connect
+    // path first connects there with the SAME auth material, then tunnels to
+    // `host:port` over a direct-tcpip channel. `jump_port` defaults to 22,
+    // `jump_username` defaults to `username`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jump_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jump_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jump_username: Option<String>,
 }
 
 // Plain JSON file in the app data dir. v0.2 moves secrets into the OS

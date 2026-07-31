@@ -723,6 +723,7 @@ fn needs_content_optin(session: Option<&Session>) -> bool {
                 | Session::OneDrive(_)
                 | Session::GDrive(_)
                 | Session::Box(_)
+                | Session::Shopify(_)
         )
     )
 }

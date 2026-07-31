@@ -467,6 +467,12 @@ async fn download_to(
             }
             file.flush().await?;
         }
+        Session::Shopify(sh) => {
+            let data = crate::remotefs::shopify::read_asset(sh, remote_path).await?;
+            let mut file = tokio::fs::File::create(local_path).await?;
+            file.write_all(&data).await?;
+            file.flush().await?;
+        }
         Session::Agent(agent) => {
             use base64::Engine as _;
             use faro_agent_proto::msg::{Request, Response};
@@ -676,6 +682,11 @@ async fn upload_from(
                 let text = resp.text().await.unwrap_or_default();
                 return Err(anyhow::anyhow!("box upload {remote_path} ({code}): {text}"));
             }
+        }
+        Session::Shopify(sh) => {
+            // Create and update are the same PUT in the Assets API.
+            let data = tokio::fs::read(&local).await?;
+            crate::remotefs::shopify::write_asset(sh, remote_path, &data).await?;
         }
         Session::Agent(agent) => {
             use base64::Engine as _;

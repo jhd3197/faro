@@ -65,6 +65,18 @@ function hostFromUrl(u: string): string {
   }
 }
 
+/// Normalize a Shopify store domain for the profile host: strip any
+/// scheme/path, and append `.myshopify.com` when only the shop name was typed.
+function normalizeShopDomain(s: string): string {
+  const t = s
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "");
+  if (!t) return t;
+  return t.endsWith(".myshopify.com") ? t : `${t}.myshopify.com`;
+}
+
 /// Guess which provider a saved S3 profile belongs to from its endpoint URL.
 /// We never need this to be perfect — it just preselects a preset button.
 function guessProvider(endpoint?: string): S3Provider {
@@ -91,6 +103,7 @@ const PROTOCOL_GROUPS: { label: string; items: Protocol[] }[] = [
   { label: "Object storage", items: ["s3", "azure", "gcs"] },
   { label: "Web", items: ["webdav", "http"] },
   { label: "Cloud drives", items: ["dropbox", "onedrive", "gdrive", "box"] },
+  { label: "Commerce", items: ["shopify"] },
   { label: "Machine", items: ["faro-agent"] },
 ];
 
@@ -210,6 +223,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
   const isOnedrive = protocol === "onedrive";
   const isGdrive = protocol === "gdrive";
   const isBox = protocol === "box";
+  const isShopify = protocol === "shopify";
   const isCloudOAuth = isDropbox || isOnedrive || isGdrive || isBox;
   const isObject = isObjectProtocol(protocol);
   const isAgent = isAgentProtocol(protocol);
@@ -225,11 +239,50 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
   );
   const [cloudAccount, setCloudAccount] = useState<string>(seed?.account ?? "");
 
+  // Shopify: the Admin credential lives in the OS keychain
+  // (`shopify:{profile_id}`) — never in profiles.json. The editor only ever
+  // sets it (one-way) and asks whether one already exists.
+  const [shopifyMode, setShopifyMode] = useState<"token" | "client">("token");
+  const [shopifyToken, setShopifyToken] = useState("");
+  const [shopifyClientId, setShopifyClientId] = useState("");
+  const [shopifyClientSecret, setShopifyClientSecret] = useState("");
+  const [shopifySecretSaved, setShopifySecretSaved] = useState(false);
+  useEffect(() => {
+    if (protocol === "shopify") {
+      ipc
+        .apiKeyStatus(`shopify:${id}`)
+        .then(setShopifySecretSaved)
+        .catch(() => {});
+    }
+  }, [protocol, id]);
+
+  /// The Shopify credential as stored in the keychain: the bare access token,
+  /// or `client_id:client_secret` for a Dev Dashboard app.
+  const shopifySecretEntered =
+    !!shopifyToken.trim() ||
+    !!shopifyClientId.trim() ||
+    !!shopifyClientSecret.trim();
+  const shopifySecret =
+    shopifyMode === "token"
+      ? shopifyToken.trim()
+      : `${shopifyClientId.trim()}:${shopifyClientSecret.trim()}`;
+  const shopifyDomainOk = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(
+    normalizeShopDomain(host)
+  );
+  const shopifySecretOk =
+    shopifySecretSaved ||
+    (shopifyMode === "token"
+      ? !!shopifyToken.trim()
+      : !!shopifyClientId.trim() && !!shopifyClientSecret.trim());
+
   /// Build the profile from the current form state. Shared by Save and by the
   /// pairing flow (which must persist the profile before it can pair by id).
   const buildProfile = (): ConnectionProfile => {
     let auth: AuthMethod;
-    if (authKind === "password") {
+    if (profile?.auth.kind === "keyref") {
+      // Grant-managed key: lives in the OS keychain, never edited here.
+      auth = profile.auth;
+    } else if (authKind === "password") {
       auth = { kind: "password", password };
     } else if (authKind === "key") {
       auth = { kind: "key", path: keyPath, passphrase: passphrase || undefined };
@@ -250,9 +303,11 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
                 ? `${username ? `${username}@` : ""}${hostFromUrl(endpoint)}`
                 : isCloudOAuth
                   ? cloudAccount || PROTOCOL_LABEL[protocol]
-                  : isAgent
-                    ? `Agent @ ${host}`
-                    : `${username}@${host}`),
+                  : isShopify
+                    ? normalizeShopDomain(host) || "Shopify"
+                    : isAgent
+                      ? `Agent @ ${host}`
+                      : `${username}@${host}`),
       protocol,
       host: isObject
         ? endpoint ||
@@ -265,10 +320,19 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
           ? hostFromUrl(endpoint)
           : isCloudOAuth
             ? `${protocol}.com`
-            : host,
+            : isShopify
+              ? normalizeShopDomain(host)
+              : host,
       port,
-      username: isAzure ? azureAccount : isAgent || isGcs || isCloudOAuth ? "" : username,
-      auth: isAgent || isCloudOAuth ? { kind: "password", password: "" } : auth,
+      username: isAzure
+        ? azureAccount
+        : isAgent || isGcs || isCloudOAuth || isShopify
+          ? ""
+          : username,
+      auth:
+        isAgent || isCloudOAuth || isShopify
+          ? { kind: "password", password: "" }
+          : auth,
       defaultRemotePath: defaultRemotePath || undefined,
       color: profile?.color,
       autoConnect: autoConnect || undefined,
@@ -279,10 +343,19 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
       agentKey: isAgent ? agentKey : undefined,
       group: group.trim() || undefined,
       sortOrder: profile?.sortOrder,
+      // Bastion hop (grant-imported only): carried through untouched.
+      jumpHost: profile?.jumpHost,
+      jumpPort: profile?.jumpPort,
+      jumpUsername: profile?.jumpUsername,
     };
   };
 
   const save = async () => {
+    // Shopify: persist the credential to the OS keychain first (one-way set —
+    // it never lands in profiles.json). Blank fields keep the saved one.
+    if (isShopify && shopifySecretEntered) {
+      await ipc.setApiKey(`shopify:${id}`, shopifySecret);
+    }
     await saveProfile(buildProfile());
     onClose();
   };
@@ -319,11 +392,13 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
           ? !!endpoint && !!password
           : isHttp
             ? !!endpoint
-            : isCloudOAuth
-              ? cloudAuthed
-              : isAgent
-                ? !!host && !!agentKey
-                : !!host && !!username;
+            : isShopify
+              ? shopifyDomainOk && shopifySecretOk
+              : isCloudOAuth
+                ? cloudAuthed
+                : isAgent
+                  ? !!host && !!agentKey
+                  : !!host && !!username;
   // Name what's still required so a disabled Save isn't a dead end.
   const missing = (
     isS3
@@ -339,7 +414,12 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             ? [!endpoint && "server URL", !password && "password / token"]
             : isHttp
               ? [!endpoint && "URL"]
-              : isCloudOAuth
+              : isShopify
+                ? [
+                    !shopifyDomainOk && "store domain",
+                    !shopifySecretOk && "API credential",
+                  ]
+                : isCloudOAuth
                 ? [!cloudAuthed && `${PROTOCOL_LABEL[protocol]} authorization`]
                 : isAgent
                   ? [!host && "host", !agentKey && "pairing"]
@@ -480,6 +560,20 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             password={password}
             setPassword={setPassword}
           />
+        ) : isShopify ? (
+          <ShopifySection
+            domain={host}
+            setDomain={setHost}
+            mode={shopifyMode}
+            setMode={setShopifyMode}
+            token={shopifyToken}
+            setToken={setShopifyToken}
+            clientId={shopifyClientId}
+            setClientId={setShopifyClientId}
+            clientSecret={shopifyClientSecret}
+            setClientSecret={setShopifyClientSecret}
+            secretSaved={shopifySecretSaved}
+          />
         ) : isCloudOAuth ? (
           <OAuthConnectSection
             label={PROTOCOL_LABEL[protocol]}
@@ -552,6 +646,22 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
               />
             </Field>
 
+            {profile?.jumpHost && (
+              <Hint>
+                via bastion{" "}
+                <span className="font-mono text-text-dim">
+                  {profile.jumpUsername ? `${profile.jumpUsername}@` : ""}
+                  {profile.jumpHost}:{profile.jumpPort ?? 22}
+                </span>
+              </Hint>
+            )}
+
+            {profile?.auth.kind === "keyref" ? (
+              <Hint>
+                Managed key (access grant) — stored in your OS keychain.
+              </Hint>
+            ) : (
+              <>
             <Field label="Auth">
               <select
                 value={authKind}
@@ -597,6 +707,8 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
                 username={username}
                 host={host}
               />
+            )}
+              </>
             )}
           </>
         )}
@@ -1603,6 +1715,92 @@ function WebdavSection({
   );
 }
 
+function ShopifySection({
+  domain,
+  setDomain,
+  mode,
+  setMode,
+  token,
+  setToken,
+  clientId,
+  setClientId,
+  clientSecret,
+  setClientSecret,
+  secretSaved,
+}: {
+  domain: string;
+  setDomain: (v: string) => void;
+  mode: "token" | "client";
+  setMode: (m: "token" | "client") => void;
+  token: string;
+  setToken: (v: string) => void;
+  clientId: string;
+  setClientId: (v: string) => void;
+  clientSecret: string;
+  setClientSecret: (v: string) => void;
+  secretSaved: boolean;
+}) {
+  return (
+    <>
+      <Field label="Store domain">
+        <input
+          value={domain}
+          onChange={(e) => setDomain(e.target.value)}
+          placeholder="my-store.myshopify.com"
+          className={inputCls}
+        />
+      </Field>
+
+      <Hint>
+        Browse and edit theme files like an FTP site. Prefer an
+        unpublished/duplicate theme — changes deploy instantly.
+      </Hint>
+
+      <Field label="Auth">
+        <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-bg-subtle p-1">
+          {(["token", "client"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setMode(m)}
+              className={
+                "rounded-sm px-2 py-1.5 text-[11px] font-semibold transition-colors " +
+                (mode === m
+                  ? "bg-accent-soft text-text ring-1 ring-inset ring-accent/40"
+                  : "text-text-muted hover:bg-bg-hover hover:text-text")
+              }
+            >
+              {m === "token" ? "Access token" : "Client ID + Secret"}
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      {mode === "token" ? (
+        <Field label="Admin API access token">
+          <PasswordInput value={token} onChange={setToken} />
+        </Field>
+      ) : (
+        <>
+          <Field label="Client ID">
+            <PasswordInput value={clientId} onChange={setClientId} />
+          </Field>
+          <Field label="Client secret">
+            <PasswordInput value={clientSecret} onChange={setClientSecret} />
+          </Field>
+        </>
+      )}
+
+      <Hint>
+        Stored in your OS keychain — never in the connections file.
+        {secretSaved
+          ? " A credential is already saved; leave the fields blank to keep it."
+          : ""}
+      </Hint>
+    </>
+  );
+}
+
 function GcsSection({
   bucket,
   setBucket,
@@ -1827,6 +2025,8 @@ function protocolHint(p: Protocol): string {
       return "OAuth · Cloud";
     case "box":
       return "OAuth · Cloud";
+    case "shopify":
+      return "Theme files · :443";
     case "faro-agent":
       return "Machine · :8722";
   }

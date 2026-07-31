@@ -30,6 +30,7 @@ const PROTOCOL_ICON: Record<Protocol, string> = {
   onedrive: "logos:microsoft-onedrive",
   gdrive: "logos:google-drive",
   box: "simple-icons:box",
+  shopify: "simple-icons:shopify",
   "faro-agent": "mdi:lighthouse-on",
 };
 

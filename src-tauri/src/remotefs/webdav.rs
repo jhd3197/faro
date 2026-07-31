@@ -537,6 +537,9 @@ mod tests {
             agent_key: None,
             group: None,
             sort_order: None,
+            jump_host: None,
+            jump_port: None,
+            jump_username: None,
         };
 
         let sess = Arc::new(webdav_connect(&profile).await.expect("connect"));

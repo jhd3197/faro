@@ -6,6 +6,7 @@ pub mod gdrive;
 pub mod http;
 pub mod object;
 pub mod onedrive;
+pub mod shopify;
 pub mod webdav;
 pub use agent::{agent_pair, AgentSession};
 pub use boxdrive::{box_connect, BoxSession};
@@ -15,6 +16,7 @@ pub use gdrive::{gdrive_connect, GDriveSession};
 pub use http::{http_connect, HttpSession};
 pub use object::{object_connect, ObjectSession};
 pub use onedrive::{onedrive_connect, OneDriveSession};
+pub use shopify::{shopify_connect, ShopifySession};
 pub use webdav::{webdav_connect, WebdavSession};
 
 use crate::known_hosts;
@@ -413,6 +415,11 @@ pub struct SshSession {
     pub id: String,
     pub profile: ConnectionProfile,
     pub handle: Mutex<client::Handle<ClientHandler>>,
+    /// Bastion connection this session is tunneled through, when the profile
+    /// has a `jump_host`. Held purely to keep the jump hop alive — dropping
+    /// the handle would tear down the direct-tcpip channel the target
+    /// session rides on. Replaced on every reconnect.
+    jump_handle: Mutex<Option<client::Handle<ClientHandler>>>,
     /// Lazily-opened SFTP subsystem. Behind an `Option` so a reconnect can drop
     /// the stale channel and force the next caller to reopen it; handed out as
     /// an `Arc` so callers never borrow the session across an `.await`.
@@ -456,6 +463,7 @@ impl SshSession {
             id: Uuid::new_v4().to_string(),
             profile,
             handle: Mutex::new(handle),
+            jump_handle: Mutex::new(None),
             sftp: Mutex::new(None),
             reconnect_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
@@ -532,10 +540,13 @@ impl SshSession {
         // auth rather than hang. (An expired password on reconnect surfaces as a
         // failed reconnect, which the user resolves by reconnecting by hand.)
         let prompter: Arc<dyn AuthPrompter> = Arc::new(RejectAuthPrompter);
-        let handle = ssh_connect(&self.profile, verifier, prompter)
+        let conn = ssh_connect(&self.profile, verifier, prompter)
             .await
             .context("reconnecting SSH session")?;
-        *self.handle.lock().await = handle;
+        *self.handle.lock().await = conn.handle;
+        // Swap in the new bastion hop (if any); dropping the old handle tears
+        // down the stale jump connection.
+        *self.jump_handle.lock().await = conn.jump_handle;
         *self.sftp.lock().await = None; // stale channel — force reopen
         self.generation.fetch_add(1, Ordering::Release);
         tracing::info!(session = %self.id, "SSH reconnected");
@@ -1166,8 +1177,9 @@ pub async fn open_session(
             // The CLI has no interactive prompt UI, so forced-change/KBI servers
             // aren't supported here — refuse rather than hang.
             let prompter: Arc<dyn AuthPrompter> = Arc::new(RejectAuthPrompter);
-            let handle = ssh_connect(profile, verifier, prompter).await?;
-            let ssh = Arc::new(SshSession::new(profile.clone(), handle));
+            let conn = ssh_connect(profile, verifier, prompter).await?;
+            let ssh = Arc::new(SshSession::new(profile.clone(), conn.handle));
+            *ssh.jump_handle.lock().await = conn.jump_handle;
             Ok(Session::Ssh(ssh))
         }
         "ftp" | "ftps" => {
@@ -1201,6 +1213,10 @@ pub async fn open_session(
         "box" => {
             let bx = box_connect(profile).await?;
             Ok(Session::Box(Arc::new(bx)))
+        }
+        "shopify" => {
+            let sh = shopify_connect(profile).await?;
+            Ok(Session::Shopify(Arc::new(sh)))
         }
         other => Err(anyhow!("unsupported protocol: {other}")),
     }
@@ -1294,11 +1310,20 @@ async fn authenticate_with_agent(
     Ok(false)
 }
 
+/// An established SSH connection to a profile's target host. When the profile
+/// has a bastion (`jump_host`), the target session is tunneled through it and
+/// `jump_handle` keeps that hop alive — dropping it would kill the
+/// direct-tcpip channel the target session rides on.
+pub struct SshConnection {
+    pub handle: client::Handle<ClientHandler>,
+    pub jump_handle: Option<client::Handle<ClientHandler>>,
+}
+
 pub async fn ssh_connect(
     profile: &ConnectionProfile,
     verifier: Arc<dyn HostKeyVerifier>,
     prompter: Arc<dyn AuthPrompter>,
-) -> Result<client::Handle<ClientHandler>> {
+) -> Result<SshConnection> {
     let config = Arc::new(client::Config {
         // Keep idle sessions alive and detect a genuinely dead peer (laptop
         // slept, NAT/firewall dropped the socket, server rebooted) in ~60s:
@@ -1313,6 +1338,63 @@ pub async fn ssh_connect(
         inactivity_timeout: None,
         ..Default::default()
     });
+
+    // Single-hop ProxyJump: connect to the bastion with the SAME auth material
+    // (grant spec: the issuer installs the uploaded public key on both hops),
+    // open a direct-tcpip channel to the target, and run the target's SSH
+    // handshake over that channel.
+    if let Some(jump_host) = profile.jump_host.clone() {
+        let jump_port = profile.jump_port.unwrap_or(22);
+        let jump_username = profile
+            .jump_username
+            .clone()
+            .unwrap_or_else(|| profile.username.clone());
+        let jump_handler = ClientHandler {
+            host: jump_host.clone(),
+            port: jump_port,
+            verifier: verifier.clone(),
+        };
+        let mut jump = client::connect(config.clone(), (jump_host.as_str(), jump_port), jump_handler)
+            .await
+            .with_context(|| format!("connect to jump host {jump_host}:{jump_port}"))?;
+        authenticate(&mut jump, profile, &jump_username, &prompter)
+            .await
+            .with_context(|| format!("authenticate on jump host {jump_host}"))?;
+
+        let channel = jump
+            .channel_open_direct_tcpip(
+                profile.host.clone(),
+                profile.port as u32,
+                "127.0.0.1",
+                0,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "open tunnel to {}:{} via {jump_host}",
+                    profile.host, profile.port
+                )
+            })?;
+        let handler = ClientHandler {
+            host: profile.host.clone(),
+            port: profile.port,
+            verifier,
+        };
+        let mut session = client::connect_stream(config, channel.into_stream(), handler)
+            .await
+            .with_context(|| {
+                format!(
+                    "connect to {}:{} via jump host {jump_host}",
+                    profile.host, profile.port
+                )
+            })?;
+        authenticate(&mut session, profile, &profile.username, &prompter).await?;
+        return Ok(SshConnection {
+            handle: session,
+            jump_handle: Some(jump),
+        });
+    }
+
     let addr = (profile.host.as_str(), profile.port);
     let handler = ClientHandler {
         host: profile.host.clone(),
@@ -1322,11 +1404,26 @@ pub async fn ssh_connect(
     let mut session = client::connect(config, addr, handler)
         .await
         .with_context(|| format!("connect to {}:{}", profile.host, profile.port))?;
+    authenticate(&mut session, profile, &profile.username, &prompter).await?;
+    Ok(SshConnection {
+        handle: session,
+        jump_handle: None,
+    })
+}
 
+/// Authenticate `session` with the profile's auth material, as `username`.
+/// Shared by the direct and bastion (ProxyJump) paths — both hops authenticate
+/// with the same material.
+async fn authenticate(
+    session: &mut client::Handle<ClientHandler>,
+    profile: &ConnectionProfile,
+    username: &str,
+    prompter: &Arc<dyn AuthPrompter>,
+) -> Result<()> {
     let authed = match &profile.auth {
         AuthMethod::Password { password } => {
             let ok = session
-                .authenticate_password(&profile.username, password)
+                .authenticate_password(username, password)
                 .await
                 .context("password auth")?;
             if ok {
@@ -1335,13 +1432,8 @@ pub async fn ssh_connect(
                 // Plain password failed. The server may only offer the
                 // keyboard-interactive method, or it's demanding an immediate
                 // change for an expired/temp password. Drive that exchange.
-                keyboard_interactive_auth(
-                    &mut session,
-                    &profile.username,
-                    Some(password.as_str()),
-                    &prompter,
-                )
-                .await?
+                keyboard_interactive_auth(session, username, Some(password.as_str()), prompter)
+                    .await?
             }
         }
         AuthMethod::Key { path, passphrase } => {
@@ -1352,17 +1444,35 @@ pub async fn ssh_connect(
             let key = russh_keys::load_secret_key(&resolved, passphrase.as_deref())
                 .with_context(|| format!("load key {}", resolved.display()))?;
             session
-                .authenticate_publickey(&profile.username, Arc::new(key))
+                .authenticate_publickey(username, Arc::new(key))
                 .await
                 .context("publickey auth")?
         }
-        AuthMethod::Agent => authenticate_with_agent(&mut session, &profile.username).await?,
+        AuthMethod::KeyRef { key_ref } => {
+            // Key material lives only in the OS keychain (access grants) —
+            // never on disk. Fetch the PEM and decode it straight into a
+            // russh keypair.
+            let pem = crate::credentials::get_secret(key_ref)
+                .with_context(|| format!("read key {key_ref} from keychain"))?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "keychain entry {key_ref} is missing — the grant key may have been deleted"
+                    )
+                })?;
+            let key = russh_keys::decode_secret_key(&pem, None)
+                .with_context(|| format!("decode key {key_ref}"))?;
+            session
+                .authenticate_publickey(username, Arc::new(key))
+                .await
+                .context("publickey auth")?
+        }
+        AuthMethod::Agent => authenticate_with_agent(session, username).await?,
     };
 
     if !authed {
         return Err(anyhow!("Authentication failed"));
     }
-    Ok(session)
+    Ok(())
 }
 
 /// Drive a keyboard-interactive exchange. Auto-answers the ordinary login
@@ -1463,6 +1573,7 @@ pub enum Session {
     OneDrive(Arc<OneDriveSession>),
     GDrive(Arc<GDriveSession>),
     Box(Arc<BoxSession>),
+    Shopify(Arc<ShopifySession>),
     Agent(Arc<AgentSession>),
 }
 
@@ -1478,6 +1589,7 @@ impl Session {
             Self::OneDrive(s) => &s.profile,
             Self::GDrive(s) => &s.profile,
             Self::Box(s) => &s.profile,
+            Self::Shopify(s) => &s.profile,
             Self::Agent(s) => &s.profile,
         }
     }
@@ -1493,6 +1605,7 @@ impl Session {
             Self::OneDrive(_) => "onedrive",
             Self::GDrive(_) => "gdrive",
             Self::Box(_) => "box",
+            Self::Shopify(_) => "shopify",
             Self::Agent(_) => "faro-agent",
         }
     }
@@ -1544,12 +1657,13 @@ impl SessionManager {
         let _ = app;
         let session = match profile.protocol.as_str() {
             "sftp" | "ssh" | "" => {
-                let handle = ssh_connect(&profile, verifier, prompter).await?;
+                let conn = ssh_connect(&profile, verifier, prompter).await?;
                 let id = Uuid::new_v4().to_string();
                 let ssh = Arc::new(SshSession {
                     id: id.clone(),
                     profile,
-                    handle: Mutex::new(handle),
+                    handle: Mutex::new(conn.handle),
+                    jump_handle: Mutex::new(conn.jump_handle),
                     sftp: Mutex::new(None),
                     reconnect_lock: Mutex::new(()),
                     generation: AtomicU64::new(0),
@@ -1603,6 +1717,12 @@ impl SessionManager {
                 let bx = box_connect(&profile).await?;
                 let id = bx.id.clone();
                 (id, Session::Box(Arc::new(bx)))
+            }
+            "shopify" => {
+                let _ = app; // Credential loaded from the keychain; no prompt.
+                let sh = shopify_connect(&profile).await?;
+                let id = sh.id.clone();
+                (id, Session::Shopify(Arc::new(sh)))
             }
             "faro-agent" => {
                 let agent = AgentSession::connect(profile).await?;
@@ -1663,6 +1783,13 @@ impl SessionManager {
                     let _ = h
                         .disconnect(russh::Disconnect::ByApplication, "bye", "en")
                         .await;
+                    drop(h);
+                    // Close the bastion hop too, if this session was tunneled.
+                    if let Some(jump) = ssh.jump_handle.lock().await.take() {
+                        let _ = jump
+                            .disconnect(russh::Disconnect::ByApplication, "bye", "en")
+                            .await;
+                    }
                 }
                 Session::Ftp(ftp) => {
                     let _ = ftp
@@ -1692,6 +1819,9 @@ impl SessionManager {
                 }
                 Session::Box(_) => {
                     // Box is stateless HTTP — nothing to close.
+                }
+                Session::Shopify(_) => {
+                    // Shopify is stateless HTTP — nothing to close.
                 }
                 Session::Agent(agent) => {
                     agent.disconnect().await;
