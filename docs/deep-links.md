@@ -32,7 +32,22 @@ faro://<action>?<param>=<value>&<param>=<value>…
 The **authority** is the action; everything else is URL-encoded query
 parameters. The *site's* own host goes in `?host=`, not in the URL authority.
 
-Three actions:
+Four actions:
+
+### `faro://grant` — accept delegated access to one or many servers
+
+Opens a **consent dialog** for an access grant issued by a trusted service
+(e.g. an agency's ServerKit panel): the issuer mints a token, Faro fetches the
+list of granted servers, and — only after the user clicks **Accept** — creates
+a fresh on-device key and imports the servers as ordinary connections. The
+link carries a redemption token, never a credential.
+
+```
+faro://grant?issuer=https%3A%2F%2Fpanel.agency.com&token=gr_9f2kQ7
+```
+
+The full open protocol (manifest schema, key exchange, issuer requirements) is
+specified in **`docs/grant-links.md`**.
 
 ### `faro://connect` — open a server connection
 

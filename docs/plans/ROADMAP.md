@@ -53,6 +53,7 @@ thematic detail.
 | 15 | `15_keyboard-shortcuts` | ⬜ | Remappable shortcuts + Settings Keyboard tab + file-browser keys (F2 rename & friends). Builds on the Plan 12 settings substrate. Independent polish; do whenever. |
 | 16 | `16_app-updater-and-notifications` | ⬜ | In-app auto-updater (signed, GitHub Releases manifest) + desktop notifications + one-click per-user PATH install. Trust/UX fundamentals for a shipping app. |
 | 17 | `17_transfer-queue-depth` | ⬜ | Real queue (bounded concurrency), pause/resume, retry, bandwidth throttle. Turns the transfer list into an actual queue. |
+| 18 | `18_shopify-backend` | ⬜ planned | Shopify store as a connection: themes are a literal remote filesystem (Assets API) — dual-pane theme editing, diff, sync, in-place edit. Phase 2 store media, Phase 3 content-as-files. The agency-workflow backend. |
 | 99 | `99_scoped-connection-sharing` | 🚫 out of scope | Pulled from the numbered order; slated for removal. Design notes kept on file only. |
 
 Cross-project **Track D** (ServerKit ↔ Faro) has no plan file — it's a
@@ -156,6 +157,11 @@ prefilled SFTP handoff).
 
 - ✅ Shallow: `serverkit-faro` `faro://connect` deep-link (prefill only, no
   credentials). *Shipped.*
+- 🚧 **Delegated access grants** (`faro://grant`): an issuer (ServerKit
+  extension) mints a token; Faro consents, generates an on-device key, and
+  imports N servers — with optional bastion hop for a static source IP. Open
+  protocol in `docs/grant-links.md`, plan in Plan 19. *Faro side in progress;
+  ServerKit issuer extension is the follow-up.*
 - ⬜ **Deep: embed/expose `faro-agentd` on ServerKit hosts.** Two options:
   (a) ServerKit's Go agent speaks the Faro Noise protocol natively (port a
   minimal `faro-agent-proto` responder to Go), or (b) ServerKit installs the
