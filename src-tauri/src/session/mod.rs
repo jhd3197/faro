@@ -6,6 +6,7 @@ pub mod gdrive;
 pub mod http;
 pub mod object;
 pub mod onedrive;
+pub mod shopify;
 pub mod webdav;
 pub use agent::{agent_pair, AgentSession};
 pub use boxdrive::{box_connect, BoxSession};
@@ -15,6 +16,7 @@ pub use gdrive::{gdrive_connect, GDriveSession};
 pub use http::{http_connect, HttpSession};
 pub use object::{object_connect, ObjectSession};
 pub use onedrive::{onedrive_connect, OneDriveSession};
+pub use shopify::{shopify_connect, ShopifySession};
 pub use webdav::{webdav_connect, WebdavSession};
 
 use crate::known_hosts;

@@ -11,6 +11,7 @@ pub mod local;
 pub mod object;
 pub mod onedrive;
 pub mod sftp;
+pub mod shopify;
 pub mod webdav;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
