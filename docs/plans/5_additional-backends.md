@@ -151,6 +151,16 @@ client ID/secret). Verified by unit tests + a live `#[ignore]` roundtrip
 against `tests/shopify_mock.py`. Phases 2 (store media) and 3 (content as
 virtual files) remain in plan 18.
 
+### Phase 7 — HubSpot (Design Manager / File Manager / HubDB) — ⬜ planned (Plan 20)
+Specced in **`docs/plans/20_hubspot-backend.md`**, following this plan's
+recipe exactly: one private-app token (`pat-…`, keychain-stored, no OAuth
+loopback) over three surfaces in a single connection — the Design Manager via
+the Source Code API v3 (a true hierarchical filesystem with draft/published
+environments, an even cleaner fit than Shopify's key prefixes), the File
+Manager via the Files API v3, and HubDB tables as virtual CSV files
+(read-mostly; write-back deferred until row-ID round-tripping is safe). Same
+throttled-`reqwest`-session shape as Shopify (shared per-portal quota).
+
 All four reuse `oauth.rs` (loopback+PKCE+keychain) and the shared
 `RefreshingToken` (proactive refresh + 401-retry). Each needs the same
 maintainer step to go live: register the provider app with redirect
