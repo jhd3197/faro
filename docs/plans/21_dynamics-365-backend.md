@@ -150,7 +150,19 @@ Connect-time validation: `GET /WhoAmI` — returns user/org ids, doubles as the
 
 ## Phases
 
-### Phase 1 — Web resources filesystem (the backend)
+### Phase 1 — Web resources filesystem (the backend) — ✅ shipped
+
+Shipped: `session/dynamics.rs` + `remotefs/dynamics.rs` (client-credentials
+auth only — the keychain blob is `tenant_id:client_id:client_secret`, parsed
+with `splitn(3, ':')`; **delegated OAuth deferred**, the ProfileEditor has a
+marked spot for the toggle), all Session/transfer/editor/search/preview/CLI
+arms, `DynamicsSection` (environment URL with regional-cloud validation),
+brand icon, deep-link prefill, and `tests/dynamics_mock.py` with
+`live_dynamics_roundtrip` mock-verified (162 lib tests green; hubspot/shopify
+roundtrips unaffected). Two documented judgment calls: publish fires after
+writes and both halves of rename but **not** after delete (Dataverse deletes
+are immediate), and listing sizes are the session-cached decoded length (0
+until read — Dataverse has no per-row byte size).
 
 **Rust (8 files + 2 new):**
 

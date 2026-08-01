@@ -104,7 +104,7 @@ Builds are **unsigned** (no Apple Developer / Windows EV certificate yet), so ea
 
 ## 🎯 Features
 
-> **One connection list, fifteen backends.** Browse, transfer, sync, and the disk-usage / diff / search tools work the same on every one — all behind a single `RemoteFs` trait.
+> **One connection list, sixteen backends.** Browse, transfer, sync, and the disk-usage / diff / search tools work the same on every one — all behind a single `RemoteFs` trait.
 
 ### 📡 Backends & Storage
 
@@ -114,6 +114,7 @@ Builds are **unsigned** (no Apple Developer / Windows EV certificate yet), so ea
 | **Azure Blob & Google Cloud Storage**<br>First-class object storage alongside your servers. | **WebDAV & HTTP(S)**<br>Nextcloud / ownCloud browsing, plus read-only HTTP autoindex and direct-URL sources. |
 | **Cloud drives**<br>Dropbox, OneDrive, Google Drive, and Box — loopback + PKCE OAuth, only the refresh token in your OS keychain. | **Faro Agent**<br>Faro's own paired agent as a backend — browse, transfer, and exec on a machine with no SSH server. |
 | **Shopify themes**<br>Browse and edit store themes like an FTP site — dual-pane, diff, sync, in-place Liquid editing. | **HubSpot CMS**<br>Design Manager files (templates, modules, CSS/JS, HubL) as a filesystem — draft and published environments, edits deploy on save. Plus the File Manager asset library, and HubDB tables as read-only CSV exports. |
+| **Dynamics 365 / Dataverse**<br>Web resources (form scripts, CSS, HTML, images) as a filesystem — browse, diff, sync, in-place edit; saves publish automatically. The XrmToolBox workflow, without XrmToolBox. | |
 
 ### 🔁 Transfers & Sync
 
@@ -425,7 +426,7 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 |-------|------------|
 | App shell | Tauri 2 (Rust) |
 | Frontend | React 18, TypeScript, Vite, Zustand, xterm.js, Tailwind CSS |
-| Backend core | Rust — one `RemoteFs` trait over 15 backends |
+| Backend core | Rust — one `RemoteFs` trait over 16 backends |
 | SSH | russh (SFTP + PTY), ssh-agent / Pageant integration |
 | Object storage | S3, Azure Blob, Google Cloud Storage SDKs |
 | Cloud drives | Loopback + PKCE OAuth (Dropbox, OneDrive, Google Drive, Box) |
