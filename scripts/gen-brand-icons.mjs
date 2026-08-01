@@ -48,6 +48,7 @@ const CURATED = [
   "logos:google-drive", // gdrive
   "simple-icons:box", // box
   "simple-icons:shopify", // shopify
+  "simple-icons:hubspot", // hubspot
   // Vendor marks for the S3 / WebDAV provider preset buttons (Phase 3). Where a
   // provider has no icon (Storj, the generic presets), the button falls back to
   // the neutral lucide glyph — protocolIcon() never maps to these.

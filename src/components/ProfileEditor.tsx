@@ -103,7 +103,7 @@ const PROTOCOL_GROUPS: { label: string; items: Protocol[] }[] = [
   { label: "Object storage", items: ["s3", "azure", "gcs"] },
   { label: "Web", items: ["webdav", "http"] },
   { label: "Cloud drives", items: ["dropbox", "onedrive", "gdrive", "box"] },
-  { label: "Commerce", items: ["shopify"] },
+  { label: "Commerce", items: ["shopify", "hubspot"] },
   { label: "Machine", items: ["faro-agent"] },
 ];
 
@@ -224,6 +224,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
   const isGdrive = protocol === "gdrive";
   const isBox = protocol === "box";
   const isShopify = protocol === "shopify";
+  const isHubSpot = protocol === "hubspot";
   const isCloudOAuth = isDropbox || isOnedrive || isGdrive || isBox;
   const isObject = isObjectProtocol(protocol);
   const isAgent = isAgentProtocol(protocol);
@@ -275,6 +276,26 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
       ? !!shopifyToken.trim()
       : !!shopifyClientId.trim() && !!shopifyClientSecret.trim());
 
+  // HubSpot: the private-app access token (`pat-…`) lives in the OS keychain
+  // (`hubspot:{profile_id}`) — never in profiles.json. The editor only ever
+  // sets it (one-way) and asks whether one already exists.
+  const [hubspotToken, setHubspotToken] = useState("");
+  const [hubspotSecretSaved, setHubspotSecretSaved] = useState(false);
+  useEffect(() => {
+    if (protocol === "hubspot") {
+      ipc
+        .apiKeyStatus(`hubspot:${id}`)
+        .then(setHubspotSecretSaved)
+        .catch(() => {});
+    }
+  }, [protocol, id]);
+
+  const hubspotSecretOk = hubspotSecretSaved || !!hubspotToken.trim();
+  /// HubSpot private-app tokens start with `pat-`; anything else is almost
+  /// certainly the wrong credential pasted in — warn, don't block.
+  const hubspotPatWarn =
+    !!hubspotToken.trim() && !hubspotToken.trim().startsWith("pat-");
+
   /// Build the profile from the current form state. Shared by Save and by the
   /// pairing flow (which must persist the profile before it can pair by id).
   const buildProfile = (): ConnectionProfile => {
@@ -305,7 +326,9 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
                   ? cloudAccount || PROTOCOL_LABEL[protocol]
                   : isShopify
                     ? normalizeShopDomain(host) || "Shopify"
-                    : isAgent
+                    : isHubSpot
+                      ? "HubSpot"
+                      : isAgent
                       ? `Agent @ ${host}`
                       : `${username}@${host}`),
       protocol,
@@ -320,17 +343,19 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
           ? hostFromUrl(endpoint)
           : isCloudOAuth
             ? `${protocol}.com`
-            : isShopify
-              ? normalizeShopDomain(host)
-              : host,
+            : isHubSpot
+              ? "api.hubapi.com"
+              : isShopify
+                ? normalizeShopDomain(host)
+                : host,
       port,
       username: isAzure
         ? azureAccount
-        : isAgent || isGcs || isCloudOAuth || isShopify
+        : isAgent || isGcs || isCloudOAuth || isShopify || isHubSpot
           ? ""
           : username,
       auth:
-        isAgent || isCloudOAuth || isShopify
+        isAgent || isCloudOAuth || isShopify || isHubSpot
           ? { kind: "password", password: "" }
           : auth,
       defaultRemotePath: defaultRemotePath || undefined,
@@ -355,6 +380,10 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
     // it never lands in profiles.json). Blank fields keep the saved one.
     if (isShopify && shopifySecretEntered) {
       await ipc.setApiKey(`shopify:${id}`, shopifySecret);
+    }
+    // HubSpot: same one-way keychain set for the private-app token.
+    if (isHubSpot && hubspotToken.trim()) {
+      await ipc.setApiKey(`hubspot:${id}`, hubspotToken.trim());
     }
     await saveProfile(buildProfile());
     onClose();
@@ -394,7 +423,9 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             ? !!endpoint
             : isShopify
               ? shopifyDomainOk && shopifySecretOk
-              : isCloudOAuth
+              : isHubSpot
+                ? hubspotSecretOk
+                : isCloudOAuth
                 ? cloudAuthed
                 : isAgent
                   ? !!host && !!agentKey
@@ -419,7 +450,9 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
                     !shopifyDomainOk && "store domain",
                     !shopifySecretOk && "API credential",
                   ]
-                : isCloudOAuth
+                : isHubSpot
+                  ? [!hubspotSecretOk && "private-app token"]
+                  : isCloudOAuth
                 ? [!cloudAuthed && `${PROTOCOL_LABEL[protocol]} authorization`]
                 : isAgent
                   ? [!host && "host", !agentKey && "pairing"]
@@ -573,6 +606,13 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             clientSecret={shopifyClientSecret}
             setClientSecret={setShopifyClientSecret}
             secretSaved={shopifySecretSaved}
+          />
+        ) : isHubSpot ? (
+          <HubSpotSection
+            token={hubspotToken}
+            setToken={setHubspotToken}
+            secretSaved={hubspotSecretSaved}
+            patWarn={hubspotPatWarn}
           />
         ) : isCloudOAuth ? (
           <OAuthConnectSection
@@ -1801,6 +1841,46 @@ function ShopifySection({
   );
 }
 
+function HubSpotSection({
+  token,
+  setToken,
+  secretSaved,
+  patWarn,
+}: {
+  token: string;
+  setToken: (v: string) => void;
+  secretSaved: boolean;
+  patWarn: boolean;
+}) {
+  return (
+    <>
+      <Field label="Private app access token">
+        <PasswordInput value={token} onChange={setToken} />
+      </Field>
+
+      <Hint>
+        Create a private app in your HubSpot portal (Settings → Integrations →
+        Private Apps) — the token needs <code>content</code>, <code>files</code>
+        , and <code>hubdb</code> scopes.
+      </Hint>
+
+      {patWarn && (
+        <Hint tone="warn">
+          Private-app tokens start with <code>pat-</code> — double-check that
+          you pasted the right credential.
+        </Hint>
+      )}
+
+      <Hint>
+        Stored in your OS keychain — never in the connections file.
+        {secretSaved
+          ? " A token is already saved; leave the field blank to keep it."
+          : ""}
+      </Hint>
+    </>
+  );
+}
+
 function GcsSection({
   bucket,
   setBucket,
@@ -2027,6 +2107,8 @@ function protocolHint(p: Protocol): string {
       return "OAuth · Cloud";
     case "shopify":
       return "Theme files · :443";
+    case "hubspot":
+      return "Browse and edit Design Manager files like an FTP site. Prefer the draft environment — published writes deploy instantly.";
     case "faro-agent":
       return "Machine · :8722";
   }
