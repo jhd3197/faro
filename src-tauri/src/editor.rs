@@ -479,6 +479,12 @@ async fn download_to(
             file.write_all(&data).await?;
             file.flush().await?;
         }
+        Session::Dynamics(dynm) => {
+            let data = crate::remotefs::dynamics::read_file(dynm, remote_path).await?;
+            let mut file = tokio::fs::File::create(local_path).await?;
+            file.write_all(&data).await?;
+            file.flush().await?;
+        }
         Session::Agent(agent) => {
             use base64::Engine as _;
             use faro_agent_proto::msg::{Request, Response};
@@ -699,6 +705,11 @@ async fn upload_from(
             // API.
             let data = tokio::fs::read(&local).await?;
             crate::remotefs::hubspot::write_file(hs, remote_path, &data).await?;
+        }
+        Session::Dynamics(dynm) => {
+            // Create or update by name lookup, then publish — save = deployed.
+            let data = tokio::fs::read(&local).await?;
+            crate::remotefs::dynamics::write_file(dynm, remote_path, &data).await?;
         }
         Session::Agent(agent) => {
             use base64::Engine as _;

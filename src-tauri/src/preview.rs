@@ -289,6 +289,11 @@ async fn read_head(session: Option<&Session>, path: &str, max: u64) -> Result<Ve
             let data = crate::remotefs::hubspot::read_file(hs, path).await?;
             Ok(data.into_iter().take(max as usize).collect())
         }
+        Some(Session::Dynamics(dynm)) => {
+            // No ranged read in the Web API — the file comes back whole.
+            let data = crate::remotefs::dynamics::read_file(dynm, path).await?;
+            Ok(data.into_iter().take(max as usize).collect())
+        }
         Some(other) => bail!("preview not supported for {} yet", other.protocol()),
     }
 }
