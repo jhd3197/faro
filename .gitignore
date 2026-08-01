@@ -59,3 +59,7 @@ docs/screenshots/*.png
 # CI secret TAURI_SIGNING_PRIVATE_KEY. See docs/updater-key-custody.md.
 .updater/
 /graphify-out
+
+# Python (test mocks bytecode cache)
+__pycache__/
+*.pyc
