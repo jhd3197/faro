@@ -126,6 +126,12 @@ export const ipc = {
   boxAuthorize: (profileId: string) =>
     invoke<{ accountLabel: string }>("box_authorize", { profileId }),
 
+  /** Run the interactive Dynamics 365 (delegated) OAuth flow for a profile —
+   *  the OneDrive pattern with the org's `user_impersonation` scope. `host` is
+   *  the environment URL (`{org}.crm.dynamics.com`) the editor collected. */
+  dynamicsAuthorize: (profileId: string, host: string) =>
+    invoke<{ accountLabel: string }>("dynamics_authorize", { profileId, host }),
+
   // ---- Remote control: host THIS machine as a Faro Agent (Settings) ----
 
   /** Current state of the in-app agent host (enabled, running, policy, peers,
