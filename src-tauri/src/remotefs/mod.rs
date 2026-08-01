@@ -7,6 +7,7 @@ pub mod dropbox;
 pub mod ftp;
 pub mod gdrive;
 pub mod http;
+pub mod hubspot;
 pub mod local;
 pub mod object;
 pub mod onedrive;
