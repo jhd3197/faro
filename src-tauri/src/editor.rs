@@ -473,6 +473,12 @@ async fn download_to(
             file.write_all(&data).await?;
             file.flush().await?;
         }
+        Session::HubSpot(hs) => {
+            let data = crate::remotefs::hubspot::read_file(hs, remote_path).await?;
+            let mut file = tokio::fs::File::create(local_path).await?;
+            file.write_all(&data).await?;
+            file.flush().await?;
+        }
         Session::Agent(agent) => {
             use base64::Engine as _;
             use faro_agent_proto::msg::{Request, Response};
@@ -687,6 +693,12 @@ async fn upload_from(
             // Create and update are the same PUT in the Assets API.
             let data = tokio::fs::read(&local).await?;
             crate::remotefs::shopify::write_asset(sh, remote_path, &data).await?;
+        }
+        Session::HubSpot(hs) => {
+            // Create and update are the same multipart PUT in the Source Code
+            // API.
+            let data = tokio::fs::read(&local).await?;
+            crate::remotefs::hubspot::write_file(hs, remote_path, &data).await?;
         }
         Session::Agent(agent) => {
             use base64::Engine as _;

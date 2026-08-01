@@ -1,6 +1,6 @@
 use crate::session::{
-    BoxSession, DropboxSession, FtpSession, GDriveSession, HttpSession, ObjectSession,
-    OneDriveSession, Session, ShopifySession, SshSession, WebdavSession,
+    BoxSession, DropboxSession, FtpSession, GDriveSession, HttpSession, HubSpotSession,
+    ObjectSession, OneDriveSession, Session, ShopifySession, SshSession, WebdavSession,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -316,6 +316,16 @@ impl TransferManager {
                     )
                     .await
                 }
+                Session::HubSpot(hs) => {
+                    mgr.run_hubspot_download(
+                        &id_for_task,
+                        hs.clone(),
+                        &remote_path,
+                        &final_path,
+                        &app,
+                    )
+                    .await
+                }
                 Session::Agent(agent) => {
                     mgr.run_agent_download(
                         &id_for_task,
@@ -568,6 +578,16 @@ impl TransferManager {
                     mgr.run_shopify_upload(
                         &id_for_task,
                         sh.clone(),
+                        &local,
+                        &final_remote,
+                        &app,
+                    )
+                    .await
+                }
+                Session::HubSpot(hs) => {
+                    mgr.run_hubspot_upload(
+                        &id_for_task,
+                        hs.clone(),
                         &local,
                         &final_remote,
                         &app,
@@ -1349,6 +1369,55 @@ impl TransferManager {
         Ok(())
     }
 
+    /// Download a HubSpot Design Manager file. The Source Code API answers
+    /// with the whole file as an octet-stream, so there is nothing to stream —
+    /// read it, write it out, report at completion like the Shopify path.
+    async fn run_hubspot_download(
+        &self,
+        id: &str,
+        session: Arc<HubSpotSession>,
+        remote_path: &str,
+        local_path: &Path,
+        app: &AppHandle,
+    ) -> Result<()> {
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+        let _ = app; // single-shot API: progress is reported at completion.
+
+        let data = crate::remotefs::hubspot::read_file(&session, remote_path).await?;
+        let mut file = tokio::fs::File::create(local_path)
+            .await
+            .with_context(|| format!("create {}", local_path.display()))?;
+        file.write_all(&data).await?;
+        file.flush().await?;
+        self.update(id, |t| t.transferred = data.len() as u64).await;
+        Ok(())
+    }
+
+    /// Upload a file to the HubSpot Design Manager (create and update are the
+    /// same multipart PUT; theme files are small, so a single-shot write is
+    /// the whole story).
+    async fn run_hubspot_upload(
+        &self,
+        id: &str,
+        session: Arc<HubSpotSession>,
+        local_path: &Path,
+        remote_path: &str,
+        app: &AppHandle,
+    ) -> Result<()> {
+        self.update(id, |t| t.status = TransferStatus::Transferring)
+            .await;
+        let _ = app; // HubSpot reports at completion, like the Shopify path.
+
+        let data = tokio::fs::read(local_path)
+            .await
+            .with_context(|| format!("read {}", local_path.display()))?;
+        let size = data.len() as u64;
+        crate::remotefs::hubspot::write_file(&session, remote_path, &data).await?;
+        self.update(id, |t| t.transferred = size).await;
+        Ok(())
+    }
+
     /// Stream a OneDrive download: GET the item's `/content` (Graph 302s to a
     /// pre-authorized URL, which reqwest follows), written chunk by chunk.
     async fn run_onedrive_download(
@@ -1787,6 +1856,7 @@ fn fs_for_session(session: &Arc<Session>) -> Box<dyn crate::remotefs::RemoteFs> 
         Session::GDrive(gd) => Box::new(crate::remotefs::gdrive::GDriveFs::new(gd.clone())),
         Session::Box(bx) => Box::new(crate::remotefs::boxdrive::BoxFs::new(bx.clone())),
         Session::Shopify(sh) => Box::new(crate::remotefs::shopify::ShopifyFs::new(sh.clone())),
+        Session::HubSpot(hs) => Box::new(crate::remotefs::hubspot::HubSpotFs::new(hs.clone())),
         Session::Agent(agent) => Box::new(crate::remotefs::agent::AgentFs::new(agent.clone())),
     }
 }
@@ -1872,6 +1942,7 @@ async fn remote_size(session: &Arc<Session>, path: &str) -> Result<u64> {
         Session::GDrive(gd) => Ok(gd.size(path).await),
         Session::Box(bx) => Ok(bx.size(path).await),
         Session::Shopify(sh) => Ok(crate::remotefs::shopify::asset_size(sh, path).await),
+        Session::HubSpot(hs) => Ok(crate::remotefs::hubspot::file_size(hs, path).await),
         Session::Agent(agent) => Ok(agent_stat(agent, path).await.0),
     }
 }
@@ -2063,6 +2134,25 @@ async fn remote_resolve(
                         let (stem, ext) = split_ext(initial_remote);
                         candidate = format!("{stem}_{i}{ext}");
                         if !crate::remotefs::shopify::asset_exists(sh, &candidate).await {
+                            break;
+                        }
+                    }
+                    (candidate, false)
+                }
+            })
+        }
+        Session::HubSpot(hs) => {
+            let exists = crate::remotefs::hubspot::file_exists(hs, initial_remote).await;
+            Ok(match policy {
+                OverwritePolicy::Overwrite => (initial_remote.to_string(), false),
+                OverwritePolicy::Skip => (initial_remote.to_string(), exists),
+                OverwritePolicy::Rename if !exists => (initial_remote.to_string(), false),
+                OverwritePolicy::Rename => {
+                    let mut candidate = initial_remote.to_string();
+                    for i in 1..=999 {
+                        let (stem, ext) = split_ext(initial_remote);
+                        candidate = format!("{stem}_{i}{ext}");
+                        if !crate::remotefs::hubspot::file_exists(hs, &candidate).await {
                             break;
                         }
                     }
