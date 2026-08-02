@@ -737,9 +737,114 @@ pub async fn start_upload(
 #[tauri::command]
 pub async fn cancel_transfer(
     transfer_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state.transfers.cancel(&transfer_id).await.map_err(err)
+    state
+        .transfers
+        .cancel(&transfer_id, &app)
+        .await
+        .map_err(err)
+}
+
+/// Pause a queued or running transfer (Plan 17 Phase 2). A running one parks
+/// at the next chunk boundary; resume re-runs its file from byte 0.
+#[tauri::command]
+pub async fn transfer_pause(
+    transfer_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.transfers.pause(&transfer_id, &app).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn transfer_resume(
+    transfer_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .transfers
+        .resume(&transfer_id, &app)
+        .await
+        .map_err(err)
+}
+
+/// Re-enqueue a failed or canceled transfer with its original source/
+/// destination (Plan 17 Phase 3). Same id — the panel row resets in place.
+#[tauri::command]
+pub async fn transfer_retry(
+    transfer_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.transfers.retry(&transfer_id, &app).await.map_err(err)
+}
+
+/// Reorder a waiting transfer in the queue FIFO (Plan 17). `direction` is
+/// "up" (sooner) or "down" (later); active transfers are untouched.
+#[tauri::command]
+pub async fn transfer_move(
+    transfer_id: String,
+    direction: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .transfers
+        .move_in_queue(&transfer_id, direction == "up", &app)
+        .await
+        .map_err(err)
+}
+
+/// Pause admission of new transfers; running ones keep going.
+#[tauri::command]
+pub async fn transfer_pause_all(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.transfers.pause_all(&app).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn transfer_resume_all(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.transfers.resume_all(&app).await;
+    Ok(())
+}
+
+/// Live-adjust how many transfers may run at once (1..=32).
+#[tauri::command]
+pub async fn transfer_set_concurrency(
+    count: u32,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.transfers.set_concurrency(count as usize);
+    Ok(())
+}
+
+/// Live-adjust the global bandwidth cap in KiB/s (0 = unlimited). Takes
+/// effect on the next chunk of every active transfer (Plan 17 Phase 4).
+#[tauri::command]
+pub async fn transfer_set_throttle(
+    kbps: u64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.transfers.set_throttle_kbps(kbps);
+    Ok(())
+}
+
+/// Queue snapshot for the panel's initial load (waiting FIFO + pause-all +
+/// concurrency + throttle).
+#[tauri::command]
+pub async fn transfer_queue_state(
+    state: State<'_, AppState>,
+) -> Result<crate::transfer::QueueState, String> {
+    Ok(state.transfers.queue_state().await)
 }
 
 #[tauri::command]

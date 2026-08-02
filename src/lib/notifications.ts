@@ -146,6 +146,14 @@ export function initNotifications(): () => void {
           if (active.size === 0) flushBatch();
         }
         break;
+      case "updated":
+        // Canceled rows emit no terminal event — without this they'd wedge the
+        // batch forever. A paused row is still in flight, so it stays in
+        // `active` (it emits nothing until resumed).
+        if (t.status === "canceled" && active.delete(id)) {
+          if (active.size === 0) flushBatch();
+        }
+        break;
     }
   }));
 

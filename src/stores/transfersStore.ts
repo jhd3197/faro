@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { ipc, onTransferEvent } from "@/lib/ipc";
+import { ipc, onTransferEvent, onTransferQueue } from "@/lib/ipc";
 import { useSettings } from "./settingsStore";
 import { toast } from "./toastStore";
 import { useConflicts, type ConflictDecision } from "./conflictStore";
@@ -38,6 +38,11 @@ export function toTransferItem(e: {
 interface TransfersState {
   byId: Record<string, Transfer>;
   panelOpen: boolean;
+  /** Waiting (queued) transfer ids in FIFO order — position = index + 1. */
+  queue: string[];
+  pausedAll: boolean;
+  concurrency: number;
+  throttleKbps: number;
 
   togglePanel: () => void;
   setPanelOpen: (open: boolean) => void;
@@ -84,6 +89,14 @@ interface TransfersState {
     remoteDir: string
   ) => Promise<void>;
   cancel: (id: string) => Promise<void>;
+  pause: (id: string) => Promise<void>;
+  resume: (id: string) => Promise<void>;
+  retry: (id: string) => Promise<void>;
+  move: (id: string, dir: "up" | "down") => Promise<void>;
+  pauseAll: () => Promise<void>;
+  resumeAll: () => Promise<void>;
+  setConcurrency: (n: number) => Promise<void>;
+  setThrottle: (kbps: number) => Promise<void>;
   clearFinished: () => void;
 }
 
@@ -177,12 +190,19 @@ function indexBy(transfers: Transfer[]): Record<string, Transfer> {
 export const useTransfers = create<TransfersState>((set, get) => ({
   byId: {},
   panelOpen: false,
+  queue: [],
+  pausedAll: false,
+  concurrency: 3,
+  throttleKbps: 0,
 
   togglePanel: () => set((s) => ({ panelOpen: !s.panelOpen })),
   setPanelOpen: (open) => set({ panelOpen: open }),
 
   initListeners: async () => {
-    const unlisten = await onTransferEvent((kind, t) => {
+    const unlistenEvents = await onTransferEvent((kind, t) => {
+      // "updated" is treated exactly like progress: replace the byId entry.
+      // It never toasts (it also carries the mid-auto-retry "retrying in Ns"
+      // state, which is not a terminal outcome).
       set((s) => ({ byId: { ...s.byId, [t.id]: t } }));
       if (kind === "added" && !get().panelOpen) {
         if (useSettings.getState().autoOpenTransferPanel) {
@@ -201,12 +221,32 @@ export const useTransfers = create<TransfersState>((set, get) => ({
         toast.error("Transfer failed", t.error || baseName(t.source));
       }
     });
-    return unlisten;
+    const unlistenQueue = await onTransferQueue((q) => {
+      set({
+        queue: q.waiting,
+        pausedAll: q.pausedAll,
+        concurrency: q.concurrency,
+        throttleKbps: q.throttleKbps,
+      });
+    });
+    return () => {
+      unlistenEvents();
+      unlistenQueue();
+    };
   },
 
   loadInitial: async () => {
-    const list = await ipc.listTransfers();
-    set({ byId: indexBy(list) });
+    const [list, q] = await Promise.all([
+      ipc.listTransfers(),
+      ipc.transferQueueState(),
+    ]);
+    set({
+      byId: indexBy(list),
+      queue: q.waiting,
+      pausedAll: q.pausedAll,
+      concurrency: q.concurrency,
+      throttleKbps: q.throttleKbps,
+    });
   },
 
   download: async (sessionId, remotePath, localDir, policy) => {
@@ -249,11 +289,48 @@ export const useTransfers = create<TransfersState>((set, get) => ({
     await ipc.cancelTransfer(id);
   },
 
+  pause: async (id) => {
+    await ipc.transferPause(id);
+  },
+
+  resume: async (id) => {
+    await ipc.transferResume(id);
+  },
+
+  retry: async (id) => {
+    await ipc.transferRetry(id);
+  },
+
+  move: async (id, dir) => {
+    await ipc.transferMove(id, dir);
+  },
+
+  pauseAll: async () => {
+    await ipc.transferPauseAll();
+  },
+
+  resumeAll: async () => {
+    await ipc.transferResumeAll();
+  },
+
+  setConcurrency: async (n) => {
+    await ipc.transferSetConcurrency(n);
+  },
+
+  setThrottle: async (kbps) => {
+    await ipc.transferSetThrottle(kbps);
+  },
+
   clearFinished: () =>
     set((s) => {
       const next: Record<string, Transfer> = {};
       for (const t of Object.values(s.byId)) {
-        if (t.status === "transferring" || t.status === "queued") {
+        // Paused rows are still in flight — keep them like active ones.
+        if (
+          t.status === "transferring" ||
+          t.status === "queued" ||
+          t.status === "paused"
+        ) {
           next[t.id] = t;
         }
       }

@@ -117,7 +117,7 @@ fn classify_io(kind: std::io::ErrorKind) -> Option<ErrorKind> {
 
 /// Keyword heuristics over an error message. Backend-side only — the frontend
 /// gets the resulting `kind` and never repeats this matching.
-fn classify_message(message: &str) -> ErrorKind {
+pub(crate) fn classify_message(message: &str) -> ErrorKind {
     let s = message.to_ascii_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|n| s.contains(n));
 
