@@ -737,9 +737,68 @@ pub async fn start_upload(
 #[tauri::command]
 pub async fn cancel_transfer(
     transfer_id: String,
+    app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    state.transfers.cancel(&transfer_id).await.map_err(err)
+    state
+        .transfers
+        .cancel(&transfer_id, &app)
+        .await
+        .map_err(err)
+}
+
+/// Reorder a waiting transfer in the queue FIFO (Plan 17). `direction` is
+/// "up" (sooner) or "down" (later); active transfers are untouched.
+#[tauri::command]
+pub async fn transfer_move(
+    transfer_id: String,
+    direction: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .transfers
+        .move_in_queue(&transfer_id, direction == "up", &app)
+        .await
+        .map_err(err)
+}
+
+/// Pause admission of new transfers; running ones keep going.
+#[tauri::command]
+pub async fn transfer_pause_all(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.transfers.pause_all(&app).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn transfer_resume_all(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.transfers.resume_all(&app).await;
+    Ok(())
+}
+
+/// Live-adjust how many transfers may run at once (1..=32).
+#[tauri::command]
+pub async fn transfer_set_concurrency(
+    count: u32,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.transfers.set_concurrency(count as usize);
+    Ok(())
+}
+
+/// Queue snapshot for the panel's initial load (waiting FIFO + pause-all +
+/// concurrency + throttle).
+#[tauri::command]
+pub async fn transfer_queue_state(
+    state: State<'_, AppState>,
+) -> Result<crate::transfer::QueueState, String> {
+    Ok(state.transfers.queue_state().await)
 }
 
 #[tauri::command]

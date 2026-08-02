@@ -5,13 +5,14 @@ use crate::session::{
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -42,6 +43,47 @@ pub enum TransferStatus {
     Canceled,
 }
 
+/// Payload of the `transfer://queue` event: the FIFO of waiting transfer ids
+/// plus the manager-level state the panel header renders (Plan 17).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueState {
+    pub waiting: Vec<String>,
+    pub paused_all: bool,
+    pub concurrency: usize,
+    pub throttle_kbps: u64,
+}
+
+/// A pause gate shared by the scheduler (pause-all) and individual transfers
+/// (Phase 2). watch-channel based so waiters never miss a wakeup.
+#[derive(Debug, Clone)]
+pub struct PauseGate {
+    tx: watch::Sender<bool>,
+}
+
+impl PauseGate {
+    fn new() -> Self {
+        let (tx, _) = watch::channel(false);
+        Self { tx }
+    }
+    fn is_paused(&self) -> bool {
+        *self.tx.borrow()
+    }
+    fn set(&self, paused: bool) {
+        let _ = self.tx.send(paused);
+    }
+    /// Park until the gate opens. Returns immediately if already open.
+    #[allow(dead_code)] // used by the Phase 2 chunk checkpoints
+    async fn wait_open(&self) {
+        let mut rx = self.tx.subscribe();
+        while *rx.borrow_and_update() {
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transfer {
@@ -57,9 +99,23 @@ pub struct Transfer {
     pub started_at: i64,
 }
 
+/// Default bound on concurrently running transfers (Plan 17); the rest wait
+/// in the FIFO as `Queued`. Overridden by the `transferConcurrency` setting.
+const DEFAULT_CONCURRENCY: usize = 3;
+
 pub struct TransferManager {
     transfers: Mutex<HashMap<String, Transfer>>,
     tasks: Mutex<HashMap<String, JoinHandle<()>>>,
+    /// FIFO of transfer ids waiting for a slot (Plan 17). An id is popped only
+    /// once it is at the front, the pause-all gate is open, and a concurrency
+    /// permit is available — until then it waits as `Queued`.
+    waiting: Mutex<VecDeque<String>>,
+    semaphore: Arc<Semaphore>,
+    concurrency: AtomicUsize,
+    /// Manager-level pause gate. Admission checks it; Phase 2 checkpoints do too.
+    pause_all: PauseGate,
+    /// Bumped on every queue change so admission waiters re-check their turn.
+    queue_gen: watch::Sender<u64>,
 }
 
 fn now_ts() -> i64 {
@@ -127,6 +183,11 @@ impl TransferManager {
         Self {
             transfers: Mutex::new(HashMap::new()),
             tasks: Mutex::new(HashMap::new()),
+            waiting: Mutex::new(VecDeque::new()),
+            semaphore: Arc::new(Semaphore::new(DEFAULT_CONCURRENCY)),
+            concurrency: AtomicUsize::new(DEFAULT_CONCURRENCY),
+            pause_all: PauseGate::new(),
+            queue_gen: watch::channel(0).0,
         }
     }
 
@@ -156,7 +217,133 @@ impl TransferManager {
         self.transfers.lock().await.insert(t.id.clone(), t);
     }
 
-    pub async fn cancel(&self, id: &str) -> Result<()> {
+    // ---------- Queue scheduling (Plan 17) ----------
+
+    fn build_queue_state(&self, waiting: &VecDeque<String>) -> QueueState {
+        QueueState {
+            waiting: waiting.iter().cloned().collect(),
+            paused_all: self.pause_all.is_paused(),
+            concurrency: self.concurrency.load(Ordering::Relaxed),
+            throttle_kbps: 0, // wired up in Phase 4
+        }
+    }
+
+    /// Current queue snapshot for the panel's initial load.
+    pub async fn queue_state(&self) -> QueueState {
+        let w = self.waiting.lock().await;
+        self.build_queue_state(&w)
+    }
+
+    /// Emit `transfer://queue` and bump the generation so admission waiters
+    /// re-check whether it is their turn.
+    async fn bump_queue(&self, app: &AppHandle) {
+        let state = {
+            let w = self.waiting.lock().await;
+            self.build_queue_state(&w)
+        };
+        self.queue_gen.send_modify(|g| *g += 1);
+        let _ = app.emit("transfer://queue", &state);
+    }
+
+    /// Wait until this transfer is at the front of the FIFO with the pause-all
+    /// gate open, take a concurrency permit, and pop it from the queue.
+    /// Returns `None` if the id left the queue (canceled while waiting).
+    /// The permit is returned so the caller holds it for the transfer's life.
+    async fn admit(&self, id: &str) -> Option<OwnedSemaphorePermit> {
+        let mut rx = self.queue_gen.subscribe();
+        loop {
+            {
+                let w = self.waiting.lock().await;
+                if !w.iter().any(|x| x == id) {
+                    return None;
+                }
+                if w.front().map(String::as_str) != Some(id) || self.pause_all.is_paused() {
+                    drop(w);
+                    if rx.changed().await.is_err() {
+                        return None;
+                    }
+                    continue;
+                }
+            }
+            // Front of the queue with the gate open: take a permit, then pop.
+            let permit = self.semaphore.clone().acquire_owned().await.ok()?;
+            let mut w = self.waiting.lock().await;
+            if w.front().map(String::as_str) == Some(id) && !self.pause_all.is_paused() {
+                w.pop_front();
+                return Some(permit);
+            }
+            // Lost a race (pause-all engaged mid-acquire): release, re-evaluate.
+            drop(permit);
+            if !w.iter().any(|x| x == id) {
+                return None;
+            }
+            drop(w);
+        }
+    }
+
+    /// Reorder a waiting transfer (active transfers are untouched).
+    pub async fn move_in_queue(&self, id: &str, up: bool, app: &AppHandle) -> Result<()> {
+        {
+            let mut w = self.waiting.lock().await;
+            let Some(pos) = w.iter().position(|x| x == id) else {
+                anyhow::bail!("transfer {id} is not waiting in the queue");
+            };
+            let swap_with = if up {
+                pos.checked_sub(1)
+            } else if pos + 1 < w.len() {
+                Some(pos + 1)
+            } else {
+                None
+            };
+            if let Some(other) = swap_with {
+                w.swap(pos, other);
+            }
+        }
+        self.bump_queue(app).await;
+        Ok(())
+    }
+
+    /// Pause admission of new transfers (running ones keep going until Phase
+    /// 2's chunk checkpoints let them park too).
+    pub async fn pause_all(&self, app: &AppHandle) {
+        self.pause_all.set(true);
+        self.bump_queue(app).await;
+    }
+
+    pub async fn resume_all(&self, app: &AppHandle) {
+        self.pause_all.set(false);
+        self.bump_queue(app).await;
+    }
+
+    pub fn is_paused_all(&self) -> bool {
+        self.pause_all.is_paused()
+    }
+
+    /// Live-adjust the concurrency bound. Growing adds permits at once;
+    /// shrinking forgets permits as running transfers release them, so
+    /// in-flight transfers are never killed to satisfy the new bound.
+    pub fn set_concurrency(&self, n: usize) {
+        let n = n.clamp(1, 32);
+        let old = self.concurrency.swap(n, Ordering::Relaxed);
+        if n > old {
+            self.semaphore.add_permits(n - old);
+        } else if n < old {
+            let sem = Arc::clone(&self.semaphore);
+            tokio::spawn(async move {
+                if let Ok(p) = sem.acquire_many((old - n) as u32).await {
+                    p.forget();
+                }
+            });
+        }
+    }
+
+    pub async fn cancel(&self, id: &str, app: &AppHandle) -> Result<()> {
+        {
+            let mut w = self.waiting.lock().await;
+            if let Some(pos) = w.iter().position(|x| x == id) {
+                w.remove(pos);
+            }
+        }
         if let Some(h) = self.tasks.lock().await.remove(id) {
             h.abort();
         }
@@ -166,6 +353,11 @@ impl TransferManager {
             }
         })
         .await;
+        // There is no `transfer://canceled` event — `updated` carries the row.
+        if let Some(t) = self.get(id).await {
+            let _ = app.emit("transfer://updated", &t);
+        }
+        self.bump_queue(app).await;
         Ok(())
     }
 
@@ -213,9 +405,15 @@ impl TransferManager {
             return Ok(id);
         }
 
+        self.waiting.lock().await.push_back(id.clone());
+        self.bump_queue(&app).await;
+
         let mgr = Arc::clone(self);
         let id_for_task = id.clone();
         let task = tokio::spawn(async move {
+            let Some(_permit) = mgr.admit(&id_for_task).await else {
+                return;
+            };
             let res = match &*session {
                 Session::Ssh(ssh) => {
                     mgr.run_ssh_download(
@@ -349,6 +547,7 @@ impl TransferManager {
                 }
             };
             finalize(&mgr, &id_for_task, &app, res).await;
+            mgr.bump_queue(&app).await;
         });
         self.tasks.lock().await.insert(id.clone(), task);
         Ok(id)
@@ -498,9 +697,15 @@ impl TransferManager {
             return Ok(id);
         }
 
+        self.waiting.lock().await.push_back(id.clone());
+        self.bump_queue(&app).await;
+
         let mgr = Arc::clone(self);
         let id_for_task = id.clone();
         let task = tokio::spawn(async move {
+            let Some(_permit) = mgr.admit(&id_for_task).await else {
+                return;
+            };
             let res = match &*session {
                 Session::Ssh(ssh) => {
                     mgr.run_ssh_upload(
@@ -627,6 +832,7 @@ impl TransferManager {
                 }
             };
             finalize(&mgr, &id_for_task, &app, res).await;
+            mgr.bump_queue(&app).await;
         });
         self.tasks.lock().await.insert(id.clone(), task);
         Ok(id)
