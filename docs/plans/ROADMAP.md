@@ -52,7 +52,7 @@ thematic detail.
 | 14 | `14_iconify-brand-icons` | ✅ Phases 1–3 shipped + runtime-verified (Phase 4 consolidation deferred) | Additive brand/protocol logos, bundled offline. |
 | 15 | `15_keyboard-shortcuts` | ⬜ | Remappable shortcuts + Settings Keyboard tab + file-browser keys (F2 rename & friends). Builds on the Plan 12 settings substrate. Independent polish; do whenever. |
 | 16 | `16_app-updater-and-notifications` | ⬜ | In-app auto-updater (signed, GitHub Releases manifest) + desktop notifications + one-click per-user PATH install. Trust/UX fundamentals for a shipping app. |
-| 17 | `17_transfer-queue-depth` | ⬜ | Real queue (bounded concurrency), pause/resume, retry, bandwidth throttle. Turns the transfer list into an actual queue. |
+| 17 | `17_transfer-queue-depth` | ✅ built (all 4 phases; live-backend smoke run left) | Real queue (bounded concurrency), pause/resume, retry, bandwidth throttle. Turns the transfer list into an actual queue. |
 | 18 | `18_jump-hosts-proxyjump` | ⬜ | Jump hosts (ProxyJump) through the single `ssh_connect` choke point + optional cloudflared integration. Unlocks locked-down (IP-allowlisted / tunnel-fronted) servers. Consumes Plan 13's bastion E2E fixture. |
 | 20 | `20_hubspot-backend` | ✅ shipped (Phases 1–3, mock-verified; HubDB write-back future) | HubSpot portal as a connection, one private-app token over three surfaces: Design Manager as a real remote filesystem (Source Code API v3, draft/published roots), File Manager (Files API v3), HubDB tables as virtual CSV files (read-only). The Shopify recipe (`18_shopify-backend.md`, shipped), an even better fit. |
 | 21 | `21_dynamics-365-backend` | 🔄 Phase 1 shipped + mock-verified (client-credentials only; delegated OAuth + Phases 2–3 planned) | Dynamics 365/Dataverse environment as a connection: web resources are literally files in a table (`webresourceset` OData — path-like names, base64 content, publish-to-deploy). Client-credentials or delegated Entra auth (reuses `oauth.rs`). Phase 2: tables as virtual CSV + `faro-cli dynamics query` (the wp-cli-style db helper). The XrmToolBox gap-filler. |
@@ -415,7 +415,16 @@ concurrency (semaphore + FIFO, reorderable), per-transfer pause/resume
 (park at a chunk boundary, resume re-runs the file), manual + classified
 auto-retry (Plan 12 error kinds), and a global token-bucket bandwidth throttle.
 All checkpoints live in the *shared* copy loops so the 11 backends get it for
-free. Panel gains pause/retry row actions, pause-all, and a throttle input. ⬜
+free. Panel gains pause/retry row actions, pause-all, and a throttle input. ✅
+**Built** — all four phases: FIFO + semaphore admission (`transferConcurrency`,
+live-adjustable), per-transfer `PauseGate`s with chunk checkpoints in every
+copy loop (resume re-runs from byte 0), manual + auto retry (Network/Timeout,
+5s/20s backoff, classified via `classify_message`), global `TokenBucket`
+(`transferThrottleKbps`, live). Panel: pause-all, throttle input, row
+pause/resume/retry/↑↓ with queue positions; Settings → Transfers for the two
+defaults. Unit-tested (bucket pacing, FIFO skip-paused, checkpoint restart,
+retry classification); `scripts/verify-transfers.mjs` drives the panel
+headlessly. Remaining: a live-backend smoke run (real SFTP/S3 batch).
 
 ## Track R — Jump hosts & Zero-Trust connectivity (Plan 18)
 Locked-down servers (IP allowlists, Cloudflare Tunnels) are unreachable to
