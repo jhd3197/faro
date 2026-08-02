@@ -15,6 +15,7 @@ import { useBindings } from "@/stores/bindingsStore";
 import { useSync } from "@/stores/syncStore";
 import { useUpdater } from "@/stores/updaterStore";
 import { emit } from "./event";
+import { seed as seedTransfers, calls as transferCalls } from "./transfers";
 
 (window as any).__demo = {
   useLayout,
@@ -34,4 +35,8 @@ import { emit } from "./event";
     useConnections.getState().connect(profileId),
   // Push a mock Tauri event (e.g. a bridge://approval) for screenshots.
   emit,
+  // Plan 17 test hooks: replace the mock transfer world (the store re-reads
+  // via loadInitial) and inspect the transfer commands the UI invoked.
+  seedTransfers,
+  transferCalls,
 };

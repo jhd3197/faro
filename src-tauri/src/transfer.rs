@@ -80,7 +80,8 @@ struct TokenBucket {
 
 struct BucketInner {
     tokens: f64,
-    last: Instant,
+    // tokio's Instant (not std's) so `start_paused` tests drive refills.
+    last: tokio::time::Instant,
 }
 
 impl TokenBucket {
@@ -88,7 +89,7 @@ impl TokenBucket {
         Self {
             inner: Mutex::new(BucketInner {
                 tokens: 0.0,
-                last: Instant::now(),
+                last: tokio::time::Instant::now(),
             }),
             rate_bps: AtomicU64::new(0),
         }
@@ -103,29 +104,31 @@ impl TokenBucket {
             .store(kbps.saturating_mul(1024), Ordering::Relaxed);
     }
 
-    /// Wait until `bytes` may flow under the cap. A grant is capped at one
-    /// second's worth of rate (min 64 KiB) so even a tiny rate always lets a
-    /// chunk through — a 1 KiB file never waits a full token window.
+    /// Wait until `bytes` may flow under the cap. Drawn in tranches capped at
+    /// one second's worth of rate (min 64 KiB) so a large chunk is charged in
+    /// full while a 1 KiB file never waits a whole token window.
     async fn acquire(&self, bytes: u64) {
-        loop {
+        let mut remaining = bytes as f64;
+        while remaining > 0.0 {
             let rate = self.rate_bps.load(Ordering::Relaxed);
             if rate == 0 {
                 return;
             }
             let wait = {
                 let mut g = self.inner.lock().await;
-                let now = Instant::now();
+                let now = tokio::time::Instant::now();
                 let elapsed = now.duration_since(g.last).as_secs_f64();
                 let rate_f = rate as f64;
                 let cap = rate_f.max(64.0 * 1024.0);
                 g.tokens = (g.tokens + elapsed * rate_f).min(cap);
                 g.last = now;
-                let grant = (bytes as f64).min(cap);
-                if g.tokens >= grant {
-                    g.tokens -= grant;
-                    return;
+                let tranche = remaining.min(cap);
+                if g.tokens >= tranche {
+                    g.tokens -= tranche;
+                    remaining -= tranche;
+                    continue;
                 }
-                Duration::from_secs_f64((grant - g.tokens) / rate_f)
+                Duration::from_secs_f64((tranche - g.tokens) / rate_f)
             };
             // Cap the sleep so a live rate change takes effect promptly.
             tokio::time::sleep(wait.min(Duration::from_millis(250))).await;
@@ -138,12 +141,14 @@ impl TokenBucket {
 #[derive(Debug, Clone)]
 pub struct PauseGate {
     tx: watch::Sender<bool>,
+    // Keeps the channel open: with zero receivers `send()` silently fails.
+    _rx: watch::Receiver<bool>,
 }
 
 impl PauseGate {
     fn new() -> Self {
-        let (tx, _) = watch::channel(false);
-        Self { tx }
+        let (tx, _rx) = watch::channel(false);
+        Self { tx, _rx }
     }
     fn is_paused(&self) -> bool {
         *self.tx.borrow()
@@ -406,7 +411,7 @@ impl TransferManager {
         let pauses = self.pauses.lock().await;
         let first_open = w
             .iter()
-            .position(|x| pauses.get(x).map_or(true, |g| !g.is_paused()));
+            .position(|x| pauses.get(x).is_none_or(|g| !g.is_paused()));
         first_open == w.iter().position(|x| x == id)
     }
 
@@ -2817,4 +2822,136 @@ async fn finalize(
         }
     }
     mgr.tasks.lock().await.remove(id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------- TokenBucket (Phase 4) ----------
+
+    #[tokio::test(start_paused = true)]
+    async fn token_bucket_caps_throughput() {
+        let bucket = TokenBucket::new();
+        bucket.set_rate_kbps(512); // 512 KiB/s
+        let start = tokio::time::Instant::now();
+        // 1 MiB at 512 KiB/s must take ~2s of (virtual) time, charged in full.
+        bucket.acquire(1024 * 1024).await;
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_millis(1900), "too fast: {elapsed:?}");
+        assert!(elapsed <= Duration::from_millis(2600), "too slow: {elapsed:?}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn token_bucket_unlimited_is_instant() {
+        let bucket = TokenBucket::new(); // rate 0 = unlimited
+        let start = tokio::time::Instant::now();
+        bucket.acquire(10 * 1024 * 1024).await;
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn token_bucket_tiny_file_skips_full_window() {
+        let bucket = TokenBucket::new();
+        bucket.set_rate_kbps(64); // 64 KiB/s
+        let start = tokio::time::Instant::now();
+        bucket.acquire(1024).await; // 1 KiB → ~16ms, not a whole window
+        assert!(start.elapsed() < Duration::from_millis(100));
+    }
+
+    // ---------- PauseGate + checkpoint (Phase 2) ----------
+
+    #[tokio::test]
+    async fn pause_gate_parks_until_opened() {
+        let gate = PauseGate::new();
+        gate.set(true);
+        let g2 = gate.clone();
+        let handle = tokio::spawn(async move { g2.wait_open().await });
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!handle.is_finished());
+        gate.set(false);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_parks_then_signals_restart() {
+        let mgr = Arc::new(TransferManager::new());
+        mgr.pauses.lock().await.insert("t1".into(), PauseGate::new());
+        // Not paused → passes straight through.
+        mgr.checkpoint("t1", 128).await.unwrap();
+
+        mgr.pauses.lock().await.get("t1").unwrap().set(true);
+        let m2 = Arc::clone(&mgr);
+        let handle = tokio::spawn(async move { m2.checkpoint("t1", 128).await });
+        // The parked task cannot finish before the gate opens (Ok needs an
+        // open gate, Err needs the park loop to break) — so a finished handle
+        // here is impossible regardless of scheduling.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!handle.is_finished());
+        mgr.pauses.lock().await.get("t1").unwrap().set(false);
+        let err = handle.await.unwrap().unwrap_err();
+        assert!(err.downcast_ref::<RestartFromPause>().is_some());
+    }
+
+    // ---------- FIFO admission (Phase 1) ----------
+
+    #[tokio::test]
+    async fn fifo_skips_paused_and_pause_all_blocks_everyone() {
+        let mgr = TransferManager::new();
+        {
+            let mut w = mgr.waiting.lock().await;
+            w.push_back("a".to_string());
+            w.push_back("b".to_string());
+            w.push_back("c".to_string());
+        }
+        mgr.pauses.lock().await.insert("a".into(), PauseGate::new());
+        mgr.pauses.lock().await.insert("b".into(), PauseGate::new());
+        {
+            let w = mgr.waiting.lock().await;
+            assert!(mgr.is_my_turn(&w, "a").await);
+            assert!(!mgr.is_my_turn(&w, "b").await);
+        }
+        // A paused front row never head-of-line blocks the queue.
+        mgr.pauses.lock().await.get("a").unwrap().set(true);
+        {
+            let w = mgr.waiting.lock().await;
+            assert!(!mgr.is_my_turn(&w, "a").await);
+            assert!(mgr.is_my_turn(&w, "b").await);
+            assert!(!mgr.is_my_turn(&w, "c").await);
+        }
+        // Pause-all blocks everyone, runnable or not.
+        mgr.pause_all.set(true);
+        {
+            let w = mgr.waiting.lock().await;
+            assert!(!mgr.is_my_turn(&w, "b").await);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn concurrency_grows_and_shrinks() {
+        let mgr = TransferManager::new();
+        assert_eq!(mgr.semaphore.available_permits(), DEFAULT_CONCURRENCY);
+        mgr.set_concurrency(5);
+        assert_eq!(mgr.semaphore.available_permits(), 5);
+        mgr.set_concurrency(2);
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(mgr.semaphore.available_permits(), 2);
+    }
+
+    // ---------- Retry classification (Phase 3) ----------
+
+    #[test]
+    fn transient_errors_retry_permanent_ones_dont() {
+        assert!(is_transient(&anyhow::anyhow!("connection reset by peer")));
+        assert!(is_transient(&anyhow::anyhow!("operation timed out")));
+        assert!(!is_transient(&anyhow::anyhow!("authentication failed")));
+        assert!(!is_transient(&anyhow::anyhow!(
+            "Permission denied (os error 13)"
+        )));
+        assert!(!is_transient(&anyhow::anyhow!("No such file or directory")));
+    }
 }

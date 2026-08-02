@@ -2,6 +2,7 @@
 // data so the whole UI renders populated without the Rust backend. Unhandled
 // commands resolve to null, which is harmless for the screens we capture.
 import * as data from "./data";
+import * as transfers from "./transfers";
 import { emit } from "./event";
 
 type Args = Record<string, any>;
@@ -175,7 +176,7 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
 
     // ---- transfers ----
     case "list_transfers":
-      return data.transfers;
+      return transfers.listTransfers();
     case "start_download":
     case "start_upload":
     case "start_archive":
@@ -185,6 +186,20 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
       return ["t-new"];
     case "cancel_transfer":
       return null;
+
+    // ---- transfer queue (Plan 17) ----
+    case "transfer_pause":
+    case "transfer_resume":
+    case "transfer_retry":
+    case "transfer_move":
+    case "transfer_pause_all":
+    case "transfer_resume_all":
+    case "transfer_set_concurrency":
+    case "transfer_set_throttle":
+      transfers.handle(cmd, a);
+      return null;
+    case "transfer_queue_state":
+      return transfers.queueState();
 
     // ---- importers ----
     case "importer_default_paths":
