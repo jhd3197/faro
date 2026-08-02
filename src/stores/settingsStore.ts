@@ -91,6 +91,10 @@ interface SettingsState {
    *  `overwritePolicy` silently (the pre-prompt behaviour). */
   promptOnOverwrite: boolean;
   autoOpenTransferPanel: boolean;
+  /** Max simultaneous transfers (1–32). Live-applied to the backend queue. */
+  transferConcurrency: number;
+  /** Global bandwidth cap in KiB/s (0 = unlimited). Live-applied. */
+  transferThrottleKbps: number;
   /** Where downloads land. Blank = the OS Downloads folder. */
   defaultDownloadFolder: string;
   /** Command/path used to open files for edit-in-place. Blank = OS default app. */
@@ -135,6 +139,8 @@ interface SettingsState {
   setOverwritePolicy: (p: OverwritePolicy) => void;
   setPromptOnOverwrite: (v: boolean) => void;
   setAutoOpenTransferPanel: (v: boolean) => void;
+  setTransferConcurrency: (n: number) => void;
+  setTransferThrottleKbps: (n: number) => void;
   setDefaultDownloadFolder: (s: string) => void;
   setDefaultEditor: (s: string) => void;
   setShowHiddenFiles: (v: boolean) => void;
@@ -165,6 +171,8 @@ type Persisted = Omit<
   | "setOverwritePolicy"
   | "setPromptOnOverwrite"
   | "setAutoOpenTransferPanel"
+  | "setTransferConcurrency"
+  | "setTransferThrottleKbps"
   | "setDefaultDownloadFolder"
   | "setDefaultEditor"
   | "setShowHiddenFiles"
@@ -192,6 +200,8 @@ const DEFAULTS: Persisted = {
   overwritePolicy: "overwrite",
   promptOnOverwrite: true,
   autoOpenTransferPanel: true,
+  transferConcurrency: 3,
+  transferThrottleKbps: 0,
   defaultDownloadFolder: "",
   defaultEditor: "",
   showHiddenFiles: false,
@@ -279,6 +289,15 @@ export const useSettings = create<SettingsState>((set, get) => ({
   setPromptOnOverwrite: (v) => mutate(set, get, "promptOnOverwrite", v),
   setAutoOpenTransferPanel: (v) =>
     mutate(set, get, "autoOpenTransferPanel", v),
+  setTransferConcurrency: (n) => {
+    mutate(set, get, "transferConcurrency", n);
+    // Live-apply to the running queue; the persisted value covers next launch.
+    ipc.transferSetConcurrency(n).catch(() => {});
+  },
+  setTransferThrottleKbps: (n) => {
+    mutate(set, get, "transferThrottleKbps", n);
+    ipc.transferSetThrottle(n).catch(() => {});
+  },
   setDefaultDownloadFolder: (s) =>
     mutate(set, get, "defaultDownloadFolder", s),
   setDefaultEditor: (s) => mutate(set, get, "defaultEditor", s),

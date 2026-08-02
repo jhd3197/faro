@@ -150,6 +150,29 @@ export function Settings({ onClose }: Props) {
               onChange={s.setAutoOpenTransferPanel}
             />
             <Field
+              label="Concurrent transfers"
+              help="How many transfers run at once. Extra transfers wait in a first-in, first-out queue."
+            >
+              <NumberInput
+                min={1}
+                max={32}
+                value={s.transferConcurrency}
+                onChange={s.setTransferConcurrency}
+              />
+            </Field>
+            <Field
+              label="Bandwidth limit"
+              help="Global cap shared by all active transfers. 0 = unlimited."
+            >
+              <NumberInput
+                min={0}
+                max={1024 * 1024}
+                value={s.transferThrottleKbps}
+                onChange={s.setTransferThrottleKbps}
+                suffix="KiB/s"
+              />
+            </Field>
+            <Field
               label="Download folder"
               help="Where downloads land. Leave blank to use your system Downloads folder."
             >

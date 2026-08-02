@@ -1,12 +1,40 @@
-import { useEffect } from "react";
-import { ArrowDownToLine, ArrowUpFromLine, X, ChevronDown, Trash2, ArrowDownUp } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  X,
+  ChevronDown,
+  ChevronUp,
+  Trash2,
+  ArrowDownUp,
+  Pause,
+  Play,
+  RotateCcw,
+} from "lucide-react";
 import { useTransfers } from "@/stores/transfersStore";
 import type { Transfer } from "@/lib/types";
 import { cn } from "@/lib/cn";
 
 export function TransferQueue() {
-  const { byId, panelOpen, setPanelOpen, cancel, clearFinished, initListeners, loadInitial } =
-    useTransfers();
+  const {
+    byId,
+    panelOpen,
+    setPanelOpen,
+    cancel,
+    clearFinished,
+    initListeners,
+    loadInitial,
+    queue,
+    pausedAll,
+    throttleKbps,
+    pauseAll,
+    resumeAll,
+    setThrottle,
+    pause,
+    resume,
+    retry,
+    move,
+  } = useTransfers();
 
   useEffect(() => {
     let unsub: (() => void) | undefined;
@@ -23,8 +51,9 @@ export function TransferQueue() {
   if (!panelOpen) return null;
 
   const active = transfers.filter(
-    (t) => t.status === "transferring" || t.status === "queued"
+    (t) => t.status === "transferring" || t.status === "paused"
   ).length;
+  const queued = queue.length;
 
   return (
     <div className="anim-slide-up flex max-h-64 flex-col border-t border-border bg-bg-panel">
@@ -32,12 +61,20 @@ export function TransferQueue() {
         <span className="text-xs font-semibold uppercase tracking-wider text-text-muted">
           Transfers
         </span>
-        {active > 0 && (
+        {(active > 0 || queued > 0) && (
           <span className="rounded bg-accent/20 px-1.5 py-0.5 text-[10px] font-medium text-accent">
-            {active} active
+            {active} active · {queued} queued
           </span>
         )}
         <div className="flex-1" />
+        <ThrottleInput value={throttleKbps} onCommit={setThrottle} />
+        <button
+          onClick={() => (pausedAll ? resumeAll() : pauseAll())}
+          className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text"
+          title={pausedAll ? "Resume all" : "Pause all"}
+        >
+          {pausedAll ? <Play size={12} /> : <Pause size={12} />}
+        </button>
         <button
           onClick={clearFinished}
           className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text"
@@ -66,16 +103,98 @@ export function TransferQueue() {
           </div>
         )}
         {transfers.map((t) => (
-          <Row key={t.id} t={t} onCancel={() => cancel(t.id)} />
+          <Row
+            key={t.id}
+            t={t}
+            queue={queue}
+            onCancel={() => cancel(t.id)}
+            onPause={() => pause(t.id)}
+            onResume={() => resume(t.id)}
+            onRetry={() => retry(t.id)}
+            onMove={(dir) => move(t.id, dir)}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-function Row({ t, onCancel }: { t: Transfer; onCancel: () => void }) {
+/** Global bandwidth cap (KiB/s, 0 = unlimited). Commits on blur or Enter. */
+function ThrottleInput({
+  value,
+  onCommit,
+}: {
+  value: number;
+  onCommit: (kbps: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(value));
+
+  // Follow external changes (settings sync / other windows) while not editing.
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  const commit = () => {
+    const n = Math.max(0, parseInt(draft) || 0);
+    setDraft(String(n));
+    if (n !== value) onCommit(n);
+  };
+
+  return (
+    <span className="flex items-center gap-1" title="Bandwidth limit (KiB/s, 0 = unlimited)">
+      <input
+        type="number"
+        min={0}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+        className="w-14 rounded border border-border bg-bg-panel px-1.5 py-0.5 text-[11px] text-text outline-none focus:border-accent"
+      />
+      <span className="text-[10px] text-text-dim">KiB/s</span>
+    </span>
+  );
+}
+
+function Row({
+  t,
+  queue,
+  onCancel,
+  onPause,
+  onResume,
+  onRetry,
+  onMove,
+}: {
+  t: Transfer;
+  queue: string[];
+  onCancel: () => void;
+  onPause: () => void;
+  onResume: () => void;
+  onRetry: () => void;
+  onMove: (dir: "up" | "down") => void;
+}) {
   const Icon = t.kind === "download" ? ArrowDownToLine : ArrowUpFromLine;
   const pct = t.size > 0 ? Math.min(100, (t.transferred / t.size) * 100) : 0;
+  // Mid-auto-retry: the error text reads "retrying in Ns (attempt N/3)".
+  const retrying = t.retryAttempt !== undefined && !!t.error;
+  const queuePos = queue.indexOf(t.id);
+
+  const statusLabel =
+    t.status === "transferring"
+      ? `${pct.toFixed(0)}%`
+      : t.status === "done"
+        ? "done"
+        : t.status === "error"
+          ? "error"
+          : t.status === "canceled"
+            ? "canceled"
+            : t.status === "paused"
+              ? "Paused"
+              : t.status === "queued" && queuePos >= 0
+                ? `#${queuePos + 1} in queue`
+                : t.status;
 
   return (
     <div className="flex items-center gap-3 border-b border-border-subtle px-3 py-2 text-sm">
@@ -99,24 +218,70 @@ function Row({ t, onCancel }: { t: Transfer; onCancel: () => void }) {
           </div>
         )}
         {t.error && (
-          <div className="mt-1 text-[11px] text-danger">{t.error}</div>
+          <div
+            className={cn(
+              "mt-1 text-[11px]",
+              retrying ? "text-warning" : "text-danger"
+            )}
+          >
+            {t.error}
+          </div>
         )}
       </div>
       <div className="w-20 shrink-0 text-right text-[11px] text-text-muted">
         <div>{fmtSize(t.transferred)}</div>
-        <div className="text-text-dim">
-          {t.status === "transferring"
-            ? `${pct.toFixed(0)}%`
-            : t.status === "done"
-              ? "done"
-              : t.status === "error"
-                ? "error"
-                : t.status === "canceled"
-                  ? "canceled"
-                  : t.status}
-        </div>
+        <div className="text-text-dim">{statusLabel}</div>
       </div>
+      {t.status === "queued" && queuePos >= 0 && (
+        <>
+          <button
+            onClick={() => onMove("up")}
+            disabled={queuePos === 0}
+            className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-30 disabled:hover:bg-transparent"
+            title="Move up"
+          >
+            <ChevronUp size={12} />
+          </button>
+          <button
+            onClick={() => onMove("down")}
+            disabled={queuePos === queue.length - 1}
+            className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-30 disabled:hover:bg-transparent"
+            title="Move down"
+          >
+            <ChevronDown size={12} />
+          </button>
+        </>
+      )}
       {(t.status === "transferring" || t.status === "queued") && (
+        <button
+          onClick={onPause}
+          className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text"
+          title="Pause"
+        >
+          <Pause size={12} />
+        </button>
+      )}
+      {t.status === "paused" && (
+        <button
+          onClick={onResume}
+          className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text"
+          title="Resume (restarts from byte 0)"
+        >
+          <Play size={12} />
+        </button>
+      )}
+      {(t.status === "error" || t.status === "canceled") && (
+        <button
+          onClick={onRetry}
+          className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text"
+          title="Retry"
+        >
+          <RotateCcw size={12} />
+        </button>
+      )}
+      {(t.status === "transferring" ||
+        t.status === "queued" ||
+        t.status === "paused") && (
         <button
           onClick={onCancel}
           className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text"

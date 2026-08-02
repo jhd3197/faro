@@ -23,6 +23,7 @@ import type {
   TerminalDataEvent,
   TerminalExitEvent,
   Transfer,
+  TransferQueueState,
   OverwritePolicy,
   BridgeStatus,
   BridgeActivity,
@@ -243,6 +244,30 @@ export const ipc = {
     invoke<void>("cancel_transfer", { transferId }),
 
   listTransfers: () => invoke<Transfer[]>("list_transfers"),
+
+  transferPause: (transferId: string) =>
+    invoke<void>("transfer_pause", { transferId }),
+
+  transferResume: (transferId: string) =>
+    invoke<void>("transfer_resume", { transferId }),
+
+  transferRetry: (transferId: string) =>
+    invoke<void>("transfer_retry", { transferId }),
+
+  transferMove: (transferId: string, direction: "up" | "down") =>
+    invoke<void>("transfer_move", { transferId, direction }),
+
+  transferPauseAll: () => invoke<void>("transfer_pause_all"),
+
+  transferResumeAll: () => invoke<void>("transfer_resume_all"),
+
+  transferSetConcurrency: (count: number) =>
+    invoke<void>("transfer_set_concurrency", { count }),
+
+  transferSetThrottle: (kbps: number) =>
+    invoke<void>("transfer_set_throttle", { kbps }),
+
+  transferQueueState: () => invoke<TransferQueueState>("transfer_queue_state"),
 
   startDirectoryDownload: (
     sessionId: SessionId,
@@ -676,15 +701,25 @@ export async function onSearchEvent(
 }
 
 export async function onTransferEvent(
-  cb: (kind: "added" | "progress" | "done" | "error", t: Transfer) => void
+  cb: (
+    kind: "added" | "progress" | "done" | "error" | "updated",
+    t: Transfer
+  ) => void
 ): Promise<UnlistenFn> {
   const unsubs = await Promise.all([
     listen<Transfer>("transfer://added", (e) => cb("added", e.payload)),
     listen<Transfer>("transfer://progress", (e) => cb("progress", e.payload)),
     listen<Transfer>("transfer://done", (e) => cb("done", e.payload)),
     listen<Transfer>("transfer://error", (e) => cb("error", e.payload)),
+    listen<Transfer>("transfer://updated", (e) => cb("updated", e.payload)),
   ]);
   return () => {
     unsubs.forEach((u) => u());
   };
+}
+
+export async function onTransferQueue(
+  cb: (q: TransferQueueState) => void
+): Promise<UnlistenFn> {
+  return listen<TransferQueueState>("transfer://queue", (e) => cb(e.payload));
 }

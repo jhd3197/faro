@@ -1017,6 +1017,7 @@ export type TransferKind = "download" | "upload";
 export type TransferStatus =
   | "queued"
   | "transferring"
+  | "paused"
   | "done"
   | "skipped"
   | "error"
@@ -1032,7 +1033,20 @@ export interface Transfer {
   transferred: number;
   status: TransferStatus;
   error?: string;
+  /** Set while the backend auto-retries a failed transfer (`error` reads
+   *  "retrying in Ns (attempt N/3)"). */
+  retryAttempt?: number;
   startedAt: number;
+}
+
+/** Live transfer-queue snapshot (Plan 17) — payload of `transfer://queue` and
+ *  the return of `transfer_queue_state`. `waiting` holds the FIFO order of
+ *  queued transfer ids. */
+export interface TransferQueueState {
+  waiting: string[];
+  pausedAll: boolean;
+  concurrency: number;
+  throttleKbps: number;
 }
 
 /** What an encrypted backup contains (Plan 12 Phase 4). */
