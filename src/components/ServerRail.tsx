@@ -29,6 +29,7 @@ import { useSettings } from "@/stores/settingsStore";
 import { ProfileEditor } from "./ProfileEditor";
 import { ImportDialog } from "./ImportDialog";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
+import { ConfirmModal } from "./ConfirmModal";
 import { Tooltip } from "./ui/Tooltip";
 import { useDialog } from "@/hooks/useDialog";
 import { monogram } from "@/lib/format";
@@ -135,6 +136,10 @@ export function ServerRail() {
     | { kind: "rename"; from: string }
     | null
   >(null);
+  // Deleting a connection is irreversible (saved credentials are wiped from
+  // the OS keychain too) — the context menu arms this instead of deleting
+  // outright, and a ConfirmModal does the rest.
+  const [pendingDelete, setPendingDelete] = useState<ConnectionProfile | null>(null);
 
   // Effective expanded state. Open when pinned, while hovering the collapsed
   // rail, while a rail menu / search popover is up (so the flyout doesn't
@@ -435,7 +440,7 @@ export function ServerRail() {
       label: "Delete",
       icon: <Trash2 size={14} />,
       destructive: true,
-      onClick: () => deleteProfile(p.id),
+      onClick: () => setPendingDelete(p),
     });
     return items;
   };
@@ -812,6 +817,16 @@ export function ServerRail() {
           existing={groupNames}
           onSubmit={submitGroupPrompt}
           onClose={() => setGroupPrompt(null)}
+        />
+      )}
+      {pendingDelete && (
+        <ConfirmModal
+          title="Delete connection"
+          message={`Delete “${pendingDelete.name}” (${profileAddress(pendingDelete)})? Its saved credentials are removed from the OS keychain too — this can't be undone.`}
+          confirmLabel="Delete"
+          destructive
+          onClose={() => setPendingDelete(null)}
+          onConfirm={() => deleteProfile(pendingDelete.id)}
         />
       )}
       </div>
