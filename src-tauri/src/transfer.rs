@@ -110,12 +110,37 @@ pub struct Transfer {
     pub status: TransferStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Auto-retry round in progress (1- or 2-of-2), for the panel's
+    /// "retrying in Ns (attempt N/3)" state (Plan 17 Phase 3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_attempt: Option<u32>,
     pub started_at: i64,
+}
+
+/// Everything needed to re-run a failed/canceled transfer with its already
+/// policy-resolved destination (overwrite/skip/rename was applied at enqueue
+/// time) — Plan 17 Phase 3 manual retry.
+#[derive(Clone)]
+enum RetryInfo {
+    Download {
+        session: Arc<Session>,
+        remote_path: String,
+        final_path: PathBuf,
+    },
+    Upload {
+        session: Arc<Session>,
+        local: PathBuf,
+        final_remote: String,
+    },
 }
 
 /// Default bound on concurrently running transfers (Plan 17); the rest wait
 /// in the FIFO as `Queued`. Overridden by the `transferConcurrency` setting.
 const DEFAULT_CONCURRENCY: usize = 3;
+
+/// How many times a transfer auto-retries on transient (Network/Timeout)
+/// errors before surfacing the failure (Plan 17 Phase 3).
+const MAX_AUTO_RETRIES: u32 = 2;
 
 pub struct TransferManager {
     transfers: Mutex<HashMap<String, Transfer>>,
@@ -130,6 +155,8 @@ pub struct TransferManager {
     pause_all: PauseGate,
     /// Per-transfer pause gates, created at enqueue time (Plan 17 Phase 2).
     pauses: Mutex<HashMap<String, PauseGate>>,
+    /// Original resolved inputs per transfer, for manual retry (Phase 3).
+    retry: Mutex<HashMap<String, RetryInfo>>,
     /// Bumped on every queue change so admission waiters re-check their turn.
     queue_gen: watch::Sender<u64>,
 }
@@ -204,6 +231,7 @@ impl TransferManager {
             concurrency: AtomicUsize::new(DEFAULT_CONCURRENCY),
             pause_all: PauseGate::new(),
             pauses: Mutex::new(HashMap::new()),
+            retry: Mutex::new(HashMap::new()),
             queue_gen: watch::channel(0).0,
         }
     }
@@ -430,6 +458,73 @@ impl TransferManager {
         Ok(())
     }
 
+    /// Re-enqueue a failed or canceled transfer with its original (already
+    /// policy-resolved) source/destination. Same id — the panel row resets
+    /// in place (Plan 17 Phase 3 manual retry).
+    pub async fn retry(self: &Arc<Self>, id: &str, app: &AppHandle) -> Result<()> {
+        match self.get(id).await.map(|t| t.status) {
+            Some(TransferStatus::Error) | Some(TransferStatus::Canceled) => {}
+            _ => anyhow::bail!("only failed or canceled transfers can be retried"),
+        }
+        let info = self
+            .retry
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("transfer {id} cannot be retried"))?;
+        if let Some(h) = self.tasks.lock().await.remove(id) {
+            h.abort();
+        }
+        // A cancel-while-paused leaves the gate closed — reopen it.
+        if let Some(g) = self.pauses.lock().await.get(id) {
+            g.set(false);
+        }
+        self.update(id, |t| {
+            t.status = TransferStatus::Queued;
+            t.transferred = 0;
+            t.error = None;
+            t.retry_attempt = None;
+        })
+        .await;
+        if let Some(t) = self.get(id).await {
+            let _ = app.emit("transfer://updated", &t);
+        }
+        self.waiting.lock().await.push_back(id.to_string());
+        self.bump_queue(app).await;
+        let mgr = Arc::clone(self);
+        let id_for_task = id.to_string();
+        let app_for_task = app.clone();
+        let task = match info {
+            RetryInfo::Download {
+                session,
+                remote_path,
+                final_path,
+            } => tokio::spawn(run_download_task(
+                mgr,
+                id_for_task,
+                session,
+                remote_path,
+                final_path,
+                app_for_task,
+            )),
+            RetryInfo::Upload {
+                session,
+                local,
+                final_remote,
+            } => tokio::spawn(run_upload_task(
+                mgr,
+                id_for_task,
+                session,
+                local,
+                final_remote,
+                app_for_task,
+            )),
+        };
+        self.tasks.lock().await.insert(id.to_string(), task);
+        Ok(())
+    }
+
     /// Live-adjust the concurrency bound. Growing adds permits at once;
     /// shrinking forgets permits as running transfers release them, so
     /// in-flight transfers are never killed to satisfy the new bound.
@@ -509,6 +604,7 @@ impl TransferManager {
                 TransferStatus::Queued
             },
             error: None,
+            retry_attempt: None,
             started_at: now_ts(),
         };
         self.insert(transfer.clone()).await;
@@ -519,162 +615,28 @@ impl TransferManager {
             return Ok(id);
         }
 
+        self.retry.lock().await.insert(
+            id.clone(),
+            RetryInfo::Download {
+                session: Arc::clone(&session),
+                remote_path: remote_path.clone(),
+                final_path: final_path.clone(),
+            },
+        );
         self.waiting.lock().await.push_back(id.clone());
         self.pauses.lock().await.insert(id.clone(), PauseGate::new());
         self.bump_queue(&app).await;
 
         let mgr = Arc::clone(self);
         let id_for_task = id.clone();
-        let task = tokio::spawn(async move {
-            let Some(_permit) = mgr.admit(&id_for_task).await else {
-                return;
-            };
-            // A resume-after-pause unwinds the copy loop with RestartFromPause;
-            // re-run the file from byte 0 (Plan 17 Phase 2).
-            let res = loop {
-            let attempt = match &*session {
-                Session::Ssh(ssh) => {
-                    mgr.run_ssh_download(
-                        &id_for_task,
-                        ssh.clone(),
-                        &remote_path,
-                        &final_path,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Ftp(ftp) => {
-                    mgr.run_ftp_download(
-                        &id_for_task,
-                        ftp.clone(),
-                        &remote_path,
-                        &final_path,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Object(obj) => {
-                    mgr.run_object_download(
-                        &id_for_task,
-                        obj.clone(),
-                        &remote_path,
-                        &final_path,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Webdav(dav) => {
-                    mgr.run_webdav_download(
-                        &id_for_task,
-                        dav.clone(),
-                        &remote_path,
-                        &final_path,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Http(http) => {
-                    mgr.run_http_download(
-                        &id_for_task,
-                        http.clone(),
-                        &remote_path,
-                        &final_path,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Dropbox(dbx) => {
-                    mgr.run_dropbox_download(
-                        &id_for_task,
-                        dbx.clone(),
-                        &remote_path,
-                        &final_path,
-                        &app,
-                    )
-                    .await
-                }
-                Session::OneDrive(od) => {
-                    mgr.run_onedrive_download(
-                        &id_for_task,
-                        od.clone(),
-                        &remote_path,
-                        &final_path,
-                        &app,
-                    )
-                    .await
-                }
-                Session::GDrive(gd) => {
-                    mgr.run_gdrive_download(
-                        &id_for_task,
-                        gd.clone(),
-                        &remote_path,
-                        &final_path,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Box(bx) => {
-                    mgr.run_box_download(
-                        &id_for_task,
-                        bx.clone(),
-                        &remote_path,
-                        &final_path,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Shopify(sh) => {
-                    mgr.run_shopify_download(
-                        &id_for_task,
-                        sh.clone(),
-                        &remote_path,
-                        &final_path,
-                        &app,
-                    )
-                    .await
-                }
-                Session::HubSpot(hs) => {
-                    mgr.run_hubspot_download(
-                        &id_for_task,
-                        hs.clone(),
-                        &remote_path,
-                        &final_path,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Dynamics(dynm) => {
-                    mgr.run_dynamics_download(
-                        &id_for_task,
-                        dynm.clone(),
-                        &remote_path,
-                        &final_path,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Agent(agent) => {
-                    mgr.run_agent_download(
-                        &id_for_task,
-                        agent.clone(),
-                        &remote_path,
-                        &final_path,
-                        &app,
-                    )
-                    .await
-                }
-            };
-            match attempt {
-                Err(e) if e.downcast_ref::<RestartFromPause>().is_some() => {
-                    mgr.update(&id_for_task, |t| t.transferred = 0).await;
-                    continue;
-                }
-                other => break other,
-            }
-            };
-            finalize(&mgr, &id_for_task, &app, res).await;
-            mgr.bump_queue(&app).await;
-        });
+        let task = tokio::spawn(run_download_task(
+            mgr,
+            id_for_task,
+            session,
+            remote_path,
+            final_path,
+            app,
+        ));
         self.tasks.lock().await.insert(id.clone(), task);
         Ok(id)
     }
@@ -815,6 +777,7 @@ impl TransferManager {
                 TransferStatus::Queued
             },
             error: None,
+            retry_attempt: None,
             started_at: now_ts(),
         };
         self.insert(transfer.clone()).await;
@@ -825,155 +788,28 @@ impl TransferManager {
             return Ok(id);
         }
 
+        self.retry.lock().await.insert(
+            id.clone(),
+            RetryInfo::Upload {
+                session: Arc::clone(&session),
+                local: local.clone(),
+                final_remote: final_remote.clone(),
+            },
+        );
         self.waiting.lock().await.push_back(id.clone());
         self.pauses.lock().await.insert(id.clone(), PauseGate::new());
         self.bump_queue(&app).await;
 
         let mgr = Arc::clone(self);
         let id_for_task = id.clone();
-        let task = tokio::spawn(async move {
-            let Some(_permit) = mgr.admit(&id_for_task).await else {
-                return;
-            };
-            // A resume-after-pause unwinds the copy loop with RestartFromPause;
-            // re-run the file from byte 0 (Plan 17 Phase 2).
-            let res = loop {
-            let attempt = match &*session {
-                Session::Ssh(ssh) => {
-                    mgr.run_ssh_upload(
-                        &id_for_task,
-                        ssh.clone(),
-                        &local,
-                        &final_remote,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Ftp(ftp) => {
-                    mgr.run_ftp_upload(
-                        &id_for_task,
-                        ftp.clone(),
-                        &local,
-                        &final_remote,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Object(obj) => {
-                    mgr.run_object_upload(
-                        &id_for_task,
-                        obj.clone(),
-                        &local,
-                        &final_remote,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Webdav(dav) => {
-                    mgr.run_webdav_upload(
-                        &id_for_task,
-                        dav.clone(),
-                        &local,
-                        &final_remote,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Http(_) => {
-                    Err(anyhow::anyhow!("HTTP source is read-only — upload not supported"))
-                }
-                Session::Dropbox(dbx) => {
-                    mgr.run_dropbox_upload(
-                        &id_for_task,
-                        dbx.clone(),
-                        &local,
-                        &final_remote,
-                        &app,
-                    )
-                    .await
-                }
-                Session::OneDrive(od) => {
-                    mgr.run_onedrive_upload(
-                        &id_for_task,
-                        od.clone(),
-                        &local,
-                        &final_remote,
-                        &app,
-                    )
-                    .await
-                }
-                Session::GDrive(gd) => {
-                    mgr.run_gdrive_upload(
-                        &id_for_task,
-                        gd.clone(),
-                        &local,
-                        &final_remote,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Box(bx) => {
-                    mgr.run_box_upload(
-                        &id_for_task,
-                        bx.clone(),
-                        &local,
-                        &final_remote,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Shopify(sh) => {
-                    mgr.run_shopify_upload(
-                        &id_for_task,
-                        sh.clone(),
-                        &local,
-                        &final_remote,
-                        &app,
-                    )
-                    .await
-                }
-                Session::HubSpot(hs) => {
-                    mgr.run_hubspot_upload(
-                        &id_for_task,
-                        hs.clone(),
-                        &local,
-                        &final_remote,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Dynamics(dynm) => {
-                    mgr.run_dynamics_upload(
-                        &id_for_task,
-                        dynm.clone(),
-                        &local,
-                        &final_remote,
-                        &app,
-                    )
-                    .await
-                }
-                Session::Agent(agent) => {
-                    mgr.run_agent_upload(
-                        &id_for_task,
-                        agent.clone(),
-                        &local,
-                        &final_remote,
-                        &app,
-                    )
-                    .await
-                }
-            };
-            match attempt {
-                Err(e) if e.downcast_ref::<RestartFromPause>().is_some() => {
-                    mgr.update(&id_for_task, |t| t.transferred = 0).await;
-                    continue;
-                }
-                other => break other,
-            }
-            };
-            finalize(&mgr, &id_for_task, &app, res).await;
-            mgr.bump_queue(&app).await;
-        });
+        let task = tokio::spawn(run_upload_task(
+            mgr,
+            id_for_task,
+            session,
+            local,
+            final_remote,
+            app,
+        ));
         self.tasks.lock().await.insert(id.clone(), task);
         Ok(id)
     }
@@ -2646,6 +2482,235 @@ fn split_ext(path: &str) -> (&str, &str) {
     match path.rfind('.') {
         Some(dot) if dot > path.rfind('/').unwrap_or(0) => (&path[..dot], &path[dot..]),
         _ => (path, ""),
+    }
+}
+
+/// Transient = worth an auto-retry (Plan 12's structured error kinds):
+/// network and timeout failures; auth/permission/not-found never retry.
+fn is_transient(e: &anyhow::Error) -> bool {
+    matches!(
+        crate::error::classify_message(&format!("{e:#}")),
+        crate::error::ErrorKind::Network | crate::error::ErrorKind::Timeout
+    )
+}
+
+/// Shared download runner (Plan 17): admission → run loop → finalize → wake
+/// the queue. The loop re-runs the file from byte 0 after a resume-from-pause
+/// (Phase 2) and auto-retries transient errors with 5s/20s backoff (Phase 3).
+/// The concurrency permit is held through backoff — a deliberate trade-off so
+/// a retrying transfer keeps its slot.
+async fn run_download_task(
+    mgr: Arc<TransferManager>,
+    id: String,
+    session: Arc<Session>,
+    remote_path: String,
+    final_path: PathBuf,
+    app: AppHandle,
+) {
+    let Some(_permit) = mgr.admit(&id).await else {
+        return;
+    };
+    let mut auto_retries = 0u32;
+    let res = loop {
+        let attempt = dispatch_download(&mgr, &id, &session, &remote_path, &final_path, &app).await;
+        match attempt {
+            Err(e) if e.downcast_ref::<RestartFromPause>().is_some() => {
+                mgr.update(&id, |t| t.transferred = 0).await;
+                continue;
+            }
+            Err(e) if auto_retries < MAX_AUTO_RETRIES && is_transient(&e) => {
+                auto_retries += 1;
+                let delay = if auto_retries == 1 { 5 } else { 20 };
+                mgr.update(&id, |t| {
+                    t.transferred = 0;
+                    t.retry_attempt = Some(auto_retries);
+                    t.error = Some(format!("retrying in {delay}s (attempt {}/3)", auto_retries + 1));
+                })
+                .await;
+                if let Some(t) = mgr.get(&id).await {
+                    let _ = app.emit("transfer://updated", &t);
+                }
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+                mgr.update(&id, |t| t.error = None).await;
+                continue;
+            }
+            other => break other,
+        }
+    };
+    finalize(&mgr, &id, &app, res).await;
+    mgr.bump_queue(&app).await;
+}
+
+/// Upload twin of `run_download_task`.
+async fn run_upload_task(
+    mgr: Arc<TransferManager>,
+    id: String,
+    session: Arc<Session>,
+    local: PathBuf,
+    final_remote: String,
+    app: AppHandle,
+) {
+    let Some(_permit) = mgr.admit(&id).await else {
+        return;
+    };
+    let mut auto_retries = 0u32;
+    let res = loop {
+        let attempt = dispatch_upload(&mgr, &id, &session, &local, &final_remote, &app).await;
+        match attempt {
+            Err(e) if e.downcast_ref::<RestartFromPause>().is_some() => {
+                mgr.update(&id, |t| t.transferred = 0).await;
+                continue;
+            }
+            Err(e) if auto_retries < MAX_AUTO_RETRIES && is_transient(&e) => {
+                auto_retries += 1;
+                let delay = if auto_retries == 1 { 5 } else { 20 };
+                mgr.update(&id, |t| {
+                    t.transferred = 0;
+                    t.retry_attempt = Some(auto_retries);
+                    t.error = Some(format!("retrying in {delay}s (attempt {}/3)", auto_retries + 1));
+                })
+                .await;
+                if let Some(t) = mgr.get(&id).await {
+                    let _ = app.emit("transfer://updated", &t);
+                }
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+                mgr.update(&id, |t| t.error = None).await;
+                continue;
+            }
+            other => break other,
+        }
+    };
+    finalize(&mgr, &id, &app, res).await;
+    mgr.bump_queue(&app).await;
+}
+
+/// Backend dispatch for a single-file download. Extracted so the runner (and
+/// Phase 3 retry) can re-invoke it.
+async fn dispatch_download(
+    mgr: &Arc<TransferManager>,
+    id: &str,
+    session: &Arc<Session>,
+    remote_path: &str,
+    final_path: &Path,
+    app: &AppHandle,
+) -> Result<()> {
+    match &**session {
+        Session::Ssh(ssh) => {
+            mgr.run_ssh_download(id, ssh.clone(), remote_path, final_path, app)
+                .await
+        }
+        Session::Ftp(ftp) => {
+            mgr.run_ftp_download(id, ftp.clone(), remote_path, final_path, app)
+                .await
+        }
+        Session::Object(obj) => {
+            mgr.run_object_download(id, obj.clone(), remote_path, final_path, app)
+                .await
+        }
+        Session::Webdav(dav) => {
+            mgr.run_webdav_download(id, dav.clone(), remote_path, final_path, app)
+                .await
+        }
+        Session::Http(http) => {
+            mgr.run_http_download(id, http.clone(), remote_path, final_path, app)
+                .await
+        }
+        Session::Dropbox(dbx) => {
+            mgr.run_dropbox_download(id, dbx.clone(), remote_path, final_path, app)
+                .await
+        }
+        Session::OneDrive(od) => {
+            mgr.run_onedrive_download(id, od.clone(), remote_path, final_path, app)
+                .await
+        }
+        Session::GDrive(gd) => {
+            mgr.run_gdrive_download(id, gd.clone(), remote_path, final_path, app)
+                .await
+        }
+        Session::Box(bx) => {
+            mgr.run_box_download(id, bx.clone(), remote_path, final_path, app)
+                .await
+        }
+        Session::Shopify(sh) => {
+            mgr.run_shopify_download(id, sh.clone(), remote_path, final_path, app)
+                .await
+        }
+        Session::HubSpot(hs) => {
+            mgr.run_hubspot_download(id, hs.clone(), remote_path, final_path, app)
+                .await
+        }
+        Session::Dynamics(dynm) => {
+            mgr.run_dynamics_download(id, dynm.clone(), remote_path, final_path, app)
+                .await
+        }
+        Session::Agent(agent) => {
+            mgr.run_agent_download(id, agent.clone(), remote_path, final_path, app)
+                .await
+        }
+    }
+}
+
+/// Backend dispatch for a single-file upload.
+async fn dispatch_upload(
+    mgr: &Arc<TransferManager>,
+    id: &str,
+    session: &Arc<Session>,
+    local: &Path,
+    final_remote: &str,
+    app: &AppHandle,
+) -> Result<()> {
+    match &**session {
+        Session::Ssh(ssh) => {
+            mgr.run_ssh_upload(id, ssh.clone(), local, final_remote, app)
+                .await
+        }
+        Session::Ftp(ftp) => {
+            mgr.run_ftp_upload(id, ftp.clone(), local, final_remote, app)
+                .await
+        }
+        Session::Object(obj) => {
+            mgr.run_object_upload(id, obj.clone(), local, final_remote, app)
+                .await
+        }
+        Session::Webdav(dav) => {
+            mgr.run_webdav_upload(id, dav.clone(), local, final_remote, app)
+                .await
+        }
+        Session::Http(_) => Err(anyhow::anyhow!(
+            "HTTP source is read-only — upload not supported"
+        )),
+        Session::Dropbox(dbx) => {
+            mgr.run_dropbox_upload(id, dbx.clone(), local, final_remote, app)
+                .await
+        }
+        Session::OneDrive(od) => {
+            mgr.run_onedrive_upload(id, od.clone(), local, final_remote, app)
+                .await
+        }
+        Session::GDrive(gd) => {
+            mgr.run_gdrive_upload(id, gd.clone(), local, final_remote, app)
+                .await
+        }
+        Session::Box(bx) => {
+            mgr.run_box_upload(id, bx.clone(), local, final_remote, app)
+                .await
+        }
+        Session::Shopify(sh) => {
+            mgr.run_shopify_upload(id, sh.clone(), local, final_remote, app)
+                .await
+        }
+        Session::HubSpot(hs) => {
+            mgr.run_hubspot_upload(id, hs.clone(), local, final_remote, app)
+                .await
+        }
+        Session::Dynamics(dynm) => {
+            mgr.run_dynamics_upload(id, dynm.clone(), local, final_remote, app)
+                .await
+        }
+        Session::Agent(agent) => {
+            mgr.run_agent_upload(id, agent.clone(), local, final_remote, app)
+                .await
+        }
     }
 }
 

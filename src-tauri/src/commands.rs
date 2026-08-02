@@ -771,6 +771,17 @@ pub async fn transfer_resume(
         .map_err(err)
 }
 
+/// Re-enqueue a failed or canceled transfer with its original source/
+/// destination (Plan 17 Phase 3). Same id — the panel row resets in place.
+#[tauri::command]
+pub async fn transfer_retry(
+    transfer_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.transfers.retry(&transfer_id, &app).await.map_err(err)
+}
+
 /// Reorder a waiting transfer in the queue FIFO (Plan 17). `direction` is
 /// "up" (sooner) or "down" (later); active transfers are untouched.
 #[tauri::command]
