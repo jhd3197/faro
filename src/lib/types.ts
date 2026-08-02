@@ -91,6 +91,9 @@ export interface ConnectionProfile {
   /** Manual drag-and-drop position in the rail. Absent = sorted after ordered
    *  profiles, by protocol then name. */
   sortOrder?: number;
+  /** Custom rail bubble glyph: an emoji/short string, or a bundled Iconify
+   *  key ("prefix:name", see brandIconData). Absent = the name monogram. */
+  icon?: string;
   // Bastion/ProxyJump hop (grant-imported profiles only for now — read-only in
   // the editor). Connect to jumpHost, then tunnel to the target.
   jumpHost?: string;

@@ -29,6 +29,7 @@ import { useSettings } from "@/stores/settingsStore";
 import { ProfileEditor } from "./ProfileEditor";
 import { ImportDialog } from "./ImportDialog";
 import { ContextMenu, type MenuItem } from "./ContextMenu";
+import { ConfirmModal } from "./ConfirmModal";
 import { Tooltip } from "./ui/Tooltip";
 import { useDialog } from "@/hooks/useDialog";
 import { monogram } from "@/lib/format";
@@ -40,6 +41,7 @@ import {
 } from "@/lib/types";
 import { cn } from "@/lib/cn";
 import { BrandIcon, protocolIcon } from "@/lib/brandIcons";
+import { BRAND_ICONS } from "@/lib/brandIconData";
 
 type RowState = "focused" | "connected" | "connecting" | "error" | "idle";
 
@@ -122,11 +124,14 @@ export function ServerRail() {
   const hoverTimer = useRef<number | null>(null);
 
   // Drag-and-drop reorder state: the profile being dragged and where it would
-  // land if dropped now (between two rows, or into a group).
+  // land if dropped now (between two rows, into a group, at a section's end,
+  // or at the very top of the rail).
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<
     | { kind: "row"; id: string; after: boolean }
     | { kind: "group"; name: string }
+    | { kind: "sectionEnd"; group: string | undefined }
+    | { kind: "top" }
     | null
   >(null);
   // Naming/renaming a group happens through a small prompt dialog.
@@ -135,6 +140,10 @@ export function ServerRail() {
     | { kind: "rename"; from: string }
     | null
   >(null);
+  // Deleting a connection is irreversible (saved credentials are wiped from
+  // the OS keychain too) — the context menu arms this instead of deleting
+  // outright, and a ConfirmModal does the rest.
+  const [pendingDelete, setPendingDelete] = useState<ConnectionProfile | null>(null);
 
   // Effective expanded state. Open when pinned, while hovering the collapsed
   // rail, while a rail menu / search popover is up (so the flyout doesn't
@@ -295,6 +304,28 @@ export function ServerRail() {
     );
   };
 
+  // Drop strips between rail sections (top of the rail, end of the ungrouped
+  // list, end of a group) — the only way to drop above the first row, below
+  // the last, or out of a folder when no ungrouped neighbour exists.
+  const onStripDragOver = (
+    e: React.DragEvent,
+    target: { kind: "top" } | { kind: "sectionEnd"; group: string | undefined }
+  ) => {
+    if (!dragId) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setDropTarget((cur) => {
+      if (target.kind === "top" && cur?.kind === "top") return cur;
+      if (
+        target.kind === "sectionEnd" &&
+        cur?.kind === "sectionEnd" &&
+        cur.group === target.group
+      )
+        return cur;
+      return target;
+    });
+  };
+
   // Dropping between rows adopts the neighbour's group; dropping on a group
   // header appends to that group. One ipc round-trip persists both.
   const commitDrop = (e: React.DragEvent) => {
@@ -314,11 +345,20 @@ export function ServerRail() {
       if (ti < 0) return;
       group = rest[ti].group;
       at = ti + (target.after ? 1 : 0);
+    } else if (target.kind === "top") {
+      group = undefined;
+      at = 0;
+    } else if (target.kind === "sectionEnd" && target.group === undefined) {
+      // Ungrouped renders first, so its end is right after the last
+      // group-less profile — this is also how a bubble leaves a folder.
+      group = undefined;
+      at = rest.filter((p) => p.group === undefined).length;
     } else {
-      group = target.name;
+      const g = target.kind === "sectionEnd" ? target.group : target.name;
+      group = g;
       at = rest.length;
       for (let i = rest.length - 1; i >= 0; i--) {
-        if (rest[i].group === target.name) {
+        if (rest[i].group === g) {
           at = i + 1;
           break;
         }
@@ -435,7 +475,7 @@ export function ServerRail() {
       label: "Delete",
       icon: <Trash2 size={14} />,
       destructive: true,
-      onClick: () => deleteProfile(p.id),
+      onClick: () => setPendingDelete(p),
     });
     return items;
   };
@@ -667,7 +707,19 @@ export function ServerRail() {
             </div>
           ) : (
             <>
+              <DropStrip
+                dragging={!!dragId}
+                hot={dropTarget?.kind === "top"}
+                onDragOver={(e) => onStripDragOver(e, { kind: "top" })}
+                onDrop={commitDrop}
+              />
               {sections.ungrouped.map(renderBubble)}
+              <DropStrip
+                dragging={!!dragId}
+                hot={dropTarget?.kind === "sectionEnd" && dropTarget.group === undefined}
+                onDragOver={(e) => onStripDragOver(e, { kind: "sectionEnd", group: undefined })}
+                onDrop={commitDrop}
+              />
               {sections.groups.map(([name, items]) => {
                 const collapsed = collapsedGroups.includes(name);
                 return (
@@ -686,6 +738,16 @@ export function ServerRail() {
                       onDrop={commitDrop}
                     />
                     {!collapsed && items.map(renderBubble)}
+                    {!collapsed && (
+                      <DropStrip
+                        dragging={!!dragId}
+                        hot={
+                          dropTarget?.kind === "sectionEnd" && dropTarget.group === name
+                        }
+                        onDragOver={(e) => onStripDragOver(e, { kind: "sectionEnd", group: name })}
+                        onDrop={commitDrop}
+                      />
+                    )}
                   </Fragment>
                 );
               })}
@@ -814,6 +876,16 @@ export function ServerRail() {
           onClose={() => setGroupPrompt(null)}
         />
       )}
+      {pendingDelete && (
+        <ConfirmModal
+          title="Delete connection"
+          message={`Delete “${pendingDelete.name}” (${profileAddress(pendingDelete)})? Its saved credentials are removed from the OS keychain too — this can't be undone.`}
+          confirmLabel="Delete"
+          destructive
+          onClose={() => setPendingDelete(null)}
+          onConfirm={() => deleteProfile(pendingDelete.id)}
+        />
+      )}
       </div>
     </div>
   );
@@ -920,6 +992,15 @@ function RailBubble({
   const plaintext = p.protocol === "ftp";
   const color = p.color || fallbackColor;
   const addr = profileAddress(p);
+  // Custom bubble glyph (profile.icon): a bundled Iconify key wins; an emoji /
+  // short string renders as text; anything else (or an unknown key) falls back
+  // to the name monogram.
+  const customIcon = p.icon?.trim();
+  const customBrand =
+    customIcon && customIcon.includes(":") && BRAND_ICONS[customIcon]
+      ? customIcon
+      : null;
+  const customText = customIcon && !customIcon.includes(":") ? customIcon : null;
 
   const bubble = (
     <span
@@ -933,7 +1014,15 @@ function RailBubble({
         plaintext && !isError && "ring-1 ring-warning/50"
       )}
     >
-      <span style={{ color }}>{monogram(p.name)}</span>
+      {customBrand ? (
+        <span style={{ color }}>
+          <BrandIcon icon={customBrand} size={20} />
+        </span>
+      ) : (
+        <span style={{ color }} className={customText ? "text-[16px]" : undefined}>
+          {customText ?? monogram(p.name)}
+        </span>
+      )}
       {/* Protocol brand mark — a small top-left chip that says "S3 / Azure / SSH
           / a Faro agent" at a glance. The colour monogram stays the connection's
           primary identity; this only adds recognizability, never replaces it. */}
@@ -1020,6 +1109,39 @@ function RailBubble({
             </span>
           </span>
         }
+      />
+    </div>
+  );
+}
+
+// Thin drop strip between rail sections (rail top, end of the ungrouped list,
+// end of a group). Always rendered so it never shifts rows mid-drag; invisible
+// normally, a faint line while a bubble is dragged, accent when it's the
+// current drop target. It is what makes "drop above the first row", "drop
+// below the last", and "drag out of a folder" possible.
+function DropStrip({
+  dragging,
+  hot,
+  onDragOver,
+  onDrop,
+}: {
+  dragging: boolean;
+  hot: boolean;
+  onDragOver: (e: React.DragEvent) => void;
+  onDrop: (e: React.DragEvent) => void;
+}) {
+  return (
+    <div
+      aria-hidden
+      onDragOver={onDragOver}
+      onDrop={onDrop}
+      className="flex w-full items-center px-3 py-[3px]"
+    >
+      <span
+        className={cn(
+          "h-0.5 w-full rounded-full transition-colors",
+          hot ? "bg-accent" : dragging ? "bg-border/40" : "bg-transparent"
+        )}
       />
     </div>
   );
