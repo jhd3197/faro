@@ -260,6 +260,11 @@ pub fn run() {
                         st.transfers.set_concurrency(n);
                     }
                 }
+                if let Ok(Some(raw)) = st.db.settings_get("transferThrottleKbps") {
+                    if let Ok(kbps) = serde_json::from_str::<u64>(&raw) {
+                        st.transfers.set_throttle_kbps(kbps);
+                    }
+                }
             }
 
             // Bring the Agent Bridge back up if the user left its master switch
@@ -408,6 +413,7 @@ pub fn run() {
             commands::transfer_pause_all,
             commands::transfer_resume_all,
             commands::transfer_set_concurrency,
+            commands::transfer_set_throttle,
             commands::transfer_queue_state,
             commands::rename_path,
             commands::delete_path,

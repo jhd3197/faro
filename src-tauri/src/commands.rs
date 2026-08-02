@@ -827,6 +827,17 @@ pub async fn transfer_set_concurrency(
     Ok(())
 }
 
+/// Live-adjust the global bandwidth cap in KiB/s (0 = unlimited). Takes
+/// effect on the next chunk of every active transfer (Plan 17 Phase 4).
+#[tauri::command]
+pub async fn transfer_set_throttle(
+    kbps: u64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.transfers.set_throttle_kbps(kbps);
+    Ok(())
+}
+
 /// Queue snapshot for the panel's initial load (waiting FIFO + pause-all +
 /// concurrency + throttle).
 #[tauri::command]

@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
@@ -67,6 +67,70 @@ pub struct QueueState {
     pub paused_all: bool,
     pub concurrency: usize,
     pub throttle_kbps: u64,
+}
+
+/// Global bandwidth cap shared by every active copy loop (Plan 17 Phase 4):
+/// a token bucket refilling at `rate` bytes/sec (0 = unlimited). Because all
+/// transfers draw from this one bucket, the cap is split across active
+/// transfers rather than applied per transfer.
+struct TokenBucket {
+    inner: Mutex<BucketInner>,
+    rate_bps: AtomicU64,
+}
+
+struct BucketInner {
+    tokens: f64,
+    last: Instant,
+}
+
+impl TokenBucket {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(BucketInner {
+                tokens: 0.0,
+                last: Instant::now(),
+            }),
+            rate_bps: AtomicU64::new(0),
+        }
+    }
+
+    fn rate_kbps(&self) -> u64 {
+        self.rate_bps.load(Ordering::Relaxed) / 1024
+    }
+
+    fn set_rate_kbps(&self, kbps: u64) {
+        self.rate_bps
+            .store(kbps.saturating_mul(1024), Ordering::Relaxed);
+    }
+
+    /// Wait until `bytes` may flow under the cap. A grant is capped at one
+    /// second's worth of rate (min 64 KiB) so even a tiny rate always lets a
+    /// chunk through — a 1 KiB file never waits a full token window.
+    async fn acquire(&self, bytes: u64) {
+        loop {
+            let rate = self.rate_bps.load(Ordering::Relaxed);
+            if rate == 0 {
+                return;
+            }
+            let wait = {
+                let mut g = self.inner.lock().await;
+                let now = Instant::now();
+                let elapsed = now.duration_since(g.last).as_secs_f64();
+                let rate_f = rate as f64;
+                let cap = rate_f.max(64.0 * 1024.0);
+                g.tokens = (g.tokens + elapsed * rate_f).min(cap);
+                g.last = now;
+                let grant = (bytes as f64).min(cap);
+                if g.tokens >= grant {
+                    g.tokens -= grant;
+                    return;
+                }
+                Duration::from_secs_f64((grant - g.tokens) / rate_f)
+            };
+            // Cap the sleep so a live rate change takes effect promptly.
+            tokio::time::sleep(wait.min(Duration::from_millis(250))).await;
+        }
+    }
 }
 
 /// A pause gate shared by the scheduler (pause-all) and individual transfers
@@ -159,6 +223,8 @@ pub struct TransferManager {
     retry: Mutex<HashMap<String, RetryInfo>>,
     /// Bumped on every queue change so admission waiters re-check their turn.
     queue_gen: watch::Sender<u64>,
+    /// Global bandwidth cap every copy loop draws from per chunk (Phase 4).
+    bucket: TokenBucket,
 }
 
 fn now_ts() -> i64 {
@@ -233,6 +299,7 @@ impl TransferManager {
             pauses: Mutex::new(HashMap::new()),
             retry: Mutex::new(HashMap::new()),
             queue_gen: watch::channel(0).0,
+            bucket: TokenBucket::new(),
         }
     }
 
@@ -269,7 +336,7 @@ impl TransferManager {
             waiting: waiting.iter().cloned().collect(),
             paused_all: self.pause_all.is_paused(),
             concurrency: self.concurrency.load(Ordering::Relaxed),
-            throttle_kbps: 0, // wired up in Phase 4
+            throttle_kbps: self.bucket.rate_kbps(),
         }
     }
 
@@ -381,11 +448,12 @@ impl TransferManager {
         self.pause_all.is_paused()
     }
 
-    /// Chunk-boundary checkpoint shared by every copy loop (Plan 17). Phase 4
-    /// draws `_bytes` from the bandwidth bucket here. When the transfer (or
-    /// the whole manager) is paused, this parks until resumed, then returns
-    /// `RestartFromPause` so the runner re-runs the file from byte 0.
-    async fn checkpoint(&self, id: &str, _bytes: u64) -> Result<()> {
+    /// Chunk-boundary checkpoint shared by every copy loop (Plan 17). Draws
+    /// `bytes` from the global bandwidth bucket (Phase 4), then — when the
+    /// transfer (or the whole manager) is paused — parks until resumed and
+    /// returns `RestartFromPause` so the runner re-runs the file from byte 0.
+    async fn checkpoint(&self, id: &str, bytes: u64) -> Result<()> {
+        self.bucket.acquire(bytes).await;
         let gate = self.pauses.lock().await.get(id).cloned();
         let parked = self.pause_all.is_paused() || gate.as_ref().is_some_and(|g| g.is_paused());
         if !parked {
@@ -523,6 +591,12 @@ impl TransferManager {
         };
         self.tasks.lock().await.insert(id.to_string(), task);
         Ok(())
+    }
+
+    /// Live-adjust the global bandwidth cap (KiB/s, 0 = unlimited). Takes
+    /// effect on the next chunk of every active transfer.
+    pub fn set_throttle_kbps(&self, kbps: u64) {
+        self.bucket.set_rate_kbps(kbps);
     }
 
     /// Live-adjust the concurrency bound. Growing adds permits at once;
