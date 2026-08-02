@@ -724,6 +724,8 @@ fn needs_content_optin(session: Option<&Session>) -> bool {
                 | Session::GDrive(_)
                 | Session::Box(_)
                 | Session::Shopify(_)
+                | Session::HubSpot(_)
+                | Session::Dynamics(_)
         )
     )
 }

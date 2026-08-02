@@ -332,6 +332,59 @@ pub async fn onedrive_authorize(profile_id: String) -> Result<DropboxAuthResult,
     Ok(DropboxAuthResult { account_label })
 }
 
+/// Run the interactive Dynamics 365 (delegated) OAuth flow — the OneDrive
+/// pattern with the org's `user_impersonation` scope — store tokens in the
+/// keychain keyed by `profile_id`, and return the account label. `host` is
+/// the environment URL the editor collected (`{org}.crm.dynamics.com`).
+#[tauri::command]
+pub async fn dynamics_authorize(
+    profile_id: String,
+    host: String,
+) -> Result<DropboxAuthResult, String> {
+    let host = host
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string();
+    let config = crate::session::dynamics::dynamics_config(&host);
+    let (tokens, _raw) = crate::oauth::authorize_loopback(&config).await.map_err(err)?;
+    crate::oauth::store_tokens(
+        crate::session::dynamics::DYNAMICS_TOKEN_SERVICE,
+        &profile_id,
+        &tokens,
+    )
+    .map_err(err)?;
+
+    let probe = ConnectionProfile {
+        id: profile_id.clone(),
+        name: String::new(),
+        protocol: "dynamics".into(),
+        host: host.clone(),
+        port: 443,
+        username: String::new(),
+        auth: AuthMethod::Password { password: String::new() },
+        default_remote_path: None,
+        color: None,
+        auto_connect: None,
+        bucket: None,
+        region: None,
+        endpoint: None,
+        account: None,
+        agent_key: None,
+        group: None,
+        sort_order: None,
+        jump_host: None,
+        jump_port: None,
+        jump_username: None,
+    };
+    let account_label = match crate::session::dynamics_connect(&probe).await {
+        Ok(session) => session.account_label().await.unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+    Ok(DropboxAuthResult { account_label })
+}
+
 /// Run the interactive Google Drive OAuth flow, store tokens, return the label.
 #[tauri::command]
 pub async fn gdrive_authorize(profile_id: String) -> Result<DropboxAuthResult, String> {
@@ -793,6 +846,8 @@ pub fn fs_for_session(session: &Arc<Session>) -> Box<dyn RemoteFs> {
         Session::GDrive(gd) => Box::new(crate::remotefs::gdrive::GDriveFs::new(gd.clone())),
         Session::Box(bx) => Box::new(crate::remotefs::boxdrive::BoxFs::new(bx.clone())),
         Session::Shopify(sh) => Box::new(crate::remotefs::shopify::ShopifyFs::new(sh.clone())),
+        Session::HubSpot(hs) => Box::new(crate::remotefs::hubspot::HubSpotFs::new(hs.clone())),
+        Session::Dynamics(dynm) => Box::new(crate::remotefs::dynamics::DynamicsFs::new(dynm.clone())),
         Session::Agent(agent) => Box::new(crate::remotefs::agent::AgentFs::new(agent.clone())),
     }
 }

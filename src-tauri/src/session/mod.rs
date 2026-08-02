@@ -1,9 +1,12 @@
 pub mod agent;
 pub mod boxdrive;
 pub mod dropbox;
+pub mod dynamics;
 pub mod ftp;
 pub mod gdrive;
 pub mod http;
+pub mod http_throttle;
+pub mod hubspot;
 pub mod object;
 pub mod onedrive;
 pub mod shopify;
@@ -11,9 +14,11 @@ pub mod webdav;
 pub use agent::{agent_pair, AgentSession};
 pub use boxdrive::{box_connect, BoxSession};
 pub use dropbox::{dropbox_connect, DropboxSession};
+pub use dynamics::{dynamics_connect, DynamicsSession};
 pub use ftp::{ftp_connect, FtpSession};
 pub use gdrive::{gdrive_connect, GDriveSession};
 pub use http::{http_connect, HttpSession};
+pub use hubspot::{hubspot_connect, HubSpotSession};
 pub use object::{object_connect, ObjectSession};
 pub use onedrive::{onedrive_connect, OneDriveSession};
 pub use shopify::{shopify_connect, ShopifySession};
@@ -1218,6 +1223,14 @@ pub async fn open_session(
             let sh = shopify_connect(profile).await?;
             Ok(Session::Shopify(Arc::new(sh)))
         }
+        "hubspot" => {
+            let hs = hubspot_connect(profile).await?;
+            Ok(Session::HubSpot(Arc::new(hs)))
+        }
+        "dynamics" => {
+            let dynm = dynamics_connect(profile).await?;
+            Ok(Session::Dynamics(Arc::new(dynm)))
+        }
         other => Err(anyhow!("unsupported protocol: {other}")),
     }
 }
@@ -1574,6 +1587,8 @@ pub enum Session {
     GDrive(Arc<GDriveSession>),
     Box(Arc<BoxSession>),
     Shopify(Arc<ShopifySession>),
+    HubSpot(Arc<HubSpotSession>),
+    Dynamics(Arc<DynamicsSession>),
     Agent(Arc<AgentSession>),
 }
 
@@ -1590,6 +1605,8 @@ impl Session {
             Self::GDrive(s) => &s.profile,
             Self::Box(s) => &s.profile,
             Self::Shopify(s) => &s.profile,
+            Self::HubSpot(s) => &s.profile,
+            Self::Dynamics(s) => &s.profile,
             Self::Agent(s) => &s.profile,
         }
     }
@@ -1606,6 +1623,8 @@ impl Session {
             Self::GDrive(_) => "gdrive",
             Self::Box(_) => "box",
             Self::Shopify(_) => "shopify",
+            Self::HubSpot(_) => "hubspot",
+            Self::Dynamics(_) => "dynamics",
             Self::Agent(_) => "faro-agent",
         }
     }
@@ -1724,6 +1743,18 @@ impl SessionManager {
                 let id = sh.id.clone();
                 (id, Session::Shopify(Arc::new(sh)))
             }
+            "hubspot" => {
+                let _ = app; // Credential loaded from the keychain; no prompt.
+                let hs = hubspot_connect(&profile).await?;
+                let id = hs.id.clone();
+                (id, Session::HubSpot(Arc::new(hs)))
+            }
+            "dynamics" => {
+                let _ = app; // Credential loaded from the keychain; no prompt.
+                let dynm = dynamics_connect(&profile).await?;
+                let id = dynm.id.clone();
+                (id, Session::Dynamics(Arc::new(dynm)))
+            }
             "faro-agent" => {
                 let agent = AgentSession::connect(profile).await?;
                 let id = agent.id.clone();
@@ -1822,6 +1853,12 @@ impl SessionManager {
                 }
                 Session::Shopify(_) => {
                     // Shopify is stateless HTTP — nothing to close.
+                }
+                Session::HubSpot(_) => {
+                    // HubSpot is stateless HTTP — nothing to close.
+                }
+                Session::Dynamics(_) => {
+                    // Dynamics/Dataverse is stateless HTTP — nothing to close.
                 }
                 Session::Agent(agent) => {
                     agent.disconnect().await;

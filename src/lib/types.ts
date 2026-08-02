@@ -62,6 +62,8 @@ export type Protocol =
   | "gdrive"
   | "box"
   | "shopify"
+  | "hubspot"
+  | "dynamics"
   | "faro-agent";
 
 export interface ConnectionProfile {
@@ -110,6 +112,8 @@ export const PROTOCOL_DEFAULT_PORT: Record<Protocol, number> = {
   gdrive: 443,
   box: 443,
   shopify: 443,
+  hubspot: 443,
+  dynamics: 443,
   "faro-agent": 8722,
 };
 
@@ -127,6 +131,8 @@ export const PROTOCOL_LABEL: Record<Protocol, string> = {
   gdrive: "Google Drive",
   box: "Box",
   shopify: "Shopify",
+  hubspot: "HubSpot",
+  dynamics: "Dynamics 365",
   "faro-agent": "Faro Agent",
 };
 

@@ -77,6 +77,19 @@ function normalizeShopDomain(s: string): string {
   return t.endsWith(".myshopify.com") ? t : `${t}.myshopify.com`;
 }
 
+/// Normalize a Dynamics 365 environment URL for the profile host: strip any
+/// scheme/path, and append `.crm.dynamics.com` when only the org name was
+/// typed (regional variants like `.crm4.dynamics.com` are kept as typed).
+function normalizeDynamicsUrl(s: string): string {
+  const t = s
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "");
+  if (!t) return t;
+  return t.includes(".") ? t : `${t}.crm.dynamics.com`;
+}
+
 /// Guess which provider a saved S3 profile belongs to from its endpoint URL.
 /// We never need this to be perfect — it just preselects a preset button.
 function guessProvider(endpoint?: string): S3Provider {
@@ -103,7 +116,7 @@ const PROTOCOL_GROUPS: { label: string; items: Protocol[] }[] = [
   { label: "Object storage", items: ["s3", "azure", "gcs"] },
   { label: "Web", items: ["webdav", "http"] },
   { label: "Cloud drives", items: ["dropbox", "onedrive", "gdrive", "box"] },
-  { label: "Commerce", items: ["shopify"] },
+  { label: "Commerce", items: ["shopify", "hubspot", "dynamics"] },
   { label: "Machine", items: ["faro-agent"] },
 ];
 
@@ -224,6 +237,8 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
   const isGdrive = protocol === "gdrive";
   const isBox = protocol === "box";
   const isShopify = protocol === "shopify";
+  const isHubSpot = protocol === "hubspot";
+  const isDynamics = protocol === "dynamics";
   const isCloudOAuth = isDropbox || isOnedrive || isGdrive || isBox;
   const isObject = isObjectProtocol(protocol);
   const isAgent = isAgentProtocol(protocol);
@@ -275,6 +290,75 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
       ? !!shopifyToken.trim()
       : !!shopifyClientId.trim() && !!shopifyClientSecret.trim());
 
+  // HubSpot: the private-app access token (`pat-…`) lives in the OS keychain
+  // (`hubspot:{profile_id}`) — never in profiles.json. The editor only ever
+  // sets it (one-way) and asks whether one already exists.
+  const [hubspotToken, setHubspotToken] = useState("");
+  const [hubspotSecretSaved, setHubspotSecretSaved] = useState(false);
+  useEffect(() => {
+    if (protocol === "hubspot") {
+      ipc
+        .apiKeyStatus(`hubspot:${id}`)
+        .then(setHubspotSecretSaved)
+        .catch(() => {});
+    }
+  }, [protocol, id]);
+
+  const hubspotSecretOk = hubspotSecretSaved || !!hubspotToken.trim();
+  /// HubSpot private-app tokens start with `pat-`; anything else is almost
+  /// certainly the wrong credential pasted in — warn, don't block.
+  const hubspotPatWarn =
+    !!hubspotToken.trim() && !hubspotToken.trim().startsWith("pat-");
+
+  // Dynamics 365: two auth modes. Client credentials: the app-registration
+  // credential lives in the OS keychain (`dynamics:{profile_id}`,
+  // `tenant_id:client_id:client_secret`) — never in profiles.json; the editor
+  // only ever sets it (one-way) and asks whether one already exists. Delegated
+  // ("Sign in with Microsoft"): the OAuth TokenSet lives in the keychain under
+  // the `faro-dynamics` service (set by `dynamics_authorize`); the authorized
+  // account label is persisted on the profile, like the OAuth clouds. The
+  // backend prefers the client-credentials blob when both exist, so saving in
+  // delegated mode clears the blob.
+  const [dynamicsMode, setDynamicsMode] = useState<"client" | "delegated">(
+    seed?.protocol === "dynamics" && !!seed?.account ? "delegated" : "client"
+  );
+  const [dynamicsTenantId, setDynamicsTenantId] = useState("");
+  const [dynamicsClientId, setDynamicsClientId] = useState("");
+  const [dynamicsClientSecret, setDynamicsClientSecret] = useState("");
+  const [dynamicsSecretSaved, setDynamicsSecretSaved] = useState(false);
+  const [dynamicsAuthed, setDynamicsAuthed] = useState<boolean>(
+    seed?.protocol === "dynamics" && !!seed?.account
+  );
+  const [dynamicsAccount, setDynamicsAccount] = useState<string>(
+    seed?.protocol === "dynamics" ? (seed?.account ?? "") : ""
+  );
+  useEffect(() => {
+    if (protocol === "dynamics") {
+      ipc
+        .apiKeyStatus(`dynamics:${id}`)
+        .then(setDynamicsSecretSaved)
+        .catch(() => {});
+    }
+  }, [protocol, id]);
+
+  /// The Dynamics credential as stored in the keychain:
+  /// `tenant_id:client_id:client_secret` (the Shopify client-mode shape).
+  const dynamicsSecretEntered =
+    !!dynamicsTenantId.trim() ||
+    !!dynamicsClientId.trim() ||
+    !!dynamicsClientSecret.trim();
+  const dynamicsSecret = `${dynamicsTenantId.trim()}:${dynamicsClientId.trim()}:${dynamicsClientSecret.trim()}`;
+  const dynamicsUrlOk = /^[a-z0-9][a-z0-9-]*\.crm\d*\.dynamics\.com$/.test(
+    normalizeDynamicsUrl(host)
+  );
+  const dynamicsCredOk =
+    dynamicsMode === "client"
+      ? dynamicsSecretSaved ||
+        (!!dynamicsTenantId.trim() &&
+          !!dynamicsClientId.trim() &&
+          !!dynamicsClientSecret.trim())
+      : dynamicsAuthed;
+
   /// Build the profile from the current form state. Shared by Save and by the
   /// pairing flow (which must persist the profile before it can pair by id).
   const buildProfile = (): ConnectionProfile => {
@@ -305,9 +389,13 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
                   ? cloudAccount || PROTOCOL_LABEL[protocol]
                   : isShopify
                     ? normalizeShopDomain(host) || "Shopify"
-                    : isAgent
-                      ? `Agent @ ${host}`
-                      : `${username}@${host}`),
+                    : isHubSpot
+                      ? "HubSpot"
+                      : isDynamics
+                        ? normalizeDynamicsUrl(host) || "Dynamics 365"
+                        : isAgent
+                        ? `Agent @ ${host}`
+                        : `${username}@${host}`),
       protocol,
       host: isObject
         ? endpoint ||
@@ -320,17 +408,21 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
           ? hostFromUrl(endpoint)
           : isCloudOAuth
             ? `${protocol}.com`
-            : isShopify
-              ? normalizeShopDomain(host)
-              : host,
+            : isHubSpot
+              ? "api.hubapi.com"
+              : isShopify
+                ? normalizeShopDomain(host)
+                : isDynamics
+                  ? normalizeDynamicsUrl(host)
+                  : host,
       port,
       username: isAzure
         ? azureAccount
-        : isAgent || isGcs || isCloudOAuth || isShopify
+        : isAgent || isGcs || isCloudOAuth || isShopify || isHubSpot || isDynamics
           ? ""
           : username,
       auth:
-        isAgent || isCloudOAuth || isShopify
+        isAgent || isCloudOAuth || isShopify || isHubSpot || isDynamics
           ? { kind: "password", password: "" }
           : auth,
       defaultRemotePath: defaultRemotePath || undefined,
@@ -339,7 +431,13 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
       bucket: isObject ? bucket : undefined,
       region: isS3 ? region : undefined,
       endpoint: isObject || isWebdav || isHttp ? endpoint || undefined : undefined,
-      account: isAzure ? azureAccount : isCloudOAuth ? cloudAccount || undefined : undefined,
+      account: isAzure
+        ? azureAccount
+        : isCloudOAuth
+          ? cloudAccount || undefined
+          : isDynamics && dynamicsMode === "delegated"
+            ? dynamicsAccount || undefined
+            : undefined,
       agentKey: isAgent ? agentKey : undefined,
       group: group.trim() || undefined,
       sortOrder: profile?.sortOrder,
@@ -355,6 +453,19 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
     // it never lands in profiles.json). Blank fields keep the saved one.
     if (isShopify && shopifySecretEntered) {
       await ipc.setApiKey(`shopify:${id}`, shopifySecret);
+    }
+    // HubSpot: same one-way keychain set for the private-app token.
+    if (isHubSpot && hubspotToken.trim()) {
+      await ipc.setApiKey(`hubspot:${id}`, hubspotToken.trim());
+    }
+    // Dynamics: same one-way keychain set for the app-registration credential.
+    // In delegated mode the blob is cleared instead — the backend prefers it
+    // over the OAuth tokens when both exist.
+    if (isDynamics && dynamicsMode === "client" && dynamicsSecretEntered) {
+      await ipc.setApiKey(`dynamics:${id}`, dynamicsSecret);
+    }
+    if (isDynamics && dynamicsMode === "delegated") {
+      await ipc.setApiKey(`dynamics:${id}`, "");
     }
     await saveProfile(buildProfile());
     onClose();
@@ -394,7 +505,11 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             ? !!endpoint
             : isShopify
               ? shopifyDomainOk && shopifySecretOk
-              : isCloudOAuth
+              : isHubSpot
+                ? hubspotSecretOk
+                : isDynamics
+                  ? dynamicsUrlOk && dynamicsCredOk
+                  : isCloudOAuth
                 ? cloudAuthed
                 : isAgent
                   ? !!host && !!agentKey
@@ -419,7 +534,17 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
                     !shopifyDomainOk && "store domain",
                     !shopifySecretOk && "API credential",
                   ]
-                : isCloudOAuth
+                : isHubSpot
+                  ? [!hubspotSecretOk && "private-app token"]
+                  : isDynamics
+                    ? [
+                        !dynamicsUrlOk && "environment URL",
+                        !dynamicsCredOk &&
+                          (dynamicsMode === "client"
+                            ? "client credentials"
+                            : "Microsoft sign-in"),
+                      ]
+                    : isCloudOAuth
                 ? [!cloudAuthed && `${PROTOCOL_LABEL[protocol]} authorization`]
                 : isAgent
                   ? [!host && "host", !agentKey && "pairing"]
@@ -573,6 +698,43 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             clientSecret={shopifyClientSecret}
             setClientSecret={setShopifyClientSecret}
             secretSaved={shopifySecretSaved}
+          />
+        ) : isHubSpot ? (
+          <HubSpotSection
+            token={hubspotToken}
+            setToken={setHubspotToken}
+            secretSaved={hubspotSecretSaved}
+            patWarn={hubspotPatWarn}
+          />
+        ) : isDynamics ? (
+          <DynamicsSection
+            url={host}
+            setUrl={setHost}
+            urlOk={dynamicsUrlOk}
+            mode={dynamicsMode}
+            setMode={setDynamicsMode}
+            tenantId={dynamicsTenantId}
+            setTenantId={setDynamicsTenantId}
+            clientId={dynamicsClientId}
+            setClientId={setDynamicsClientId}
+            clientSecret={dynamicsClientSecret}
+            setClientSecret={setDynamicsClientSecret}
+            secretSaved={dynamicsSecretSaved}
+            authorize={(pid) =>
+              ipc.dynamicsAuthorize(pid, normalizeDynamicsUrl(host))
+            }
+            profileId={id}
+            authed={dynamicsAuthed}
+            account={dynamicsAccount}
+            onAuthorized={(label) => {
+              setDynamicsAuthed(true);
+              setDynamicsAccount(label);
+              if (!name) setName(label || normalizeDynamicsUrl(host));
+            }}
+            onReset={() => {
+              setDynamicsAuthed(false);
+              setDynamicsAccount("");
+            }}
           />
         ) : isCloudOAuth ? (
           <OAuthConnectSection
@@ -1801,6 +1963,161 @@ function ShopifySection({
   );
 }
 
+function HubSpotSection({
+  token,
+  setToken,
+  secretSaved,
+  patWarn,
+}: {
+  token: string;
+  setToken: (v: string) => void;
+  secretSaved: boolean;
+  patWarn: boolean;
+}) {
+  return (
+    <>
+      <Field label="Private app access token">
+        <PasswordInput value={token} onChange={setToken} />
+      </Field>
+
+      <Hint>
+        Create a private app in your HubSpot portal (Settings → Integrations →
+        Private Apps) — the token needs <code>content</code>, <code>files</code>
+        , and <code>hubdb</code> scopes.
+      </Hint>
+
+      {patWarn && (
+        <Hint tone="warn">
+          Private-app tokens start with <code>pat-</code> — double-check that
+          you pasted the right credential.
+        </Hint>
+      )}
+
+      <Hint>
+        Stored in your OS keychain — never in the connections file.
+        {secretSaved
+          ? " A token is already saved; leave the field blank to keep it."
+          : ""}
+      </Hint>
+    </>
+  );
+}
+
+function DynamicsSection({
+  url,
+  setUrl,
+  urlOk,
+  mode,
+  setMode,
+  tenantId,
+  setTenantId,
+  clientId,
+  setClientId,
+  clientSecret,
+  setClientSecret,
+  secretSaved,
+  authorize,
+  profileId,
+  authed,
+  account,
+  onAuthorized,
+  onReset,
+}: {
+  url: string;
+  setUrl: (v: string) => void;
+  urlOk: boolean;
+  mode: "client" | "delegated";
+  setMode: (m: "client" | "delegated") => void;
+  tenantId: string;
+  setTenantId: (v: string) => void;
+  clientId: string;
+  setClientId: (v: string) => void;
+  clientSecret: string;
+  setClientSecret: (v: string) => void;
+  secretSaved: boolean;
+  authorize: (profileId: string) => Promise<{ accountLabel: string }>;
+  profileId: string;
+  authed: boolean;
+  account: string;
+  onAuthorized: (label: string) => void;
+  onReset: () => void;
+}) {
+  return (
+    <>
+      <Field label="Environment URL">
+        <input
+          value={url}
+          onChange={(e) => setUrl(e.target.value)}
+          placeholder="my-org.crm.dynamics.com"
+          className={inputCls}
+        />
+      </Field>
+
+      <Field label="Auth">
+        <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-bg-subtle p-1">
+          {(["client", "delegated"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => setMode(m)}
+              className={
+                "rounded-sm px-2 py-1.5 text-[11px] font-semibold transition-colors " +
+                (mode === m
+                  ? "bg-accent-soft text-text ring-1 ring-inset ring-accent/40"
+                  : "text-text-muted hover:bg-bg-hover hover:text-text")
+              }
+            >
+              {m === "client" ? "Client credentials" : "Sign in with Microsoft"}
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      {mode === "client" ? (
+        <>
+          <Hint>
+            Register an app in Microsoft Entra ID and add it as an application
+            user on the environment (Power Platform admin center → Environments
+            → Settings → Users + permissions → Application users).
+          </Hint>
+
+          <Field label="Tenant ID">
+            <PasswordInput value={tenantId} onChange={setTenantId} />
+          </Field>
+          <Field label="Client ID">
+            <PasswordInput value={clientId} onChange={setClientId} />
+          </Field>
+          <Field label="Client secret">
+            <PasswordInput value={clientSecret} onChange={setClientSecret} />
+          </Field>
+
+          <Hint>
+            Stored in your OS keychain — never in the connections file.
+            {secretSaved
+              ? " A credential is already saved; leave the fields blank to keep it."
+              : ""}
+          </Hint>
+        </>
+      ) : urlOk ? (
+        <OAuthConnectSection
+          label="Microsoft"
+          authorize={authorize}
+          profileId={profileId}
+          authed={authed}
+          account={account}
+          onAuthorized={onAuthorized}
+          onReset={onReset}
+        />
+      ) : (
+        <Hint tone="warn">
+          Enter a valid environment URL above before signing in — the delegated
+          flow is scoped to that organization.
+        </Hint>
+      )}
+    </>
+  );
+}
+
 function GcsSection({
   bucket,
   setBucket,
@@ -2027,6 +2344,10 @@ function protocolHint(p: Protocol): string {
       return "OAuth · Cloud";
     case "shopify":
       return "Theme files · :443";
+    case "hubspot":
+      return "Browse and edit Design Manager files like an FTP site. Prefer the draft environment — published writes deploy instantly.";
+    case "dynamics":
+      return "Browse and edit web resources (form scripts, CSS, HTML) like an FTP site. Edits publish immediately — prefer a dev/sandbox environment.";
     case "faro-agent":
       return "Machine · :8722";
   }

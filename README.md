@@ -104,7 +104,7 @@ Builds are **unsigned** (no Apple Developer / Windows EV certificate yet), so ea
 
 ## 🎯 Features
 
-> **One connection list, fourteen backends.** Browse, transfer, sync, and the disk-usage / diff / search tools work the same on every one — all behind a single `RemoteFs` trait.
+> **One connection list, sixteen backends.** Browse, transfer, sync, and the disk-usage / diff / search tools work the same on every one — all behind a single `RemoteFs` trait.
 
 ### 📡 Backends & Storage
 
@@ -113,6 +113,8 @@ Builds are **unsigned** (no Apple Developer / Windows EV certificate yet), so ea
 | **SFTP / FTP / FTPS**<br>The classics, done right — one SSH session shared between the file browser and the terminal pane. | **S3-compatible**<br>Presets for AWS, Cloudflare R2, Backblaze B2, Wasabi, DigitalOcean Spaces, MinIO, Storj, Hetzner, Scaleway, Oracle OCI, IBM COS, Supabase, and generic self-hosted (Ceph RGW, Garage, SeaweedFS). |
 | **Azure Blob & Google Cloud Storage**<br>First-class object storage alongside your servers. | **WebDAV & HTTP(S)**<br>Nextcloud / ownCloud browsing, plus read-only HTTP autoindex and direct-URL sources. |
 | **Cloud drives**<br>Dropbox, OneDrive, Google Drive, and Box — loopback + PKCE OAuth, only the refresh token in your OS keychain. | **Faro Agent**<br>Faro's own paired agent as a backend — browse, transfer, and exec on a machine with no SSH server. |
+| **Shopify themes**<br>Browse and edit store themes like an FTP site — dual-pane, diff, sync, in-place Liquid editing. | **HubSpot CMS**<br>Design Manager files (templates, modules, CSS/JS, HubL) as a filesystem — draft and published environments, edits deploy on save. Plus the File Manager asset library, and HubDB tables as read-only CSV exports. |
+| **Dynamics 365 / Dataverse**<br>Web resources (form scripts, CSS, HTML, images) as a filesystem — browse, diff, sync, in-place edit; saves publish automatically. The XrmToolBox workflow, without XrmToolBox. | |
 
 ### 🔁 Transfers & Sync
 
@@ -401,7 +403,7 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 - **v1.2** — edit-in-place external editor
 - **v1.3** — custom title bar with File/Edit/View/Help menus + integrated window controls; GitHub Actions release pipeline + CI
 - **v1.3** — UI density pass (named themes, command palette, sortable detail columns, breadcrumbs, in-pane filter, toasts); the **🤖 Agent Bridge** (AI-agent command access over native MCP); and **🖥️ Faro Agent** — control a paired Windows/macOS/Linux machine (browse, transfer, native exec) over an encrypted, pinned link, no SSH server required. Now with **in-app Remote control** (host the agent from the Faro app — no separate download), a single always-pairable daemon port, `faro-agentd install` service setup + one-line headless installer, and `faro://` deep links for one-click "Connect with Faro" from a hosting panel
-- **recent** — **more backends** (S3 presets for a dozen vendors, Google Cloud Storage, WebDAV, read-only HTTP, the Dropbox / OneDrive / Google Drive / Box OAuth clouds, and **Shopify** — browse/edit store themes like an FTP site); **Disk Usage Explorer**, **Directory Diff** (incl. remote↔remote), and **Fleet Search** over any backend; **Fleet Skills** (AI-authorable fleet automations); **continuous folder sync** with exclude patterns + mirror-delete guard; and a sharper **`faro-cli` / Agent-Bridge remote-exec DX** — background jobs, `agent write`, `agent script`/`--stdin`, authenticated `fetch`, and CLI version-drift self-update
+- **recent** — **more backends** (S3 presets for a dozen vendors, Google Cloud Storage, WebDAV, read-only HTTP, the Dropbox / OneDrive / Google Drive / Box OAuth clouds, and **Shopify** / **HubSpot** — browse/edit store themes and CMS Design Manager files like an FTP site); **Disk Usage Explorer**, **Directory Diff** (incl. remote↔remote), and **Fleet Search** over any backend; **Fleet Skills** (AI-authorable fleet automations); **continuous folder sync** with exclude patterns + mirror-delete guard; and a sharper **`faro-cli` / Agent-Bridge remote-exec DX** — background jobs, `agent write`, `agent script`/`--stdin`, authenticated `fetch`, and CLI version-drift self-update
 - **next** — SMB/CIFS backend (NAS / Windows shares); on-demand "virtual folder" placeholders (Windows-first, feature-flagged today); bidirectional sync + conflict resolution; brand/protocol logos on the rail and picker; Faro Agent internet reach (rendezvous + NAT hole-punch + relay fallback); transfer speed limits and queue editing (priority/retry/pause)
 - **release polish** — code signing (Apple Developer / Windows EV cert), Tauri auto-updater, landing page
 
@@ -424,7 +426,7 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 |-------|------------|
 | App shell | Tauri 2 (Rust) |
 | Frontend | React 18, TypeScript, Vite, Zustand, xterm.js, Tailwind CSS |
-| Backend core | Rust — one `RemoteFs` trait over 14 backends |
+| Backend core | Rust — one `RemoteFs` trait over 16 backends |
 | SSH | russh (SFTP + PTY), ssh-agent / Pageant integration |
 | Object storage | S3, Azure Blob, Google Cloud Storage SDKs |
 | Cloud drives | Loopback + PKCE OAuth (Dropbox, OneDrive, Google Drive, Box) |

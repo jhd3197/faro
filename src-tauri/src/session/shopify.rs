@@ -1,4 +1,5 @@
 use crate::profiles::ConnectionProfile;
+use crate::session::http_throttle::{send_retried, HttpThrottle};
 use anyhow::{anyhow, Context, Result};
 use reqwest::{Client, Method, StatusCode};
 use serde_json::Value;
@@ -82,8 +83,8 @@ pub struct ShopifySession {
     secret: String,
     /// Client-credentials exchange cache: `(access_token, expires_at)`.
     token_cache: StdMutex<Option<(String, Instant)>>,
-    /// Pacing state: the next instant a request may leave.
-    next_request: StdMutex<Instant>,
+    /// Pacing: a token bucket of one refilled every 500 ms.
+    throttle: HttpThrottle,
     /// Theme list, probed at connect (connect-time validation).
     themes: StdMutex<Vec<ThemeInfo>>,
     /// Asset listing per theme id, cached briefly.
@@ -142,24 +143,9 @@ impl ShopifySession {
         Ok(token)
     }
 
-    /// Hold requests to ≈2/s: each call waits for its slot, then reserves the
-    /// next one. A token bucket of one refilled every 500 ms.
-    async fn throttle(&self) {
-        let wait = {
-            let mut next = self.next_request.lock().unwrap();
-            let now = Instant::now();
-            let at = now.max(*next);
-            *next = at + MIN_INTERVAL;
-            at.saturating_duration_since(now)
-        };
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
-        }
-    }
-
-    /// Send an Admin API request (`X-Shopify-Access-Token` auth), pacing every
-    /// call, honoring `Retry-After` on 429, and backing off on 5xx. `path` may
-    /// be an API path (`/themes.json…`) or an absolute URL.
+    /// Hold requests to ≈2/s, honor `Retry-After` on 429, and back off on 5xx
+    /// (via the shared [`send_retried`]). `path` may be an API path
+    /// (`/themes.json…`) or an absolute URL.
     pub async fn send(
         &self,
         method: Method,
@@ -171,39 +157,24 @@ impl ShopifySession {
         } else {
             format!("{}{path}", self.api_base)
         };
-        let mut backoff = Duration::from_millis(500);
-        let mut attempt = 0;
-        loop {
-            self.throttle().await;
-            let token = self.token().await?;
-            let mut rb = self
-                .client
-                .request(method.clone(), &url)
-                .header("X-Shopify-Access-Token", token);
-            if let Some(b) = body {
-                rb = rb.json(b);
+        let body = body.cloned();
+        send_retried(&self.throttle, &format!("shopify {path}"), move || {
+            let url = url.clone();
+            let method = method.clone();
+            let body = body.clone();
+            async move {
+                let token = self.token().await?;
+                let mut rb = self
+                    .client
+                    .request(method, &url)
+                    .header("X-Shopify-Access-Token", token);
+                if let Some(b) = &body {
+                    rb = rb.json(b);
+                }
+                Ok(rb)
             }
-            let resp = rb.send().await.with_context(|| format!("shopify {path}"))?;
-            let status = resp.status();
-            if status == StatusCode::TOO_MANY_REQUESTS && attempt < 3 {
-                let wait = resp
-                    .headers()
-                    .get("Retry-After")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .unwrap_or(2.0);
-                tokio::time::sleep(Duration::from_secs_f64(wait.max(0.1))).await;
-                attempt += 1;
-                continue;
-            }
-            if status.is_server_error() && attempt < 3 {
-                tokio::time::sleep(backoff).await;
-                backoff *= 2;
-                attempt += 1;
-                continue;
-            }
-            return Ok(resp);
-        }
+        })
+        .await
     }
 
     /// `send` + status check + JSON parse (mirrors the other cloud sessions).
@@ -370,7 +341,7 @@ pub async fn shopify_connect(profile: &ConnectionProfile) -> Result<ShopifySessi
         ),
         secret,
         token_cache: StdMutex::new(None),
-        next_request: StdMutex::new(Instant::now()),
+        throttle: HttpThrottle::new(MIN_INTERVAL),
         themes: StdMutex::new(Vec::new()),
         assets: StdMutex::new(HashMap::new()),
     };

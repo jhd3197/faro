@@ -740,6 +740,10 @@ fn fs_for(session: &Session) -> Box<dyn RemoteFs> {
         Session::GDrive(gd) => Box::new(faro_lib::remotefs::gdrive::GDriveFs::new(gd.clone())),
         Session::Box(bx) => Box::new(faro_lib::remotefs::boxdrive::BoxFs::new(bx.clone())),
         Session::Shopify(sh) => Box::new(faro_lib::remotefs::shopify::ShopifyFs::new(sh.clone())),
+        Session::HubSpot(hs) => Box::new(faro_lib::remotefs::hubspot::HubSpotFs::new(hs.clone())),
+        Session::Dynamics(dynm) => {
+            Box::new(faro_lib::remotefs::dynamics::DynamicsFs::new(dynm.clone()))
+        }
         Session::Agent(agent) => Box::new(faro_lib::remotefs::agent::AgentFs::new(agent.clone())),
     }
 }
@@ -2766,7 +2770,9 @@ async fn upload_file(
         | Session::OneDrive(_)
         | Session::GDrive(_)
         | Session::Box(_)
-        | Session::Shopify(_) => {
+        | Session::Shopify(_)
+        | Session::HubSpot(_)
+        | Session::Dynamics(_) => {
             anyhow::bail!("uploads to this connection type are not yet supported in the CLI")
         }
         Session::Agent(_) => anyhow::bail!("faro-agent connections are not supported in the CLI"),
@@ -2898,7 +2904,9 @@ async fn download_file(session: &Session, remote_path: &str, local_dir: &str) ->
         | Session::OneDrive(_)
         | Session::GDrive(_)
         | Session::Box(_)
-        | Session::Shopify(_) => {
+        | Session::Shopify(_)
+        | Session::HubSpot(_)
+        | Session::Dynamics(_) => {
             anyhow::bail!("downloads from this connection type are not yet supported in the CLI")
         }
         Session::Agent(_) => anyhow::bail!("faro-agent connections are not supported in the CLI"),

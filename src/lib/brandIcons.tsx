@@ -31,6 +31,8 @@ const PROTOCOL_ICON: Record<Protocol, string> = {
   gdrive: "logos:google-drive",
   box: "simple-icons:box",
   shopify: "simple-icons:shopify",
+  hubspot: "simple-icons:hubspot",
+  dynamics: "simple-icons:dynamics365",
   "faro-agent": "mdi:lighthouse-on",
 };
 
