@@ -357,7 +357,7 @@ impl Hydrator for SessionHydrator {
                         anyhow::bail!("hydration download failed: {}", t.error.unwrap_or_default())
                     }
                     TransferStatus::Canceled => anyhow::bail!("hydration download canceled"),
-                    TransferStatus::Queued | TransferStatus::Transferring => {
+                    TransferStatus::Queued | TransferStatus::Transferring | TransferStatus::Paused => {
                         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
                     }
                 },

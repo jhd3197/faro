@@ -37,11 +37,26 @@ pub enum TransferKind {
 pub enum TransferStatus {
     Queued,
     Transferring,
+    Paused,
     Done,
     Skipped,
     Error,
     Canceled,
 }
+
+/// Marker error: a paused transfer was resumed — the copy loop unwinds with
+/// this and the runner re-runs the file from byte 0 (Plan 17 Phase 2).
+/// Honest on every backend: no per-backend seek support needed.
+#[derive(Debug)]
+struct RestartFromPause;
+
+impl std::fmt::Display for RestartFromPause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("transfer resumed after pause; restarting file from the beginning")
+    }
+}
+
+impl std::error::Error for RestartFromPause {}
 
 /// Payload of the `transfer://queue` event: the FIFO of waiting transfer ids
 /// plus the manager-level state the panel header renders (Plan 17).
@@ -73,7 +88,6 @@ impl PauseGate {
         let _ = self.tx.send(paused);
     }
     /// Park until the gate opens. Returns immediately if already open.
-    #[allow(dead_code)] // used by the Phase 2 chunk checkpoints
     async fn wait_open(&self) {
         let mut rx = self.tx.subscribe();
         while *rx.borrow_and_update() {
@@ -114,6 +128,8 @@ pub struct TransferManager {
     concurrency: AtomicUsize,
     /// Manager-level pause gate. Admission checks it; Phase 2 checkpoints do too.
     pause_all: PauseGate,
+    /// Per-transfer pause gates, created at enqueue time (Plan 17 Phase 2).
+    pauses: Mutex<HashMap<String, PauseGate>>,
     /// Bumped on every queue change so admission waiters re-check their turn.
     queue_gen: watch::Sender<u64>,
 }
@@ -187,6 +203,7 @@ impl TransferManager {
             semaphore: Arc::new(Semaphore::new(DEFAULT_CONCURRENCY)),
             concurrency: AtomicUsize::new(DEFAULT_CONCURRENCY),
             pause_all: PauseGate::new(),
+            pauses: Mutex::new(HashMap::new()),
             queue_gen: watch::channel(0).0,
         }
     }
@@ -257,7 +274,7 @@ impl TransferManager {
                 if !w.iter().any(|x| x == id) {
                     return None;
                 }
-                if w.front().map(String::as_str) != Some(id) || self.pause_all.is_paused() {
+                if !self.is_my_turn(&w, id).await {
                     drop(w);
                     if rx.changed().await.is_err() {
                         return None;
@@ -265,20 +282,37 @@ impl TransferManager {
                     continue;
                 }
             }
-            // Front of the queue with the gate open: take a permit, then pop.
+            // My turn: take a permit, then pop.
             let permit = self.semaphore.clone().acquire_owned().await.ok()?;
             let mut w = self.waiting.lock().await;
-            if w.front().map(String::as_str) == Some(id) && !self.pause_all.is_paused() {
-                w.pop_front();
+            if self.is_my_turn(&w, id).await {
+                if let Some(pos) = w.iter().position(|x| x == id) {
+                    w.remove(pos);
+                }
                 return Some(permit);
             }
-            // Lost a race (pause-all engaged mid-acquire): release, re-evaluate.
+            // Lost a race (pause engaged mid-acquire): release, re-evaluate.
             drop(permit);
             if !w.iter().any(|x| x == id) {
                 return None;
             }
             drop(w);
         }
+    }
+
+    /// Is `id` the first waiting transfer allowed to run? Strict FIFO except
+    /// that per-transfer-paused rows are skipped (a paused row must not
+    /// head-of-line block the queue); pause-all blocks everyone. Caller must
+    /// hold the `waiting` lock; lock order is waiting → pauses.
+    async fn is_my_turn(&self, w: &VecDeque<String>, id: &str) -> bool {
+        if self.pause_all.is_paused() {
+            return false;
+        }
+        let pauses = self.pauses.lock().await;
+        let first_open = w
+            .iter()
+            .position(|x| pauses.get(x).map_or(true, |g| !g.is_paused()));
+        first_open == w.iter().position(|x| x == id)
     }
 
     /// Reorder a waiting transfer (active transfers are untouched).
@@ -319,6 +353,83 @@ impl TransferManager {
         self.pause_all.is_paused()
     }
 
+    /// Chunk-boundary checkpoint shared by every copy loop (Plan 17). Phase 4
+    /// draws `_bytes` from the bandwidth bucket here. When the transfer (or
+    /// the whole manager) is paused, this parks until resumed, then returns
+    /// `RestartFromPause` so the runner re-runs the file from byte 0.
+    async fn checkpoint(&self, id: &str, _bytes: u64) -> Result<()> {
+        let gate = self.pauses.lock().await.get(id).cloned();
+        let parked = self.pause_all.is_paused() || gate.as_ref().is_some_and(|g| g.is_paused());
+        if !parked {
+            return Ok(());
+        }
+        // Park until BOTH gates are open (resume requires both).
+        loop {
+            self.pause_all.wait_open().await;
+            if let Some(g) = &gate {
+                g.wait_open().await;
+            }
+            if !self.pause_all.is_paused() && gate.as_ref().is_none_or(|g| !g.is_paused()) {
+                break;
+            }
+        }
+        Err(RestartFromPause.into())
+    }
+
+    /// Pause a queued or transferring transfer. A running one parks at the
+    /// next chunk boundary; a queued one is skipped by admission until resumed.
+    pub async fn pause(&self, id: &str, app: &AppHandle) -> Result<()> {
+        match self.get(id).await.map(|t| t.status) {
+            Some(TransferStatus::Transferring) | Some(TransferStatus::Queued) => {}
+            _ => anyhow::bail!("transfer {id} is not running or queued"),
+        }
+        let gate = self
+            .pauses
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("transfer {id} not found"))?;
+        gate.set(true);
+        self.update(id, |t| t.status = TransferStatus::Paused).await;
+        if let Some(t) = self.get(id).await {
+            let _ = app.emit("transfer://updated", &t);
+        }
+        Ok(())
+    }
+
+    /// Resume a paused transfer. A parked one re-runs its file from byte 0;
+    /// a queued one re-enters FIFO admission.
+    pub async fn resume(&self, id: &str, app: &AppHandle) -> Result<()> {
+        if self.get(id).await.map(|t| t.status) != Some(TransferStatus::Paused) {
+            anyhow::bail!("transfer {id} is not paused");
+        }
+        let still_queued = self.waiting.lock().await.iter().any(|x| x == id);
+        let gate = self
+            .pauses
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("transfer {id} not found"))?;
+        self.update(id, |t| {
+            t.status = if still_queued {
+                TransferStatus::Queued
+            } else {
+                TransferStatus::Transferring
+            };
+            t.transferred = 0;
+        })
+        .await;
+        gate.set(false);
+        if let Some(t) = self.get(id).await {
+            let _ = app.emit("transfer://updated", &t);
+        }
+        // Wake admission waiters: a queued row may have become runnable.
+        self.bump_queue(app).await;
+        Ok(())
+    }
+
     /// Live-adjust the concurrency bound. Growing adds permits at once;
     /// shrinking forgets permits as running transfers release them, so
     /// in-flight transfers are never killed to satisfy the new bound.
@@ -348,7 +459,10 @@ impl TransferManager {
             h.abort();
         }
         self.update(id, |t| {
-            if t.status == TransferStatus::Transferring || t.status == TransferStatus::Queued {
+            if matches!(
+                t.status,
+                TransferStatus::Transferring | TransferStatus::Queued | TransferStatus::Paused
+            ) {
                 t.status = TransferStatus::Canceled;
             }
         })
@@ -406,6 +520,7 @@ impl TransferManager {
         }
 
         self.waiting.lock().await.push_back(id.clone());
+        self.pauses.lock().await.insert(id.clone(), PauseGate::new());
         self.bump_queue(&app).await;
 
         let mgr = Arc::clone(self);
@@ -414,7 +529,10 @@ impl TransferManager {
             let Some(_permit) = mgr.admit(&id_for_task).await else {
                 return;
             };
-            let res = match &*session {
+            // A resume-after-pause unwinds the copy loop with RestartFromPause;
+            // re-run the file from byte 0 (Plan 17 Phase 2).
+            let res = loop {
+            let attempt = match &*session {
                 Session::Ssh(ssh) => {
                     mgr.run_ssh_download(
                         &id_for_task,
@@ -546,6 +664,14 @@ impl TransferManager {
                     .await
                 }
             };
+            match attempt {
+                Err(e) if e.downcast_ref::<RestartFromPause>().is_some() => {
+                    mgr.update(&id_for_task, |t| t.transferred = 0).await;
+                    continue;
+                }
+                other => break other,
+            }
+            };
             finalize(&mgr, &id_for_task, &app, res).await;
             mgr.bump_queue(&app).await;
         });
@@ -586,6 +712,7 @@ impl TransferManager {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(&data_b64)
                 .context("decode chunk")?;
+            self.checkpoint(id, bytes.len() as u64).await?;
             if !bytes.is_empty() {
                 local_file.write_all(&bytes).await?;
                 offset += bytes.len() as u64;
@@ -636,6 +763,7 @@ impl TransferManager {
             if n == 0 {
                 break;
             }
+            self.checkpoint(id, n as u64).await?;
             local_file.write_all(&buf[..n]).await?;
             transferred += n as u64;
             if last_emit.elapsed() > Duration::from_millis(100) {
@@ -698,6 +826,7 @@ impl TransferManager {
         }
 
         self.waiting.lock().await.push_back(id.clone());
+        self.pauses.lock().await.insert(id.clone(), PauseGate::new());
         self.bump_queue(&app).await;
 
         let mgr = Arc::clone(self);
@@ -706,7 +835,10 @@ impl TransferManager {
             let Some(_permit) = mgr.admit(&id_for_task).await else {
                 return;
             };
-            let res = match &*session {
+            // A resume-after-pause unwinds the copy loop with RestartFromPause;
+            // re-run the file from byte 0 (Plan 17 Phase 2).
+            let res = loop {
+            let attempt = match &*session {
                 Session::Ssh(ssh) => {
                     mgr.run_ssh_upload(
                         &id_for_task,
@@ -831,6 +963,14 @@ impl TransferManager {
                     .await
                 }
             };
+            match attempt {
+                Err(e) if e.downcast_ref::<RestartFromPause>().is_some() => {
+                    mgr.update(&id_for_task, |t| t.transferred = 0).await;
+                    continue;
+                }
+                other => break other,
+            }
+            };
             finalize(&mgr, &id_for_task, &app, res).await;
             mgr.bump_queue(&app).await;
         });
@@ -866,6 +1006,7 @@ impl TransferManager {
             if n == 0 {
                 break;
             }
+            self.checkpoint(id, n as u64).await?;
             let data = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
             let resp = session
                 .request(Request::WriteChunk {
@@ -927,6 +1068,7 @@ impl TransferManager {
             if n == 0 {
                 break;
             }
+            self.checkpoint(id, n as u64).await?;
             remote_file.write_all(&buf[..n]).await?;
             transferred += n as u64;
             if last_emit.elapsed() > Duration::from_millis(100) {
@@ -1111,6 +1253,7 @@ impl TransferManager {
 
         let _ = (mgr_for_emit, id_for_emit, app_for_emit);
 
+        self.checkpoint(id, 0).await?;
         let res: Result<u64> = session
             .with_stream(move |stream| {
                 let file = std::fs::File::create(&final_path)
@@ -1138,6 +1281,7 @@ impl TransferManager {
             .await;
         let _ = app; // progress events come at completion for FTP
 
+        self.checkpoint(id, 0).await?;
         let local = local_path.to_path_buf();
         let remote = remote_path.to_string();
         let res: Result<u64> = session
@@ -1184,6 +1328,7 @@ impl TransferManager {
         let mut last_emit = Instant::now();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.with_context(|| format!("s3 chunk for {key}"))?;
+            self.checkpoint(id, chunk.len() as u64).await?;
             file.write_all(&chunk).await?;
             transferred += chunk.len() as u64;
             if last_emit.elapsed() > Duration::from_millis(100) {
@@ -1227,6 +1372,7 @@ impl TransferManager {
             .with_context(|| format!("open {}", local_path.display()))?;
 
         if size <= 16 * 1024 * 1024 {
+            self.checkpoint(id, size).await?;
             let mut buf = Vec::with_capacity(size as usize);
             file.read_to_end(&mut buf).await?;
             session
@@ -1265,6 +1411,7 @@ impl TransferManager {
             if filled == 0 {
                 break;
             }
+            self.checkpoint(id, filled as u64).await?;
             let chunk = bytes::Bytes::copy_from_slice(&buf[..filled]);
             upload
                 .put_part(chunk.into())
@@ -1326,6 +1473,7 @@ impl TransferManager {
         let mut last_emit = Instant::now();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.with_context(|| format!("webdav chunk for {remote_path}"))?;
+            self.checkpoint(id, chunk.len() as u64).await?;
             file.write_all(&chunk).await?;
             transferred += chunk.len() as u64;
             if last_emit.elapsed() > Duration::from_millis(100) {
@@ -1365,6 +1513,7 @@ impl TransferManager {
             .await
             .with_context(|| format!("open {}", local_path.display()))?;
         let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
+        self.checkpoint(id, size).await?;
 
         let url = session.url_for(remote_path, false);
         let resp = session
@@ -1419,6 +1568,7 @@ impl TransferManager {
         let mut last_emit = Instant::now();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.with_context(|| format!("http chunk for {remote_path}"))?;
+            self.checkpoint(id, chunk.len() as u64).await?;
             file.write_all(&chunk).await?;
             transferred += chunk.len() as u64;
             if last_emit.elapsed() > Duration::from_millis(100) {
@@ -1461,6 +1611,7 @@ impl TransferManager {
         let mut last_emit = Instant::now();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.with_context(|| format!("dropbox chunk for {remote_path}"))?;
+            self.checkpoint(id, chunk.len() as u64).await?;
             file.write_all(&chunk).await?;
             transferred += chunk.len() as u64;
             if last_emit.elapsed() > Duration::from_millis(100) {
@@ -1515,6 +1666,7 @@ impl TransferManager {
 
         // Proactive refresh covers the common case; on a hard 401 we refresh and
         // retry once, re-opening the file for a fresh streamed body.
+        self.checkpoint(id, size).await?;
         let mut attempt = 0;
         loop {
             let token = session.access_token().await?;
@@ -1563,6 +1715,7 @@ impl TransferManager {
             .await;
         let _ = app; // single-shot API: progress is reported at completion.
 
+        self.checkpoint(id, 0).await?;
         let data = crate::remotefs::shopify::read_asset(&session, remote_path).await?;
         let mut file = tokio::fs::File::create(local_path)
             .await
@@ -1591,6 +1744,7 @@ impl TransferManager {
             .await
             .with_context(|| format!("read {}", local_path.display()))?;
         let size = data.len() as u64;
+        self.checkpoint(id, size).await?;
         crate::remotefs::shopify::write_asset(&session, remote_path, &data).await?;
         self.update(id, |t| t.transferred = size).await;
         Ok(())
@@ -1611,6 +1765,7 @@ impl TransferManager {
             .await;
         let _ = app; // single-shot API: progress is reported at completion.
 
+        self.checkpoint(id, 0).await?;
         let data = crate::remotefs::hubspot::read_file(&session, remote_path).await?;
         let mut file = tokio::fs::File::create(local_path)
             .await
@@ -1640,6 +1795,7 @@ impl TransferManager {
             .await
             .with_context(|| format!("read {}", local_path.display()))?;
         let size = data.len() as u64;
+        self.checkpoint(id, size).await?;
         crate::remotefs::hubspot::write_file(&session, remote_path, &data).await?;
         self.update(id, |t| t.transferred = size).await;
         Ok(())
@@ -1660,6 +1816,7 @@ impl TransferManager {
             .await;
         let _ = app; // single-shot API: progress is reported at completion.
 
+        self.checkpoint(id, 0).await?;
         let data = crate::remotefs::dynamics::read_file(&session, remote_path).await?;
         let mut file = tokio::fs::File::create(local_path)
             .await
@@ -1688,6 +1845,7 @@ impl TransferManager {
             .await
             .with_context(|| format!("read {}", local_path.display()))?;
         let size = data.len() as u64;
+        self.checkpoint(id, size).await?;
         crate::remotefs::dynamics::write_file(&session, remote_path, &data).await?;
         self.update(id, |t| t.transferred = size).await;
         Ok(())
@@ -1719,6 +1877,7 @@ impl TransferManager {
         let mut last_emit = Instant::now();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.with_context(|| format!("onedrive chunk for {remote_path}"))?;
+            self.checkpoint(id, chunk.len() as u64).await?;
             file.write_all(&chunk).await?;
             transferred += chunk.len() as u64;
             if last_emit.elapsed() > Duration::from_millis(100) {
@@ -1758,6 +1917,7 @@ impl TransferManager {
             .unwrap_or(4 * 1024 * 1024);
 
         if size <= simple_max {
+            self.checkpoint(id, size).await?;
             self.onedrive_simple_upload(id, &session, local_path, remote_path)
                 .await?;
         } else {
@@ -1852,6 +2012,7 @@ impl TransferManager {
             if filled == 0 {
                 break;
             }
+            self.checkpoint(id, filled as u64).await?;
             let start = offset;
             let end = offset + filled as u64 - 1;
             let range = format!("bytes {start}-{end}/{size}");
@@ -1912,6 +2073,7 @@ impl TransferManager {
         let mut last_emit = Instant::now();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.with_context(|| format!("drive chunk for {remote_path}"))?;
+            self.checkpoint(id, chunk.len() as u64).await?;
             file.write_all(&chunk).await?;
             transferred += chunk.len() as u64;
             if last_emit.elapsed() > Duration::from_millis(100) {
@@ -1954,6 +2116,7 @@ impl TransferManager {
             .await
             .with_context(|| format!("read {}", local_path.display()))?;
         let token = session.access_token().await?;
+        self.checkpoint(id, size).await?;
 
         let resp = if let Some((file_id, _)) = existing {
             // Update the existing file's content in place.
@@ -2038,6 +2201,7 @@ impl TransferManager {
         let mut last_emit = Instant::now();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.with_context(|| format!("box chunk for {remote_path}"))?;
+            self.checkpoint(id, chunk.len() as u64).await?;
             file.write_all(&chunk).await?;
             transferred += chunk.len() as u64;
             if last_emit.elapsed() > Duration::from_millis(100) {
@@ -2080,6 +2244,7 @@ impl TransferManager {
             .await
             .with_context(|| format!("read {}", local_path.display()))?;
         let token = session.access_token().await?;
+        self.checkpoint(id, size).await?;
 
         let file_part = reqwest::multipart::Part::bytes(bytes).file_name(name.clone());
         let (url, form) = match existing {

@@ -402,6 +402,8 @@ pub fn run() {
             commands::cancel_transfer,
             commands::list_transfers,
             commands::transfer_move,
+            commands::transfer_pause,
+            commands::transfer_resume,
             commands::transfer_pause_all,
             commands::transfer_resume_all,
             commands::transfer_set_concurrency,

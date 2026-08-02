@@ -605,7 +605,7 @@ async fn wait_for_transfers(state: &AppState, ids: Vec<String>) {
         for id in &ids {
             if let Some(t) = state.transfers.snapshot(id).await {
                 match t.status {
-                    TransferStatus::Queued | TransferStatus::Transferring => remaining += 1,
+                    TransferStatus::Queued | TransferStatus::Transferring | TransferStatus::Paused => remaining += 1,
                     _ => {}
                 }
             }

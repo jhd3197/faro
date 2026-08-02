@@ -747,6 +747,30 @@ pub async fn cancel_transfer(
         .map_err(err)
 }
 
+/// Pause a queued or running transfer (Plan 17 Phase 2). A running one parks
+/// at the next chunk boundary; resume re-runs its file from byte 0.
+#[tauri::command]
+pub async fn transfer_pause(
+    transfer_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.transfers.pause(&transfer_id, &app).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn transfer_resume(
+    transfer_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .transfers
+        .resume(&transfer_id, &app)
+        .await
+        .map_err(err)
+}
+
 /// Reorder a waiting transfer in the queue FIFO (Plan 17). `direction` is
 /// "up" (sooner) or "down" (later); active transfers are untouched.
 #[tauri::command]
