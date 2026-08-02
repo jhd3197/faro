@@ -40,6 +40,8 @@ import {
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { cn } from "@/lib/cn";
 import { BrandIcon, protocolIcon } from "@/lib/brandIcons";
+import { BRAND_ICONS } from "@/lib/brandIconData";
+import { monogram } from "@/lib/format";
 import { generatePassword } from "@/lib/password";
 import { ipc } from "@/lib/ipc";
 import { toast } from "@/stores/toastStore";
@@ -186,6 +188,12 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
   );
   const [autoConnect, setAutoConnect] = useState(profile?.autoConnect ?? false);
   const [group, setGroup] = useState(seed?.group ?? "");
+  // Custom rail bubble glyph: emoji/short string, or a bundled Iconify key.
+  const [icon, setIcon] = useState(seed?.icon ?? "");
+  // A value with a colon is treated as an Iconify key; unknown keys warn and
+  // the rail falls back to the name monogram.
+  const iconKeyKnown = icon.trim().includes(":") && !!BRAND_ICONS[icon.trim()];
+  const iconUnknown = icon.trim().includes(":") && !iconKeyKnown;
 
   // S3-only state.
   const [bucket, setBucket] = useState(seed?.bucket ?? "");
@@ -440,6 +448,7 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             : undefined,
       agentKey: isAgent ? agentKey : undefined,
       group: group.trim() || undefined,
+      icon: icon.trim() || undefined,
       sortOrder: profile?.sortOrder,
       // Bastion hop (grant-imported only): carried through untouched.
       jumpHost: profile?.jumpHost,
@@ -614,6 +623,27 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
               className={inputCls}
             />
           </Field>
+          <Field label="Icon (optional)" className="w-40">
+            <div className="relative">
+              <input
+                value={icon}
+                onChange={(e) => setIcon(e.target.value)}
+                placeholder="🚀 or mdi:rocket-launch"
+                className={cn(inputCls, "pr-9")}
+              />
+              {/* Live bubble preview: the emoji / bundled icon, or the name
+                  monogram the rail falls back to. */}
+              <span className="absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-md bg-bg-subtle text-[13px] font-bold leading-none">
+                {icon.trim() && iconKeyKnown ? (
+                  <BrandIcon icon={icon.trim()} size={15} />
+                ) : icon.trim() && !icon.trim().includes(":") ? (
+                  icon.trim()
+                ) : (
+                  <span className="text-text-dim">{monogram(name || "?")}</span>
+                )}
+              </span>
+            </div>
+          </Field>
           <Field label="Group (optional)" className="w-40">
             <input
               value={group}
@@ -629,6 +659,13 @@ export function ProfileEditor({ profile, prefill, onClose }: Props) {
             </datalist>
           </Field>
         </div>
+
+        {iconUnknown && (
+          <Hint tone="warn">
+            Unknown icon key — the bubble falls back to the name monogram.
+            Bundled keys look like <code>mdi:rocket-launch</code>.
+          </Hint>
+        )}
 
         {isS3 ? (
           <S3Section

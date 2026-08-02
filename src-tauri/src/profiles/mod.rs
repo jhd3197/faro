@@ -64,6 +64,11 @@ pub struct ConnectionProfile {
     pub group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sort_order: Option<u32>,
+    // Custom bubble glyph for the rail: an emoji (any short string without a
+    // colon) or a bundled Iconify key ("prefix:name"). Absent = the name
+    // monogram. Optional so existing profile JSON files keep loading.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
     // Single-hop bastion (ProxyJump). When `jump_host` is set, the SSH connect
     // path first connects there with the SAME auth material, then tunnels to
     // `host:port` over a direct-tcpip channel. `jump_port` defaults to 22,

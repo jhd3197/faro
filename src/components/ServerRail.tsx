@@ -41,6 +41,7 @@ import {
 } from "@/lib/types";
 import { cn } from "@/lib/cn";
 import { BrandIcon, protocolIcon } from "@/lib/brandIcons";
+import { BRAND_ICONS } from "@/lib/brandIconData";
 
 type RowState = "focused" | "connected" | "connecting" | "error" | "idle";
 
@@ -991,6 +992,15 @@ function RailBubble({
   const plaintext = p.protocol === "ftp";
   const color = p.color || fallbackColor;
   const addr = profileAddress(p);
+  // Custom bubble glyph (profile.icon): a bundled Iconify key wins; an emoji /
+  // short string renders as text; anything else (or an unknown key) falls back
+  // to the name monogram.
+  const customIcon = p.icon?.trim();
+  const customBrand =
+    customIcon && customIcon.includes(":") && BRAND_ICONS[customIcon]
+      ? customIcon
+      : null;
+  const customText = customIcon && !customIcon.includes(":") ? customIcon : null;
 
   const bubble = (
     <span
@@ -1004,7 +1014,15 @@ function RailBubble({
         plaintext && !isError && "ring-1 ring-warning/50"
       )}
     >
-      <span style={{ color }}>{monogram(p.name)}</span>
+      {customBrand ? (
+        <span style={{ color }}>
+          <BrandIcon icon={customBrand} size={20} />
+        </span>
+      ) : (
+        <span style={{ color }} className={customText ? "text-[16px]" : undefined}>
+          {customText ?? monogram(p.name)}
+        </span>
+      )}
       {/* Protocol brand mark — a small top-left chip that says "S3 / Azure / SSH
           / a Faro agent" at a glance. The colour monogram stays the connection's
           primary identity; this only adds recognizability, never replaces it. */}

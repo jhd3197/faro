@@ -437,6 +437,7 @@ async fn import_connection(
         agent_key: None,
         group: Some(group.to_string()),
         sort_order: None,
+        icon: None,
         jump_host: conn.jump.as_ref().map(|j| j.host.clone()),
         jump_port: conn.jump.as_ref().and_then(|j| j.port),
         jump_username: conn.jump.as_ref().and_then(|j| j.username.clone()),
