@@ -1981,9 +1981,14 @@ function HubSpotSection({
       </Field>
 
       <Hint>
-        Create a private app in your HubSpot portal (Settings → Integrations →
-        Private Apps) — the token needs <code>content</code>, <code>files</code>
-        , and <code>hubdb</code> scopes.
+        No URL needed — the token identifies your portal; the API base
+        (api.hubapi.com) is fixed. Create a private app in your HubSpot portal
+        (Settings → Integrations → Private Apps) with <code>content</code>,{" "}
+        <code>files</code>, and <code>hubdb</code> scopes.
+      </Hint>
+
+      <Hint tone="warn">
+        Prefer the draft environment — published writes deploy instantly.
       </Hint>
 
       {patWarn && (
@@ -2052,6 +2057,10 @@ function DynamicsSection({
           className={inputCls}
         />
       </Field>
+
+      <Hint tone="warn">
+        Edits publish immediately — prefer a dev/sandbox environment.
+      </Hint>
 
       <Field label="Auth">
         <div className="grid grid-cols-2 gap-1 rounded-md border border-border bg-bg-subtle p-1">
@@ -2345,9 +2354,9 @@ function protocolHint(p: Protocol): string {
     case "shopify":
       return "Theme files · :443";
     case "hubspot":
-      return "Browse and edit Design Manager files like an FTP site. Prefer the draft environment — published writes deploy instantly.";
+      return "Design files · :443";
     case "dynamics":
-      return "Browse and edit web resources (form scripts, CSS, HTML) like an FTP site. Edits publish immediately — prefer a dev/sandbox environment.";
+      return "Web resources · :443";
     case "faro-agent":
       return "Machine · :8722";
   }
