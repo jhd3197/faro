@@ -25,13 +25,13 @@ Endpoints (Source Code API):
   PUT    /cms/v3/source-code/{env}/content/{path}       multipart `file` field
   DELETE /cms/v3/source-code/{env}/content/{path}
 Endpoints (Files API v3):
-  GET    /files/v3/files?parentFolderId=&limit=&after=  paged file listing
+  GET    /files/v3/files/search?parentFolderId=&limit=&after=  paged listing
   POST   /files/v3/files                                multipart upload
   PUT    /files/v3/files/{id}                           multipart replace
   PATCH  /files/v3/files/{id}                           JSON {"name": stem}
   DELETE /files/v3/files/{id}
   GET    /files/v3/files/{id}/signed-url                {"url": ...} (PRIVATE)
-  GET    /files/v3/folders?parentFolderId=&limit=&after=
+  GET    /files/v3/folders/search?parentFolderId=&limit=&after=
   POST   /files/v3/folders                              JSON {name, parentFolderPath}
   PATCH  /files/v3/folders/{id}                         async: task token
   GET    /files/v3/folders/async/tasks/{taskId}/status
@@ -56,6 +56,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
 VALID_TOKEN = "pat-test"
+# A valid token whose private app lacks the `content` scope: every Source
+# Code API call 403s the way HubSpot's MISSING_SCOPES does.
+NO_CONTENT_TOKEN = "pat-no-content"
 
 ALLOWED_EXTS = ("css", "js", "json", "html", "txt", "md", "jpg", "jpeg", "png",
                 "gif", "map", "svg", "ttf", "woff", "woff2", "zip")
@@ -278,11 +281,23 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _token(self):
+        auth = self.headers.get("Authorization", "")
+        return auth[len("Bearer "):] if auth.startswith("Bearer ") else ""
+
     def _authed(self):
-        if self.headers.get("Authorization", "") != f"Bearer {VALID_TOKEN}":
+        if self._token() not in (VALID_TOKEN, NO_CONTENT_TOKEN):
             self._send(401, {"status": "error", "message": "Unauthorized"})
             return False
         return True
+
+    def _scope_blocked(self):
+        """Source Code API gate: the NO_CONTENT_TOKEN app lacks `content`."""
+        if self._token() == NO_CONTENT_TOKEN:
+            self._send(403, {"status": "error", "category": "MISSING_SCOPES",
+                             "message": "missing scope: content"})
+            return True
+        return False
 
     def _route(self):
         """`/cms/v3/source-code/{env}/{metadata|content}/{path}` ->
@@ -589,7 +604,7 @@ class Handler(BaseHTTPRequestHandler):
             if not self._authed():
                 return
             kind, rest = froute
-            if not rest:
+            if not rest or rest == "search":
                 return self._fm_list(kind)
             if kind == "files" and rest.endswith("/signed-url"):
                 return self._fm_signed_url(rest.split("/")[0])
@@ -604,6 +619,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(404, {"status": "error", "message": "Not Found"})
         env, kind, path = route
         if not self._authed():
+            return
+        if self._scope_blocked():
             return
         if kind == "metadata":
             node = metadata(env, path)

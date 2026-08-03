@@ -6,18 +6,19 @@ use async_trait::async_trait;
 use std::sync::Arc;
 
 /// RemoteFs over three HubSpot surfaces sharing one session. The portal root
-/// lists four virtual directories: `design (draft)` and `design (published)`
-/// — labeled so the live one is unmistakable — mapping to the CMS Source Code
-/// API v3's two environments, plus `files` for the File Manager (Files API
-/// v3) and `hubdb` for HubDB tables as read-only virtual CSV files. Inside
-/// the design roots, folders come from the metadata tree (`children`
-/// arrays); inside `files`, from the paged folder/file listings (real
-/// folders). `/hubdb/` is a flat list of `{table}.csv` files (no subfolders,
-/// no writes — HubDB write-back ships in a later phase). No chmod/symlinks;
-/// design rename is GET + PUT + DELETE (the API has no atomic rename), File
-/// Manager rename is a PATCH (folders go through the async update task).
-/// Everything carries size + updated timestamps, so the change signal is
-/// `MtimeSize` (no etag exists).
+/// lists the virtual directories the private app's scopes unlock (probed at
+/// connect): `design (draft)` and `design (published)` — labeled so the live
+/// one is unmistakable — mapping to the CMS Source Code API v3's two
+/// environments (`content` scope), plus `files` for the File Manager (Files
+/// API v3, `files` scope) and `hubdb` for HubDB tables as read-only virtual
+/// CSV files (`hubdb` scope). Inside the design roots, folders come from the
+/// metadata tree (`children` arrays); inside `files`, from the paged
+/// folder/file listings (real folders). `/hubdb/` is a flat list of
+/// `{table}.csv` files (no subfolders, no writes — HubDB write-back ships in
+/// a later phase). No chmod/symlinks; design rename is GET + PUT + DELETE
+/// (the API has no atomic rename), File Manager rename is a PATCH (folders go
+/// through the async update task). Everything carries size + updated
+/// timestamps, so the change signal is `MtimeSize` (no etag exists).
 pub struct HubSpotFs {
     session: Arc<HubSpotSession>,
 }
@@ -119,6 +120,15 @@ pub const HUBDB_DIR: &str = "hubdb";
 /// the HTTP backend's (`HTTP source is read-only (…)`).
 fn hubdb_read_only(op: &str) -> anyhow::Error {
     anyhow!("/hubdb/ is read-only ({op} not supported) — HubDB write-back lands in a later phase")
+}
+
+/// Entering a root the private app's scopes don't cover. Connect hides these
+/// roots, but a stale tree node or a deep link can still land here.
+fn missing_scope(root: &str, scope: &str) -> anyhow::Error {
+    anyhow!(
+        "{root} needs the `{scope}` scope — enable it in HubSpot → Settings → Integrations → \
+         Private Apps → your app → Scopes, then reconnect"
+    )
 }
 
 /// The inner path under `/hubdb/` ("" for the hubdb root itself), or `None`
@@ -279,9 +289,21 @@ impl RemoteFs for HubSpotFs {
     async fn list_dir(&self, path: &str) -> Result<Vec<DirEntry>> {
         let norm = normalize(path);
         if norm == "/" {
-            // The portal root: one virtual directory per design environment,
-            // plus the File Manager and HubDB.
-            return Ok([DRAFT_DIR, PUBLISHED_DIR, FILES_DIR, HUBDB_DIR]
+            // The portal root: one virtual directory per surface the app's
+            // scopes unlock (detected at connect).
+            let s = self.session.surfaces;
+            let mut dirs = Vec::new();
+            if s.design {
+                dirs.push(DRAFT_DIR);
+                dirs.push(PUBLISHED_DIR);
+            }
+            if s.files {
+                dirs.push(FILES_DIR);
+            }
+            if s.hubdb {
+                dirs.push(HUBDB_DIR);
+            }
+            return Ok(dirs
                 .into_iter()
                 .map(|d| DirEntry {
                     name: d.to_string(),
@@ -295,6 +317,9 @@ impl RemoteFs for HubSpotFs {
                 .collect());
         }
         if let Some(inner) = hubdb_inner(&norm) {
+            if !self.session.surfaces.hubdb {
+                return Err(missing_scope("/hubdb/", "hubdb"));
+            }
             if !inner.is_empty() {
                 // Flat root: anything deeper is a .csv file, not a directory.
                 return Err(anyhow!("{path} is a file, not a directory"));
@@ -303,10 +328,16 @@ impl RemoteFs for HubSpotFs {
             return Ok(hubdb_entries(norm.trim_end_matches('/'), &tables));
         }
         if let Some(inner) = files_inner(&norm) {
+            if !self.session.surfaces.files {
+                return Err(missing_scope("/files/", "files"));
+            }
             let entries = self.session.files_list(&inner).await?;
             return Ok(file_entries(norm.trim_end_matches('/'), &entries));
         }
         let (env, inner) = split_path(&norm)?;
+        if !self.session.surfaces.design {
+            return Err(missing_scope("the design roots", "content"));
+        }
         let node = self.session.metadata(env, &inner).await?;
         if !node.folder {
             return Err(anyhow!("{path} is a file, not a directory"));
@@ -1017,5 +1048,76 @@ mod tests {
 
         crate::credentials::delete_secret(&credential_key(&pid));
         eprintln!("live_hubspot_roundtrip: OK");
+    }
+
+    /// A token whose app lacks the `content` scope still connects: the
+    /// design roots drop out of the portal root, entering one names the
+    /// missing scope, and the remaining surfaces work. Same mock run as
+    /// `live_hubspot_roundtrip` (`FARO_HUBSPOT_MOCK_URL`).
+    #[tokio::test]
+    #[ignore = "requires the HubSpot mock (FARO_HUBSPOT_MOCK_URL)"]
+    async fn hubspot_missing_scope_degrades() {
+        use crate::profiles::{AuthMethod, ConnectionProfile};
+        use crate::session::hubspot::{credential_key, hubspot_connect};
+
+        let Ok(mock) = std::env::var("FARO_HUBSPOT_MOCK_URL") else {
+            eprintln!("skip: FARO_HUBSPOT_MOCK_URL unset");
+            return;
+        };
+        std::env::set_var("FARO_HUBSPOT_API_BASE", &mock);
+
+        let profile = ConnectionProfile {
+            id: "hubspot-no-content-test".into(),
+            name: "portal".into(),
+            protocol: "hubspot".into(),
+            host: String::new(),
+            port: 443,
+            username: String::new(),
+            auth: AuthMethod::Password {
+                password: String::new(),
+            },
+            default_remote_path: None,
+            color: None,
+            auto_connect: None,
+            bucket: None,
+            region: None,
+            endpoint: None,
+            account: None,
+            agent_key: None,
+            group: None,
+            sort_order: None,
+            jump_host: None,
+            jump_port: None,
+            jump_username: None,
+        };
+
+        let pid = profile.id.clone();
+        crate::credentials::set_secret(&credential_key(&pid), "pat-no-content")
+            .expect("seed secret");
+        let session = Arc::new(hubspot_connect(&profile).await.expect("connect"));
+        assert!(!session.surfaces.design);
+        assert!(session.surfaces.files);
+        assert!(session.surfaces.hubdb);
+
+        let fs = HubSpotFs::new(session);
+        let roots = fs.list_dir("/").await.expect("roots");
+        assert_eq!(roots.len(), 3);
+        assert!(!roots.iter().any(|e| e.name == DRAFT_DIR));
+        assert!(!roots.iter().any(|e| e.name == PUBLISHED_DIR));
+        assert!(roots.iter().any(|e| e.name == FILES_DIR));
+
+        let err = fs
+            .list_dir("/design (draft)")
+            .await
+            .expect_err("design root without content scope");
+        assert!(err.to_string().contains("`content`"), "{err}");
+
+        // The remaining surfaces are unaffected.
+        let files_root = fs.list_dir("/files").await.expect("files root");
+        assert!(files_root.iter().any(|e| e.name == "library"));
+        assert!(fs.list_dir("/hubdb").await.expect("hubdb root").len() == 3);
+
+        crate::credentials::delete_secret(&credential_key(&pid));
+        eprintln!("hubspot_missing_scope_degrades: OK");
     }
 }

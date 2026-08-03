@@ -2007,8 +2007,10 @@ function HubSpotSection({
       <Hint>
         No URL needed — the token identifies your portal; the API base
         (api.hubapi.com) is fixed. Create a private app in your HubSpot portal
-        (Settings → Integrations → Private Apps) with <code>content</code>,{" "}
-        <code>files</code>, and <code>hubdb</code> scopes.
+        (Settings → Integrations → Private Apps). Each scope unlocks a root:{" "}
+        <code>content</code> for the design roots, <code>files</code> for the
+        File Manager, <code>hubdb</code> for HubDB tables — any one is enough
+        to connect; roots without their scope stay hidden.
       </Hint>
 
       <Hint tone="warn">
