@@ -294,6 +294,11 @@ class Handler(BaseHTTPRequestHandler):
         if not m:
             return None
         env, kind, path = m.group(1), m.group(2), unquote(m.group(3) or "")
+        # The design root arrives double-encoded as %252F (the live edge
+        # rejects single-encoded %2F and empty segments with a bare 404);
+        # one unquote above leaves "%2F", which is the root.
+        if path == "%2F":
+            path = ""
         return env, kind, path.rstrip("/")
 
     def _parse_multipart_all(self):

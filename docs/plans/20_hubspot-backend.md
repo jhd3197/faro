@@ -189,7 +189,9 @@ planned.
    (lift the Shopify helper — if it's copy-paste, extract it to a shared
    `session/http_throttle.rs` used by both, don't fork it). Static bearer
    token, no exchange dance. `hubspot_connect(profile)`: resolves the token
-   from the keychain, probes `GET /cms/v3/source-code/draft/metadata/` (root)
+   from the keychain, probes `GET /cms/v3/source-code/draft/metadata/%252F`
+   (root — the path parameter is a double-encoded `/`; the plain `metadata/`
+   form is rejected at HubSpot's edge with a bare Jetty 404)
    — connect-time validation with a user-actionable error on 401/403 naming
    the missing scope. `account_label()` → portal id/domain if cheaply
    fetchable, else "HubSpot".
