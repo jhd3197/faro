@@ -92,9 +92,9 @@ pub struct NodeMeta {
 pub const FILES_UPLOAD_ACCESS: &str = "PUBLIC_NOT_INDEXABLE";
 
 /// One file or folder in the HubSpot File Manager (Files API v3), from the
-/// `GET /files/v3/files` / `GET /files/v3/folders` paged listings. Note the
-/// API's `name` field excludes the file extension — the display name is
-/// derived from `path`, which always carries it.
+/// `GET /files/v3/files/search` / `GET /files/v3/folders/search` paged
+/// listings. Note the API's `name` field excludes the file extension — the
+/// display name is derived from `path`, which always carries it.
 #[derive(Debug, Clone)]
 pub struct FileEntry {
     pub id: String,
@@ -141,6 +141,16 @@ type FilesListingCache = StdMutex<HashMap<String, (Instant, Arc<Vec<FileEntry>>)
 /// HubDB table listing cache — the whole `/hubdb/` dir in one entry.
 type HubDbCache = StdMutex<Option<(Instant, Arc<Vec<HubDbTable>>)>>;
 
+/// Which HubSpot surfaces the private app's scopes unlock, detected at
+/// connect: `content` → the two design roots, `files` → `/files/`, `hubdb` →
+/// `/hubdb/`. A missing scope hides that root instead of failing connect.
+#[derive(Clone, Copy, Default)]
+pub struct Surfaces {
+    pub design: bool,
+    pub files: bool,
+    pub hubdb: bool,
+}
+
 /// A live HubSpot connection. Stateless HTTP like the other cloud backends —
 /// every op is an independent request carrying the private-app token, paced by
 /// a tiny throttle because HubSpot rate-limits hard (429 + `Retry-After`).
@@ -155,6 +165,8 @@ pub struct HubSpotSession {
     throttle: HttpThrottle,
     /// The connection label, resolved at connect (portal id when fetchable).
     label: String,
+    /// Roots the app's scopes unlock, probed at connect.
+    pub surfaces: Surfaces,
     /// Metadata per (environment, path), cached briefly.
     metadata: MetadataCache,
     /// File Manager folder listings, cached briefly (path ↔ id resolution
@@ -428,7 +440,7 @@ impl HubSpotSession {
         Ok(entries)
     }
 
-    /// Page through one Files API list endpoint (`files` or `folders`),
+    /// Page through one Files API search endpoint (`files` or `folders`),
     /// following the `paging.next.after` cursor.
     async fn files_list_kind(
         &self,
@@ -439,7 +451,9 @@ impl HubSpotSession {
         let mut out = Vec::new();
         let mut after: Option<String> = None;
         loop {
-            let mut api_path = format!("/files/v3/{kind}?limit=100");
+            // The plain list URLs 405 at HubSpot's edge — listing goes
+            // through the GET search endpoints (same params + response).
+            let mut api_path = format!("/files/v3/{kind}/search?limit=100");
             if let Some(id) = parent_id {
                 api_path += &format!("&parentFolderId={id}");
             }
@@ -848,10 +862,11 @@ impl HubSpotSession {
 }
 
 /// Open a HubSpot session from a profile whose private-app token is in the OS
-/// keychain (`hubspot:{profile_id}`). Probes the draft environment's root
-/// metadata so a bad token or missing scope fails at connect, not on first
-/// browse. The root is addressed as `%252F` — the double-encoded "/" path
-/// parameter; the plain `metadata/` form 404s at HubSpot's edge.
+/// keychain (`hubspot:{profile_id}`). Validates the token against account
+/// details (the one endpoint every private-app token can read, so 401 means a
+/// bad token — not a missing scope), then detects which roots the app's
+/// scopes unlock: a scope the app lacks hides that root instead of failing
+/// connect. Connect only fails when *no* surface is usable.
 pub async fn hubspot_connect(profile: &ConnectionProfile) -> Result<HubSpotSession> {
     let token = crate::credentials::get_secret(&credential_key(&profile.id))?
         .filter(|s| !s.trim().is_empty())
@@ -877,53 +892,61 @@ pub async fn hubspot_connect(profile: &ConnectionProfile) -> Result<HubSpotSessi
         token,
         throttle: HttpThrottle::new(MIN_INTERVAL),
         label: "HubSpot".to_string(),
+        surfaces: Surfaces::default(),
         metadata: StdMutex::new(HashMap::new()),
         files_listings: StdMutex::new(HashMap::new()),
         hubdb_tables: StdMutex::new(None),
     };
 
-    // Connect-time validation with user-actionable errors.
+    // Token validity + label in one call.
     let resp = session
-        .send(Method::GET, "/cms/v3/source-code/draft/metadata/%252F", None)
+        .send(Method::GET, "/account-info/v3/details", None)
         .await?;
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
-    match status {
-        StatusCode::UNAUTHORIZED => {
-            return Err(anyhow!(
-                "HubSpot rejected the token (401). Check the private-app access token (pat-…) \
-                 and that the app has the `content` scope (Design Manager source files)."
-            ))
-        }
-        StatusCode::FORBIDDEN => {
-            return Err(anyhow!(
-                "HubSpot denied access (403). The private app is missing the `content` scope — \
-                 enable it in the app's settings, then reconnect."
-            ))
-        }
-        s if !s.is_success() => {
-            return Err(anyhow!(
-                "hubspot draft metadata probe failed ({}): {text}",
-                s.as_u16()
-            ))
-        }
-        _ => {}
+    if status == StatusCode::UNAUTHORIZED {
+        return Err(anyhow!(
+            "HubSpot rejected the token (401). Check the private-app access token (pat-…) — \
+             Settings → Integrations → Private Apps → your app → Show token."
+        ));
     }
-    // Best-effort label: the portal id from account details, when the token
-    // can read it; otherwise the plain default.
-    if let Ok(resp) = session
-        .send(Method::GET, "/account-info/v3/details", None)
-        .await
-    {
-        if resp.status().is_success() {
-            if let Ok(v) = resp.json::<Value>().await {
-                if let Some(pid) = v.get("portalId").and_then(|p| p.as_i64()) {
-                    session.label = format!("HubSpot portal {pid}");
-                }
+    if status.is_success() {
+        if let Ok(v) = resp.json::<Value>().await {
+            if let Some(pid) = v.get("portalId").and_then(|p| p.as_i64()) {
+                session.label = format!("HubSpot portal {pid}");
             }
         }
     }
+
+    // Surface detection: one scope per root. The design root's path parameter
+    // is "%252F" — the double-encoded "/" (the plain `metadata/` form and
+    // single-encoded %2F are rejected at HubSpot's edge with a bare 404).
+    session.surfaces = Surfaces {
+        design: probe_surface(&session, "/cms/v3/source-code/draft/metadata/%252F").await?,
+        files: probe_surface(&session, "/files/v3/files/search?limit=1").await?,
+        hubdb: probe_surface(&session, "/cms/v3/hubdb/tables?limit=1").await?,
+    };
+    if !session.surfaces.design && !session.surfaces.files && !session.surfaces.hubdb {
+        return Err(anyhow!(
+            "The token is valid, but the private app has none of the scopes Faro uses. Enable \
+             at least one in the app's settings — `content` (Design Manager files), `files` \
+             (File Manager), or `hubdb` (HubDB tables) — then reconnect."
+        ));
+    }
     Ok(session)
+}
+
+/// One surface probe at connect: available on 2xx, hidden on 403 (missing
+/// scope) or any other non-success, fatal on 401 (bad token — the surface
+/// probes run after account details, so this shouldn't happen).
+async fn probe_surface(session: &HubSpotSession, path: &str) -> Result<bool> {
+    let resp = session.send(Method::GET, path, None).await?;
+    let status = resp.status();
+    if status == StatusCode::UNAUTHORIZED {
+        return Err(anyhow!(
+            "HubSpot rejected the token (401). Check the private-app access token (pat-…)."
+        ));
+    }
+    Ok(status.is_success())
 }
 
 /// Parse one metadata object from the Source Code API's JSON. A folder's

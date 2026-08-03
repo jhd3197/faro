@@ -91,9 +91,11 @@ directory. No special-casing.
 
 `/files/v3/files`, `/files/v3/folders`:
 
-- List: `GET /files/v3/files?parentFolderId=…` (paged) + folder listing.
-  Entries carry `id`, `name`, `path`, `size`, `createdAt`/`updatedAt`,
-  `defaultHostingUrl`.
+- List: `GET /files/v3/files/search?parentFolderId=…` (paged) + folder
+  listing at `/files/v3/folders/search`. (The plain `/files/v3/files?…`
+  list URLs 405 at HubSpot's edge — listing is GET on the search routes,
+  same params and response shape.) Entries carry `id`, `name`, `path`,
+  `size`, `createdAt`/`updatedAt`, `defaultHostingUrl`.
 - Upload: multipart `POST /files/v3/files` with `folderPath` **or**
   `folderId`, `fileName`, and a required `options.access`
   (`PUBLIC_INDEXABLE` / `PUBLIC_NOT_INDEXABLE` / `PRIVATE`). Replace:
@@ -189,12 +191,15 @@ planned.
    (lift the Shopify helper — if it's copy-paste, extract it to a shared
    `session/http_throttle.rs` used by both, don't fork it). Static bearer
    token, no exchange dance. `hubspot_connect(profile)`: resolves the token
-   from the keychain, probes `GET /cms/v3/source-code/draft/metadata/%252F`
-   (root — the path parameter is a double-encoded `/`; the plain `metadata/`
-   form is rejected at HubSpot's edge with a bare Jetty 404)
-   — connect-time validation with a user-actionable error on 401/403 naming
-   the missing scope. `account_label()` → portal id/domain if cheaply
-   fetchable, else "HubSpot".
+   from the keychain, validates it against `GET /account-info/v3/details`
+   (401 → bad token — that endpoint is scopeless), then probes one route per
+   surface to detect the app's scopes: `content` → the design roots (root
+   metadata at `GET /cms/v3/source-code/draft/metadata/%252F` — the path
+   parameter is a double-encoded `/`; the plain `metadata/` form is rejected
+   at HubSpot's edge with a bare Jetty 404), `files` → `/files/`, `hubdb` →
+   `/hubdb/`. A missing scope hides that root instead of failing connect;
+   connect fails only when no surface is usable. `account_label()` → portal
+   id/domain if cheaply fetchable, else "HubSpot".
    - **Credentials**: no `host` field (api.hubapi.com is fixed; the client
      follows HubSpot's region redirect); the `pat-…` token stored in the **OS
      keychain** via `credentials.rs` (`set_secret("hubspot:{profile_id}", …)`)
