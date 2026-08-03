@@ -262,7 +262,15 @@ impl HubSpotSession {
                 }
             }
         }
-        let api_path = format!("/cms/v3/source-code/{env}/metadata/{}", urlenc_path(path));
+        // The root's path parameter is "/" — but a single-encoded %2F is
+        // rejected at HubSpot's edge (bare Jetty 404, before auth), and an
+        // empty segment 404s the same way. Double-encoded %252F survives the
+        // edge and resolves to the design root after the API's own decode.
+        let api_path = if path.is_empty() {
+            format!("/cms/v3/source-code/{env}/metadata/%252F")
+        } else {
+            format!("/cms/v3/source-code/{env}/metadata/{}", urlenc_path(path))
+        };
         let resp = self.send(Method::GET, &api_path, None).await?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
@@ -842,7 +850,8 @@ impl HubSpotSession {
 /// Open a HubSpot session from a profile whose private-app token is in the OS
 /// keychain (`hubspot:{profile_id}`). Probes the draft environment's root
 /// metadata so a bad token or missing scope fails at connect, not on first
-/// browse.
+/// browse. The root is addressed as `%252F` — the double-encoded "/" path
+/// parameter; the plain `metadata/` form 404s at HubSpot's edge.
 pub async fn hubspot_connect(profile: &ConnectionProfile) -> Result<HubSpotSession> {
     let token = crate::credentials::get_secret(&credential_key(&profile.id))?
         .filter(|s| !s.trim().is_empty())
@@ -875,7 +884,7 @@ pub async fn hubspot_connect(profile: &ConnectionProfile) -> Result<HubSpotSessi
 
     // Connect-time validation with user-actionable errors.
     let resp = session
-        .send(Method::GET, "/cms/v3/source-code/draft/metadata/", None)
+        .send(Method::GET, "/cms/v3/source-code/draft/metadata/%252F", None)
         .await?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
