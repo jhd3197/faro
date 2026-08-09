@@ -123,6 +123,30 @@ enum Cmd {
         all: bool,
     },
 
+    /// Find duplicate files in one tree — the `name_1.ext` copies Faro's
+    /// rename-on-conflict creates, or (with --hash) exact content duplicates.
+    ///
+    /// The target is `profile:/path`, `local:/path`, or a plain local path.
+    /// Read-only unless --delete is passed (keeps the unsuffixed/oldest file
+    /// per group, deletes the rest — requires --yes).
+    Dedupe {
+        /// Target: `profile:/path`, `local:/path`, or a local path.
+        target: String,
+        /// Group by content hash (sha256) instead of name — catches duplicates
+        /// with unrelated names, anywhere in the tree. Slower: reads files.
+        #[arg(long)]
+        hash: bool,
+        /// Emit the raw JSON result.
+        #[arg(long)]
+        json: bool,
+        /// Delete the duplicates (every non-keeper in each group).
+        #[arg(long)]
+        delete: bool,
+        /// Confirm the deletion (required together with --delete).
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Search a directory tree by file name or by content (grep).
     ///
     /// The target is `profile:/path` (a saved profile) or a local path. Name
@@ -541,8 +565,22 @@ enum Dir {
     Pull,
 }
 
+// clap's derive builds the whole subcommand graph (every `Cmd`/`AgentCmd`
+// variant) via nested generic calls; in debug builds that recursion now
+// overflows the Windows main thread's default 1 MiB stack, so run on a thread
+// with headroom.
+fn main() {
+    std::thread::Builder::new()
+        .name("faro-cli-main".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(async_main)
+        .expect("spawn faro-cli main thread")
+        .join()
+        .expect("join faro-cli main thread");
+}
+
 #[tokio::main]
-async fn main() {
+async fn async_main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli).await {
         eprintln!("\x1b[31merror:\x1b[0m {e:#}");
@@ -568,6 +606,9 @@ async fn run(cli: Cli) -> Result<()> {
             dry_run,
         } => cmd_sync(&store, &local, &remote, direction, mirror, dry_run).await,
         Cmd::Diff { a, b, hash, json, all } => cmd_diff(&store, &a, &b, hash, json, all).await,
+        Cmd::Dedupe { target, hash, json, delete, yes } => {
+            cmd_dedupe(&store, &target, hash, json, delete, yes).await
+        }
         Cmd::Search {
             target,
             pattern,
@@ -1230,6 +1271,130 @@ fn print_diff_human(result: &faro_lib::diff::DiffResult, all: bool) {
             s.different,
             s.same,
             if result.hashed { " (hashed)" } else { "" }
+        ))
+    );
+}
+
+// ---- Duplicate finder --------------------------------------------------
+
+async fn cmd_dedupe(
+    store: &ProfileStore,
+    target: &str,
+    hash: bool,
+    json: bool,
+    delete: bool,
+    yes: bool,
+) -> Result<()> {
+    use faro_lib::dedupe::{self, DedupeMode};
+
+    if delete && !yes {
+        anyhow::bail!("--delete permanently removes files; pass --yes to confirm");
+    }
+
+    // Resolve the target to a RemoteFs + optional live session (local = None).
+    // parse_diff_target also honors the explicit `local:` prefix.
+    let (fs, session, root): (Box<dyn RemoteFs>, Option<Session>, String) = match parse_diff_target(target) {
+        Target::Local(p) => (Box::new(faro_lib::remotefs::local::LocalFs), None, p),
+        Target::Remote { profile_name, path } => {
+            let profile = find_profile(store, &profile_name).await?;
+            let session = open_session(&profile).await?;
+            let root = path.clone();
+            (fs_for(&session), Some(session), root)
+        }
+    };
+
+    let mode = if hash { DedupeMode::Hash } else { DedupeMode::Name };
+    if !json {
+        eprintln!(
+            "{}",
+            dim(&format!(
+                "Scanning {} for duplicates{}…",
+                root,
+                if hash { " (hashing content)" } else { "" }
+            ))
+        );
+    }
+
+    let result = dedupe::find_duplicates(fs.as_ref(), &root, session.as_ref(), mode).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        print_dedupe_human(&result);
+    }
+
+    if delete {
+        let paths = dedupe::duplicate_paths(&result);
+        if paths.is_empty() {
+            eprintln!("Nothing to delete.");
+            return Ok(());
+        }
+        let mut failed = 0usize;
+        for p in &paths {
+            match fs.delete(p, false).await {
+                Ok(()) => {
+                    if !json {
+                        println!("{}", dim(&format!("deleted  {p}")));
+                    }
+                }
+                Err(e) => {
+                    failed += 1;
+                    eprintln!("failed   {p}: {e}");
+                }
+            }
+        }
+        eprintln!(
+            "{}",
+            dim(&format!(
+                "Deleted {} of {} duplicates{}.",
+                paths.len() - failed,
+                paths.len(),
+                if failed > 0 { format!(" ({failed} failed)") } else { String::new() }
+            ))
+        );
+        if failed > 0 {
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+fn print_dedupe_human(result: &faro_lib::dedupe::DedupeResult) {
+    if result.groups.is_empty() {
+        eprintln!("No duplicates found.");
+    }
+    for g in &result.groups {
+        let wasted = g.size * (g.files.len() - 1) as u64;
+        println!(
+            "\x1b[33mgroup\x1b[0m  {}  {}",
+            g.key,
+            dim(&format!(
+                "({} files · {} each · {} wasted)",
+                g.files.len(),
+                fmt_bytes(g.size),
+                fmt_bytes(wasted)
+            ))
+        );
+        for (i, f) in g.files.iter().enumerate() {
+            if i == g.keep {
+                println!("\x1b[32m  keep\x1b[0m  {}", f.path);
+            } else {
+                println!("  \x1b[31mdup\x1b[0m   {}", f.path);
+            }
+        }
+    }
+    let s = &result.summary;
+    eprintln!(
+        "\n{}",
+        dim(&format!(
+            "{} groups · {} duplicates · {} wasted · {} files scanned{}{}",
+            s.groups,
+            s.duplicate_files,
+            fmt_bytes(s.wasted_bytes),
+            s.files_scanned,
+            if result.mode == faro_lib::dedupe::DedupeMode::Hash { " · hashed" } else { "" },
+            if s.hash_errors > 0 { format!(" · {} hash errors", s.hash_errors) } else { String::new() }
         ))
     );
 }

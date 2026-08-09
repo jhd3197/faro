@@ -54,6 +54,7 @@ import { AgentBridge, AgentBridgeHost } from "./components/AgentBridge";
 import { AgentConsoleDock } from "./components/AgentConsole";
 import { DiskUsageHost } from "./components/DiskUsage";
 import { DirectoryDiffHost } from "./components/DirectoryDiff";
+import { FindDuplicatesHost } from "./components/FindDuplicates";
 import { FleetSearchHost } from "./components/FleetSearch";
 import { SkillsHost } from "./components/SkillsPanel";
 import { SnippetsHost } from "./components/SnippetsPanel";
@@ -141,6 +142,7 @@ export default function App() {
       <OverwriteDialogHost />
       <DiskUsageHost />
       <DirectoryDiffHost />
+      <FindDuplicatesHost />
       <FleetSearchHost />
       <SkillsHost />
       <SnippetsHost />

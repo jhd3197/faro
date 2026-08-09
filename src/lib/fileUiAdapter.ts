@@ -12,6 +12,7 @@ import { useTerminals } from "@/stores/terminalsStore";
 import { useLayout } from "@/stores/layoutStore";
 import { useDiskScan } from "@/stores/diskScanStore";
 import { useDiff } from "@/stores/diffStore";
+import { useDedupe } from "@/stores/dedupeStore";
 import { useSearch } from "@/stores/searchStore";
 import { useSettings } from "@/stores/settingsStore";
 
@@ -169,6 +170,13 @@ export const tauriFileSystem: FileSystemAdapter = {
   // content query and runs it; the search store owns the streaming lifecycle.
   searchDirectory: async (sessionId, path) => {
     useSearch.getState().openFor(sessionId, path);
+  },
+
+  // Open the Find Duplicates panel rooted at this folder. The user scans
+  // (name or content-hash mode), reviews the groups, and deletes the checked
+  // copies; the dedupe store owns that lifecycle.
+  findDuplicates: async (sessionId, path) => {
+    useDedupe.getState().openFor(sessionId, path);
   },
 
   // Image previews for the grid/list views. Local files read straight off disk

@@ -53,6 +53,8 @@ import type {
   DiskScanProgress,
   DiffSnapshot,
   DiffProgress,
+  DedupeSnapshot,
+  DedupeProgress,
   SearchQuery,
   SearchSnapshot,
   SearchProgress,
@@ -517,6 +519,26 @@ export const ipc = {
   /** Drop a finished diff from the backend (view closed). */
   diffForget: (diffId: string) => invoke<void>("diff_forget", { diffId }),
 
+  /** Start a duplicate scan under `path` on a session (or LOCAL_SESSION);
+   *  returns a dedupe id. `hash` groups by content instead of name+size. */
+  dedupeStart: (sessionId: SessionId, path: string, hash: boolean) =>
+    invoke<string>("dedupe_start", { sessionId, path, hash }),
+  /** Lightweight status (live counts while scanning). */
+  dedupeStatus: (dedupeId: string) =>
+    invoke<DedupeSnapshot>("dedupe_status", { dedupeId }),
+  /** Full snapshot including the result (present once done). */
+  dedupeResult: (dedupeId: string) =>
+    invoke<DedupeSnapshot>("dedupe_result", { dedupeId }),
+  dedupeCancel: (dedupeId: string) =>
+    invoke<void>("dedupe_cancel", { dedupeId }),
+  /** Drop a finished scan from the backend (view closed). */
+  dedupeForget: (dedupeId: string) =>
+    invoke<void>("dedupe_forget", { dedupeId }),
+  /** Delete an explicit list of paths on a session. Returns per-path errors
+   *  (empty = everything deleted). */
+  dedupeDelete: (sessionId: SessionId, paths: string[]) =>
+    invoke<string[]>("dedupe_delete", { sessionId, paths }),
+
   /** Start a fleet search under `path` on a session; returns a search id. */
   searchStart: (sessionId: SessionId, path: string, query: SearchQuery) =>
     invoke<string>("search_start", { sessionId, path, query }),
@@ -673,6 +695,25 @@ export async function onDiffEvent(
     listen<DiffSnapshot>("diff://done", (e) => cb("done", e.payload)),
     listen<DiffSnapshot>("diff://error", (e) => cb("error", e.payload)),
     listen<DiffSnapshot>("diff://canceled", (e) => cb("canceled", e.payload)),
+  ]);
+  return () => {
+    unsubs.forEach((u) => u());
+  };
+}
+
+/** Dedupe lifecycle. `progress` carries live counts + phase; the terminal
+ *  events (`done`/`error`/`canceled`) carry a full DedupeSnapshot. */
+export async function onDedupeEvent(
+  cb: (
+    kind: "progress" | "done" | "error" | "canceled",
+    payload: DedupeProgress | DedupeSnapshot
+  ) => void
+): Promise<UnlistenFn> {
+  const unsubs = await Promise.all([
+    listen<DedupeProgress>("dedupe://progress", (e) => cb("progress", e.payload)),
+    listen<DedupeSnapshot>("dedupe://done", (e) => cb("done", e.payload)),
+    listen<DedupeSnapshot>("dedupe://error", (e) => cb("error", e.payload)),
+    listen<DedupeSnapshot>("dedupe://canceled", (e) => cb("canceled", e.payload)),
   ]);
   return () => {
     unsubs.forEach((u) => u());

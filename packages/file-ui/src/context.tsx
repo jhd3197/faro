@@ -86,6 +86,13 @@ export interface FileSystemAdapter {
    */
   compareDirectory?(sessionId: SessionId, path: string): Promise<void>;
   /**
+   * Optional: find duplicate files under `path` (the `name_1.ext` copies a
+   * rename-on-conflict policy leaves behind, or content-hash duplicates; the
+   * host owns the review/cleanup panel). Omit it and the pane doesn't offer
+   * the "Find duplicates" action.
+   */
+  findDuplicates?(sessionId: SessionId, path: string): Promise<void>;
+  /**
    * Optional: search this directory tree by file name or content (a
    * Spotlight/grep over the backend; the host owns the streaming panel). Omit it
    * and the pane doesn't offer the "Search here…" action.
