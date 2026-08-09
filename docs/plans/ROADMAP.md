@@ -41,7 +41,7 @@ thematic detail.
 | 3 | `3_scan-index-foundation` | ✅ built (runtime test on a live backend left) | Shared scan engine + `faro.db`. Substrate for 4/6/7 and the sync state index. |
 | 4 | `4_disk-usage-explorer` | ✅ built (GUI click-through on a live backend left) | First *visible*, read-only consumer of #3 — proves the foundation at low risk. |
 | 5 | `5_additional-backends` | 🔄 Phases 0–2, 4, 5 shipped (S3/GCS/WebDAV/HTTP + all 4 OAuth clouds) | Only SMB (Phase 3) remains — blocked on MSVC/libsmbclient. |
-| 6 | `6_directory-diff` | ⬜ | Reuses #3's scan engine (two trees) + `change_signal`/`etag`. |
+| 6 | `6_directory-diff` | ✅ built (CLI runtime-verified local↔local incl. `--hash`/`--json`; live-backend + GUI click-through left) | Reuses #3's scan engine (two trees) + `change_signal`/`etag`. |
 | 7 | `7_fleet-search` | ✅ built (live-backend GUI click-through left) | Reuses #3's scan engine; later a `faro.db` filename index. |
 | 8 | `8_fleet-skills` | ✅ built (live multi-server fan-out run left) | AI-authored fleet automations over the bridge. Independent. |
 | 9 | `9_on-demand-virtual-folders` | 🔄 Windows provider built (feature-flagged); Explorer verify left | OneDrive-style placeholders (Plan 2 Phase 3). Large, per-OS, Windows-first. |
@@ -224,7 +224,15 @@ prove the walk / exec / object-flat strategies on real backends.
 Meld/Beyond Compare for any two backends (incl. remote↔remote), surfaced in the
 **GUI, `faro-cli`, and as an MCP `faro_diff` tool**. Reuses `sync.rs`'s diff +
 the **Track A2** scan engine (walks two trees) and its `change_signal`/`etag`
-for `--hash` mode. ⬜
+for `--hash` mode. ✅ **All four phases built** — `diff.rs` engine (symmetric
+classify + opt-in content-hash pass: server-side `sha256sum` over SSH, streamed
+for local/object/FTP), `faro-cli diff <a> <b> [--hash] [--json]` (local↔remote
+and remote↔remote), the `faro_diff` bridge/MCP tool, and the GUI two-tree view
+(colour-coded rows, class filters, cancellable walks, per-row reveal/copy-path +
+copy A→B/B→A via the transfer engine — copy-across needs one local side, as the
+transfer engine is local↔remote only). ✅ Runtime-verified: `faro-cli diff`
+local↔local with/without `--hash` and `--json` (2026-08-09). ⬜ Remaining:
+live-backend run (SSH/S3/agent) + GUI click-through.
 
 ## Track H — Fleet Search (Plan 7)
 Name + content search across any connection; exec `rg`/`grep`/`find` fast path

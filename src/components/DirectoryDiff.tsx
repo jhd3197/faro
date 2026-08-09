@@ -7,6 +7,8 @@ import {
   Loader2,
   RefreshCw,
   ArrowLeftRight,
+  ArrowLeft,
+  ArrowRight,
   AlertCircle,
   Eye,
   Copy,
@@ -18,6 +20,7 @@ import { useConnections } from "@/stores/connectionsStore";
 import { useLayout } from "@/stores/layoutStore";
 import { toast } from "@/stores/toastStore";
 import { LOCAL_SESSION } from "@faro/file-ui";
+import { ipc } from "@/lib/ipc";
 import type { DiffClass, DiffEntry, SessionId } from "@/lib/types";
 import { fmtSize } from "@/lib/format";
 import { cn } from "@/lib/cn";
@@ -30,6 +33,12 @@ function parentDir(p: string): string {
   if (driveRoot && i === 2) return driveRoot;
   if (i <= 0) return p.startsWith("/") ? "/" : p;
   return p.slice(0, i);
+}
+
+/** Join a scan root and a POSIX relative path, keeping the root's separator. */
+function joinPath(root: string, rel: string): string {
+  const sep = root.includes("\\") && !root.includes("/") ? "\\" : "/";
+  return root.endsWith("/") || root.endsWith("\\") ? root + rel : root + sep + rel;
 }
 
 /** Per-class visual treatment: a label, an accent colour, and a dot. */
@@ -108,6 +117,37 @@ function DirectoryDiff() {
   const copyPath = (path: string) => {
     navigator.clipboard.writeText(path);
     toast.info("Path copied", path);
+  };
+
+  // Copy-across reuses the local↔remote transfer engine, so it needs exactly
+  // one local side (remote↔remote transfers aren't supported by the engine).
+  const copySupported =
+    (sideA.sessionId === LOCAL_SESSION) !== (sideB.sessionId === LOCAL_SESSION);
+
+  const copyAcross = async (e: DiffEntry, dir: "a2b" | "b2a") => {
+    const srcPath = dir === "a2b" ? e.aPath : e.bPath;
+    if (!srcPath) return;
+    const srcSession = dir === "a2b" ? sideA.sessionId : sideB.sessionId;
+    const destSession = dir === "a2b" ? sideB.sessionId : sideA.sessionId;
+    const destRoot = dir === "a2b" ? sideB.path : sideA.path;
+    const destDir = parentDir(joinPath(destRoot, e.relative));
+    try {
+      // Best-effort: make sure a nested destination directory exists.
+      if (e.relative.includes("/")) {
+        await ipc.createDirectory(destSession, destDir).catch(() => {});
+      }
+      if (srcSession === LOCAL_SESSION) {
+        await ipc.startUpload(destSession, srcPath, destDir, "overwrite");
+      } else {
+        await ipc.startDownload(srcSession, srcPath, destDir, "overwrite");
+      }
+      toast.success(
+        "Copy queued",
+        `${e.relative} → ${dir === "a2b" ? nameFor(sideB.sessionId) : nameFor(sideA.sessionId)}`
+      );
+    } catch (err) {
+      toast.error("Copy failed", String(err));
+    }
   };
 
   const phaseLabel =
@@ -277,6 +317,8 @@ function DirectoryDiff() {
           entries={visible}
           onReveal={reveal}
           onCopyPath={copyPath}
+          onCopyAcross={copyAcross}
+          copySupported={copySupported}
           aName={nameFor(sideA.sessionId)}
           bName={nameFor(sideB.sessionId)}
           sessionA={sideA.sessionId}
@@ -294,6 +336,8 @@ function DiffRows({
   entries,
   onReveal,
   onCopyPath,
+  onCopyAcross,
+  copySupported,
   aName,
   bName,
   sessionA,
@@ -302,6 +346,8 @@ function DiffRows({
   entries: DiffEntry[];
   onReveal: (sessionId: SessionId, path: string, isDir: boolean) => void;
   onCopyPath: (path: string) => void;
+  onCopyAcross: (e: DiffEntry, dir: "a2b" | "b2a") => void;
+  copySupported: boolean;
   aName: string;
   bName: string;
   sessionA: SessionId;
@@ -320,7 +366,7 @@ function DiffRows({
         <span className="w-24 shrink-0 text-right" title={bName}>
           B · {bName}
         </span>
-        <span className="w-14 shrink-0" />
+        <span className="w-24 shrink-0" />
       </div>
 
       {entries.length === 0 ? (
@@ -372,8 +418,36 @@ function DiffRows({
               >
                 {e.bSize == null ? "—" : fmtSize(e.bSize)}
               </span>
-              {/* Row actions (reveal on the side the file lives, copy its path) */}
-              <div className="flex w-14 shrink-0 items-center justify-end gap-1 opacity-0 group-hover:opacity-100">
+              {/* Row actions (copy across, reveal, copy path) */}
+              <div className="flex w-24 shrink-0 items-center justify-end gap-1 opacity-0 group-hover:opacity-100">
+                {e.aPath && (
+                  <button
+                    onClick={() => onCopyAcross(e, "a2b")}
+                    disabled={!copySupported}
+                    className="rounded p-0.5 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-30"
+                    title={
+                      copySupported
+                        ? `Copy A → B (overwrite): ${e.relative}`
+                        : "Copy across needs one local side (remote↔remote transfers aren't supported yet)"
+                    }
+                  >
+                    <ArrowRight size={12} />
+                  </button>
+                )}
+                {e.bPath && (
+                  <button
+                    onClick={() => onCopyAcross(e, "b2a")}
+                    disabled={!copySupported}
+                    className="rounded p-0.5 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-30"
+                    title={
+                      copySupported
+                        ? `Copy B → A (overwrite): ${e.relative}`
+                        : "Copy across needs one local side (remote↔remote transfers aren't supported yet)"
+                    }
+                  >
+                    <ArrowLeft size={12} />
+                  </button>
+                )}
                 {e.aPath && (
                   <button
                     onClick={() => onReveal(sessionA, e.aPath!, false)}
