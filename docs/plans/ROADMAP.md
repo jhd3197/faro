@@ -56,6 +56,7 @@ thematic detail.
 | 18 | `18_jump-hosts-proxyjump` | ⬜ | Jump hosts (ProxyJump) through the single `ssh_connect` choke point + optional cloudflared integration. Unlocks locked-down (IP-allowlisted / tunnel-fronted) servers. Consumes Plan 13's bastion E2E fixture. |
 | 20 | `20_hubspot-backend` | ✅ shipped (Phases 1–3, mock-verified; HubDB write-back future) | HubSpot portal as a connection, one private-app token over three surfaces: Design Manager as a real remote filesystem (Source Code API v3, draft/published roots), File Manager (Files API v3), HubDB tables as virtual CSV files (read-only). The Shopify recipe (`18_shopify-backend.md`, shipped), an even better fit. |
 | 21 | `21_dynamics-365-backend` | 🔄 Phase 1 shipped + mock-verified (client-credentials only; delegated OAuth + Phases 2–3 planned) | Dynamics 365/Dataverse environment as a connection: web resources are literally files in a table (`webresourceset` OData — path-like names, base64 content, publish-to-deploy). Client-credentials or delegated Entra auth (reuses `oauth.rs`). Phase 2: tables as virtual CSV + `faro-cli dynamics query` (the wp-cli-style db helper). The XrmToolBox gap-filler. |
+| 22 | `22_find-duplicates-dedupe` | ✅ built (unit-tested + CLI runtime-verified locally; live-backend + GUI click-through left) | Find & clean duplicate files — the `name_1.ext` copies rename-on-conflict leaves behind (name mode) or exact content duplicates (hash mode). GUI panel + `faro-cli dedupe` + `faro_dedupe` MCP tool. |
 | 99 | `99_scoped-connection-sharing` | 🚫 out of scope | Pulled from the numbered order; slated for removal. Design notes kept on file only. |
 
 Cross-project **Track D** (ServerKit ↔ Faro) has no plan file — it's a
@@ -447,6 +448,17 @@ later phase spawns `cloudflared access tcp` for Cloudflare-fronted hosts
 terminal, `faro-cli`, and the Agent Bridge all inherit it through the single
 connect choke point; `faro-agentd` (non-SSH transport) is out of scope.
 Verified against Plan 13 Phase 5's bastion Docker fixture. ⬜
+
+## Track S — Find Duplicates & cleanup (Plan 22)
+Faro's rename-on-conflict policy leaves `name_1.ext` copies scattered through
+real trees; this surfaces them. `dedupe.rs` groups a walked tree two ways —
+same-dir normalized-name + equal size (cheap default), or content hash
+anywhere in the tree (opt-in, reuses Plan 6's `hash_path`) — and suggests a
+keeper per group; deletion is always explicit and per-surface. Surfaced as a
+GUI "Find duplicates" panel (review + confirm-then-delete), `faro-cli dedupe`
+(`--hash`/`--json`/`--delete --yes`), and the read-only `faro_dedupe` MCP tool.
+✅ Built; unit-tested + CLI runtime-verified locally (2026-08-09). ⬜
+Remaining: live-backend run + GUI click-through.
 
 ## Near-term quick wins (small, high-value)
 - **Editable permissions dialog** — today Properties *shows* mode read-only; add
