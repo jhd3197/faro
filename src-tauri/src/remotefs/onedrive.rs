@@ -298,6 +298,7 @@ mod tests {
         .expect("seed");
 
         let profile = ConnectionProfile {
+            icon: None,
             id: pid.into(),
             name: "od".into(),
             protocol: "onedrive".into(),

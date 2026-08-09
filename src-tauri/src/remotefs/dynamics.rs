@@ -570,6 +570,7 @@ mod tests {
         );
 
         let profile = ConnectionProfile {
+            icon: None,
             id: "dynamics-mock-test".into(),
             name: "org".into(),
             protocol: "dynamics".into(),

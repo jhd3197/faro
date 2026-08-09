@@ -409,6 +409,7 @@ mod tests {
             return;
         };
         let profile = ConnectionProfile {
+            icon: None,
             id: "t".into(),
             name: "http".into(),
             protocol: "http".into(),

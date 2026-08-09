@@ -259,6 +259,7 @@ mod tests {
         .expect("seed");
 
         let profile = ConnectionProfile {
+            icon: None,
             id: pid.into(),
             name: "gd".into(),
             protocol: "gdrive".into(),

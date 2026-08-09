@@ -290,6 +290,7 @@ mod tests {
         .expect("seed tokens");
 
         let profile = ConnectionProfile {
+            icon: None,
             id: pid.into(),
             name: "dbx".into(),
             protocol: "dropbox".into(),

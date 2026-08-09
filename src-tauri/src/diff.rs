@@ -308,7 +308,10 @@ async fn hash_both(
 /// filesystem. Backends without a byte-read path here (WebDAV/HTTP/cloud/agent)
 /// return an error the caller records as `hash_error`, leaving the size-based
 /// classification intact rather than failing the whole diff.
-async fn hash_path(session: Option<&Session>, path: &str) -> Result<String> {
+///
+/// Shared with [`crate::dedupe`], whose hash mode hashes every same-size file
+/// in one tree through this same path.
+pub(crate) async fn hash_path(session: Option<&Session>, path: &str) -> Result<String> {
     match session {
         None => hash_local(path).await,
         Some(Session::Ssh(ssh)) => hash_ssh(ssh, path).await,
@@ -734,7 +737,8 @@ fn settle_canceled(info: &Arc<DiffRun>, app: &AppHandle) {
 
 /// Resolve a session id to a `RemoteFs` + optional live `Session` (the local
 /// sentinel yields `LocalFs` and no session, so `--hash` reads the local disk).
-async fn resolve_diff_side(
+/// Shared with [`crate::dedupe`], which resolves its single side the same way.
+pub(crate) async fn resolve_diff_side(
     session_id: &str,
     state: &AppState,
 ) -> Result<(Box<dyn RemoteFs>, Option<Arc<Session>>), String> {

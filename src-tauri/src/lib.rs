@@ -13,6 +13,7 @@ mod cli_updater;
 pub mod credentials;
 pub mod db;
 mod deeplink;
+pub mod dedupe;
 pub mod diff;
 pub mod error;
 mod diskscan;
@@ -56,6 +57,8 @@ pub struct AppState {
     pub diskscan: Arc<diskscan::ScanManager>,
     /// Running directory diffs (Plan 6). Ephemeral — not persisted.
     pub diff: Arc<diff::DiffManager>,
+    /// Running duplicate scans. Ephemeral — not persisted.
+    pub dedupe: Arc<dedupe::DedupeManager>,
     /// Running fleet searches (Plan 7). Ephemeral — not persisted.
     pub search: Arc<search::SearchManager>,
     /// Shared `faro.db` — the per-connection index (sync_state today; scan/search
@@ -244,6 +247,7 @@ pub fn run() {
                 ),
                 diskscan: Arc::new(diskscan::ScanManager::new()),
                 diff: Arc::new(diff::DiffManager::new()),
+                dedupe: Arc::new(dedupe::DedupeManager::new()),
                 search: Arc::new(search::SearchManager::new()),
                 db,
                 preview,
@@ -370,6 +374,12 @@ pub fn run() {
             diff::diff_result,
             diff::diff_cancel,
             diff::diff_forget,
+            dedupe::dedupe_start,
+            dedupe::dedupe_status,
+            dedupe::dedupe_result,
+            dedupe::dedupe_cancel,
+            dedupe::dedupe_forget,
+            dedupe::dedupe_delete,
             search::search_start,
             search::search_status,
             search::search_result,

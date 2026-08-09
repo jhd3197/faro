@@ -3752,6 +3752,104 @@ async fn op_diff(
     )
 }
 
+const DEDUPE_MAX_GROUPS: usize = 200;
+
+/// Find duplicate files in one tree on a connected server — the `name_1.ext`
+/// copies Faro's rename-on-conflict policy creates, or (with `hash`) exact
+/// content duplicates anywhere in the tree. Read-only: gated ONCE as a READ —
+/// it walks (and, with `hash`, reads) but never mutates. Returns the groups
+/// with a suggested `keep` index each; deleting the rest is the caller's
+/// explicit follow-up (e.g. `faro_exec` `rm`, or the GUI's dedupe panel).
+async fn op_dedupe(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_arg: Option<&str>,
+    path: &str,
+    hash: bool,
+) -> (u16, Value) {
+    if path.is_empty() {
+        return (400, json!({"error": "path is required"}));
+    }
+    let side = match resolve_diff_side(app, state, session_arg).await {
+        Ok(v) => v,
+        Err(msg) => return (400, json!({ "error": msg })),
+    };
+    let Some((gate_id, gate_name, sess)) = side else {
+        return (400, json!({"error": "faro_dedupe needs a connected server (a local-only scan has no session to authorize); use the `faro-cli dedupe` command for local folders."}));
+    };
+    let summary_text = format!(
+        "Dedupe scan of {gate_name}:{path}{}",
+        if hash { " (hashing content)" } else { "" }
+    );
+    if let Err(resp) = gate(
+        app,
+        state,
+        &gate_id,
+        &gate_name,
+        OpClass::Read,
+        "dedupe",
+        &summary_text,
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    let fs = crate::commands::fs_for_session(&sess);
+    let mode = if hash {
+        crate::dedupe::DedupeMode::Hash
+    } else {
+        crate::dedupe::DedupeMode::Name
+    };
+    let result =
+        match crate::dedupe::find_duplicates(fs.as_ref(), path, Some(sess.as_ref()), mode).await {
+            Ok(r) => r,
+            Err(e) => {
+                state
+                    .log(app, activity("error", &gate_id, format!("{summary_text} — {e}"), false))
+                    .await;
+                return (500, json!({"error": format!("{e:#}")}));
+            }
+        };
+
+    let s = &result.summary;
+    state
+        .log(
+            app,
+            activity(
+                "dedupe",
+                &gate_id,
+                format!(
+                    "{summary_text} — {} groups, {} duplicates, {} B reclaimable",
+                    s.groups, s.duplicate_files, s.wasted_bytes
+                ),
+                true,
+            ),
+        )
+        .await;
+
+    let groups_truncated = result.groups.len() > DEDUPE_MAX_GROUPS;
+    let groups: Vec<Value> = result
+        .groups
+        .iter()
+        .take(DEDUPE_MAX_GROUPS)
+        .filter_map(|g| serde_json::to_value(g).ok())
+        .collect();
+
+    (
+        200,
+        json!({
+            "root": result.root,
+            "mode": result.mode,
+            "summary": result.summary,
+            "groups": groups,
+            "groupsTruncated": groups_truncated,
+            "note": "Read-only — nothing was deleted. To clean up, review each group and delete every file except the `keep` index (a suggestion: the unsuffixed name, else the oldest copy).",
+        }),
+    )
+}
+
 /// Build a [`crate::search::SearchQuery`] from a JSON body / MCP args object.
 /// Shared by the HTTP `/search` handler, the `faro_search` MCP dispatch, and the
 /// agent tool router — all hand in a `serde_json::Value` object with the same
@@ -4809,6 +4907,20 @@ async fn mcp_tools_list(state: &Arc<BridgeState>) -> Value {
                 }
             },
             {
+                "name": "faro_dedupe",
+                "description": "Find duplicate files in one directory tree on a connected server — including the `name_1.ext` copies Faro's rename-on-conflict policy creates when uploading/downloading over existing files. Two modes: by default it groups files in the same folder whose names collapse to the same stem once copy suffixes (`_1`, ` (1)`, ` - copy`) are stripped AND whose sizes match (cheap, metadata only — no download); with hash=true it instead content-hashes every same-size file in the tree (sha256, server-side over SSH where possible) and groups by digest — slower, but catches exact duplicates with unrelated names anywhere in the tree. Read-only and gated as a read: it never deletes anything. Returns a summary (groups, duplicateFiles, wastedBytes) and the groups; each group lists its files plus a suggested `keep` index (the unsuffixed name, else the oldest copy). To clean up, review the groups and delete the non-keeper files yourself — the user approves deletions separately, so always show them what you plan to remove first.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session": { "type": "string", "description": "The connection (name or id) to scan." },
+                        "path": { "type": "string", "description": "Directory path to scan for duplicates." },
+                        "hash": { "type": "boolean", "description": "Group by content hash (sha256) instead of name+size. Default false." }
+                    },
+                    "required": ["session", "path"],
+                    "additionalProperties": false
+                }
+            },
+            {
                 "name": "faro_transfer_status",
                 "description": "Check whether a transfer (started via faro_download, faro_upload or faro_upload_dir) has finished. Returns status (queued|transferring|done|skipped|error|canceled), bytes transferred, and any error. Poll this after starting a transfer to confirm success.",
                 "inputSchema": {
@@ -5301,6 +5413,13 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 )
                 .await,
             )
+        }
+        "faro_dedupe" => {
+            let Some(path) = arg_str(&args, "path") else {
+                return tool_error("`path` is required");
+            };
+            let hash = args.get("hash").and_then(|v| v.as_bool()).unwrap_or(false);
+            mcp_wrap(op_dedupe(app, state, session_arg, &path, hash).await)
         }
         "faro_transfer_status" => {
             let Some(transfer_id) = arg_str(&args, "transferId") else {

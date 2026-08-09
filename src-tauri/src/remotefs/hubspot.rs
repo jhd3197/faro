@@ -815,6 +815,7 @@ mod tests {
         std::env::set_var("FARO_HUBSPOT_API_BASE", &mock);
 
         let profile = ConnectionProfile {
+            icon: None,
             id: "hubspot-mock-test".into(),
             name: "portal".into(),
             protocol: "hubspot".into(),
@@ -1067,6 +1068,7 @@ mod tests {
         std::env::set_var("FARO_HUBSPOT_API_BASE", &mock);
 
         let profile = ConnectionProfile {
+            icon: None,
             id: "hubspot-no-content-test".into(),
             name: "portal".into(),
             protocol: "hubspot".into(),
