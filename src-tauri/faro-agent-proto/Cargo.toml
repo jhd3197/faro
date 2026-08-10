@@ -17,6 +17,11 @@ snow = "0.9"
 base64 = "0.22"
 sha2 = "0.10"
 rand = "0.8"
+# Delta sync (block-level differential transfer): FastCDC v2020 content-defined
+# chunking + BLAKE3 chunk/whole-file hashes, used by `delta.rs`. Living here keeps
+# the app and the daemon on the identical algorithm/constants.
+fastcdc = "3"
+blake3 = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
