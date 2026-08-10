@@ -106,6 +106,23 @@ pub enum Request {
         truncate: bool,
         done: bool,
     },
+    /// Compute the content-defined-chunking signature of a file (delta sync).
+    /// Read-only. An older daemon doesn't know this op and fails the request;
+    /// the controller then falls back to a whole-file copy.
+    Signature {
+        path: String,
+    },
+    /// Reassemble `dest` from `basis` (the old file, when one exists) + `patch`
+    /// (the literal bytes already uploaded) following `recipe`, verify the
+    /// result against `expected_hash`, and atomically rename it over `dest`.
+    /// Write-gated like [`Request::WriteChunk`].
+    DeltaAssemble {
+        basis: Option<String>,
+        patch: String,
+        recipe: Vec<crate::delta::RecipeOp>,
+        dest: String,
+        expected_hash: String,
+    },
     Delete {
         path: String,
         recursive: bool,
@@ -177,6 +194,20 @@ pub enum Response {
     Written {
         bytes: u64,
     },
+    /// A file's chunk signature (reply to [`Request::Signature`]).
+    Signature {
+        size: u64,
+        min: u32,
+        avg: u32,
+        max: u32,
+        chunks: Vec<crate::delta::ChunkEntry>,
+        whole_hash: String,
+    },
+    /// A delta reassembly finished (reply to [`Request::DeltaAssemble`]).
+    DeltaDone {
+        bytes_reused: u64,
+        bytes_written: u64,
+    },
     Ok,
     Exec {
         stdout: String,
@@ -220,5 +251,134 @@ impl Response {
     /// Convenience for daemon handlers: a policy refusal.
     pub fn denied(message: impl Into<String>) -> Self {
         Response::Error { message: message.into(), denied: true }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::delta::{ChunkEntry, RecipeOp};
+
+    #[test]
+    fn delta_variants_serde_round_trip() {
+        let req = Request::Signature { path: "/tmp/f.bin".to_string() };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"op\":\"signature\""), "{json}");
+        match serde_json::from_str::<Request>(&json).unwrap() {
+            Request::Signature { path } => assert_eq!(path, "/tmp/f.bin"),
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let req = Request::DeltaAssemble {
+            basis: Some("/tmp/f.bin".to_string()),
+            patch: "/tmp/f.bin.faro-patch-1".to_string(),
+            recipe: vec![
+                RecipeOp::Copy { basis_offset: 0, len: 65_536 },
+                RecipeOp::Literal { patch_offset: 0, len: 1_024 },
+            ],
+            dest: "/tmp/f.bin".to_string(),
+            expected_hash: "aGFzaA==".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"op\":\"deltaAssemble\""), "{json}");
+        // Enum-level rename_all camelCases the variant tag only; struct-variant
+        // fields stay snake_case — same as the existing Exec.timeout_ms etc.
+        assert!(json.contains("\"expected_hash\""), "{json}");
+        match serde_json::from_str::<Request>(&json).unwrap() {
+            Request::DeltaAssemble { basis, patch, recipe, dest, expected_hash } => {
+                assert_eq!(basis.as_deref(), Some("/tmp/f.bin"));
+                assert_eq!(patch, "/tmp/f.bin.faro-patch-1");
+                assert_eq!(recipe.len(), 2);
+                assert_eq!(dest, "/tmp/f.bin");
+                assert_eq!(expected_hash, "aGFzaA==");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let resp = Response::Signature {
+            size: 3,
+            min: crate::delta::CHUNK_MIN,
+            avg: crate::delta::CHUNK_AVG,
+            max: crate::delta::CHUNK_MAX,
+            chunks: vec![ChunkEntry { offset: 0, len: 3, hash: "aABiAGM=".to_string() }],
+            whole_hash: "d2hvbGU=".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"result\":\"signature\""), "{json}");
+        assert!(json.contains("\"whole_hash\""), "{json}");
+        match serde_json::from_str::<Response>(&json).unwrap() {
+            Response::Signature { size, chunks, whole_hash, .. } => {
+                assert_eq!(size, 3);
+                assert_eq!(chunks.len(), 1);
+                assert_eq!(whole_hash, "d2hvbGU=");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+
+        let resp = Response::DeltaDone { bytes_reused: 65_536, bytes_written: 66_560 };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"result\":\"deltaDone\""), "{json}");
+        assert!(json.contains("\"bytes_reused\":65536"), "{json}");
+        match serde_json::from_str::<Response>(&json).unwrap() {
+            Response::DeltaDone { bytes_reused, bytes_written } => {
+                assert_eq!(bytes_reused, 65_536);
+                assert_eq!(bytes_written, 66_560);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    /// Compat contract (delta-sync Plan risk #2): a pre-delta daemon's `Request`
+    /// enum has no `signature`/`deltaAssemble` variants, so its tagged-enum
+    /// deserialize of these ops FAILS — its request loop then drops the
+    /// connection, the controller's `AgentSession::request` re-dials once and
+    /// still errors, and the transfer layer falls back to a whole-file copy.
+    /// This pins the "unknown op ⇒ clean request failure" half of that chain.
+    #[test]
+    fn old_daemon_fails_to_parse_delta_ops() {
+        /// The Request shape a pre-delta-sync daemon was built with (trimmed to
+        /// a representative subset — the point is: no delta variants).
+        #[derive(Debug, Deserialize)]
+        #[serde(tag = "op", rename_all = "camelCase")]
+        enum OldRequest {
+            Ping,
+            ReadChunk { path: String, offset: u64, len: u64 },
+            WriteChunk {
+                path: String,
+                offset: u64,
+                data: String,
+                truncate: bool,
+                done: bool,
+            },
+        }
+
+        // Old ops still parse under the old shape (the shared variants are
+        // unchanged, so old controller ↔ new daemon keeps working too).
+        let legacy = serde_json::to_string(&Request::ReadChunk {
+            path: "/x".to_string(),
+            offset: 0,
+            len: 0,
+        })
+        .unwrap();
+        assert!(serde_json::from_str::<OldRequest>(&legacy).is_ok());
+
+        // The new ops do NOT parse under the old shape — one request errors,
+        // which is what triggers the controller's whole-file fallback.
+        for req in [
+            Request::Signature { path: "/x".to_string() },
+            Request::DeltaAssemble {
+                basis: None,
+                patch: "/p".to_string(),
+                recipe: vec![],
+                dest: "/d".to_string(),
+                expected_hash: "aGFzaA==".to_string(),
+            },
+        ] {
+            let json = serde_json::to_string(&req).unwrap();
+            assert!(
+                serde_json::from_str::<OldRequest>(&json).is_err(),
+                "old daemon shape must reject {json}"
+            );
+        }
     }
 }
