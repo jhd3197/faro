@@ -269,6 +269,9 @@ export const ipc = {
   transferSetThrottle: (kbps: number) =>
     invoke<void>("transfer_set_throttle", { kbps }),
 
+  transferSetDeltaSync: (enabled: boolean) =>
+    invoke<void>("transfer_set_delta_sync", { enabled }),
+
   transferQueueState: () => invoke<TransferQueueState>("transfer_queue_state"),
 
   startDirectoryDownload: (

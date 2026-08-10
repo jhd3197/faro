@@ -254,9 +254,10 @@ pub fn run() {
             };
             app.manage(state);
 
-            // Apply persisted transfer-queue settings (Plan 17). The frontend
-            // writes `transferConcurrency`/`transferThrottleKbps` via the
-            // settings table; the manager starts from those values.
+            // Apply persisted transfer-queue settings (Plan 17, Plan 23). The
+            // frontend writes `transferConcurrency`/`transferThrottleKbps`/
+            // `deltaSync` via the settings table; the manager starts from
+            // those values.
             {
                 let st = app.state::<AppState>();
                 if let Ok(Some(raw)) = st.db.settings_get("transferConcurrency") {
@@ -267,6 +268,13 @@ pub fn run() {
                 if let Ok(Some(raw)) = st.db.settings_get("transferThrottleKbps") {
                     if let Ok(kbps) = serde_json::from_str::<u64>(&raw) {
                         st.transfers.set_throttle_kbps(kbps);
+                    }
+                }
+                // Plan 23: the `deltaSync` toggle (default on). Absent row →
+                // the manager's own default already has it enabled.
+                if let Ok(Some(raw)) = st.db.settings_get("deltaSync") {
+                    if let Ok(on) = serde_json::from_str::<bool>(&raw) {
+                        st.transfers.set_delta_enabled(on);
                     }
                 }
             }
@@ -424,6 +432,7 @@ pub fn run() {
             commands::transfer_resume_all,
             commands::transfer_set_concurrency,
             commands::transfer_set_throttle,
+            commands::transfer_set_delta_sync,
             commands::transfer_queue_state,
             commands::rename_path,
             commands::delete_path,

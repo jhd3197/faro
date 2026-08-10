@@ -843,6 +843,17 @@ pub async fn transfer_set_throttle(
     Ok(())
 }
 
+/// Live-adjust the delta-sync switch (Plan 23). Applies to the next transfer
+/// decision; `FARO_DELTA=0` still force-disables regardless of the setting.
+#[tauri::command]
+pub async fn transfer_set_delta_sync(
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.transfers.set_delta_enabled(enabled);
+    Ok(())
+}
+
 /// Queue snapshot for the panel's initial load (waiting FIFO + pause-all +
 /// concurrency + throttle).
 #[tauri::command]
