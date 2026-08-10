@@ -224,6 +224,7 @@ export const transfers: Transfer[] = [
     size: 52_428_800,
     transferred: 34_603_008,
     status: "transferring",
+    delta: { sent: 3_355_443, reused: 49_073_357 },
     startedAt: (T - 20) * 1000,
   },
   {
@@ -234,6 +235,7 @@ export const transfers: Transfer[] = [
     size: 1_204_993,
     transferred: 1_204_993,
     status: "done",
+    delta: { sent: 12_050, reused: 1_192_943 },
     startedAt: (T - 90) * 1000,
   },
   {
