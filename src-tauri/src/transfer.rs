@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
@@ -183,7 +183,22 @@ pub struct Transfer {
     /// "retrying in Ns (attempt N/3)" state (Plan 17 Phase 3).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_attempt: Option<u32>,
+    /// Delta-sync accounting, present when this transfer ran as a block-level
+    /// delta instead of a whole-file copy: how many bytes actually crossed the
+    /// wire vs. how many were reused from the basis.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<DeltaStats>,
     pub started_at: i64,
+}
+
+/// Delta-sync outcome attached to a finished [`Transfer`] (Agent backend only).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeltaStats {
+    /// Literal bytes that crossed the wire.
+    pub sent: u64,
+    /// Bytes reused from the basis (never transferred).
+    pub reused: u64,
 }
 
 /// Everything needed to re-run a failed/canceled transfer with its already
@@ -230,6 +245,10 @@ pub struct TransferManager {
     queue_gen: watch::Sender<u64>,
     /// Global bandwidth cap every copy loop draws from per chunk (Phase 4).
     bucket: TokenBucket,
+    /// Delta-sync master switch (Plan 23 Phase 3): the `deltaSync` setting,
+    /// live-adjustable like the concurrency bound. `FARO_DELTA=0` still
+    /// force-disables regardless of this flag.
+    delta_enabled: AtomicBool,
 }
 
 fn now_ts() -> i64 {
@@ -305,6 +324,7 @@ impl TransferManager {
             retry: Mutex::new(HashMap::new()),
             queue_gen: watch::channel(0).0,
             bucket: TokenBucket::new(),
+            delta_enabled: AtomicBool::new(true),
         }
     }
 
@@ -622,6 +642,21 @@ impl TransferManager {
         }
     }
 
+    /// Live-adjust the delta-sync switch (the `deltaSync` setting, Plan 23
+    /// Phase 3). Takes effect on the next transfer decision; `FARO_DELTA=0`
+    /// still force-disables regardless.
+    pub fn set_delta_enabled(&self, enabled: bool) {
+        self.delta_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Delta-sync master switch: the `deltaSync` setting (default on), with
+    /// `FARO_DELTA=0` as a force-off escape hatch. Read once per transfer
+    /// decision.
+    fn delta_enabled(&self) -> bool {
+        std::env::var("FARO_DELTA").ok().as_deref() != Some("0")
+            && self.delta_enabled.load(Ordering::Relaxed)
+    }
+
     pub async fn cancel(&self, id: &str, app: &AppHandle) -> Result<()> {
         {
             let mut w = self.waiting.lock().await;
@@ -684,6 +719,7 @@ impl TransferManager {
             },
             error: None,
             retry_attempt: None,
+            delta: None,
             started_at: now_ts(),
         };
         self.insert(transfer.clone()).await;
@@ -722,13 +758,17 @@ impl TransferManager {
 
     /// Stream a download from a Faro Agent daemon by ranged `ReadChunk`s. The
     /// daemon caps each chunk; we advance the offset until it reports EOF.
-    async fn run_agent_download(
+    /// `app` is optional so tests can drive the loop without an `AppHandle`
+    /// (a test binary that links tauri's mock runtime pulls an unmanifested
+    /// `TaskDialogIndirect` import and fails to launch on Windows); `None`
+    /// just skips the progress events.
+    async fn agent_download_core(
         &self,
         id: &str,
-        session: Arc<crate::session::AgentSession>,
+        session: &Arc<crate::session::AgentSession>,
         remote_path: &str,
         local_path: &Path,
-        app: &AppHandle,
+        app: Option<&AppHandle>,
     ) -> Result<()> {
         use base64::Engine as _;
         use faro_agent_proto::msg::{Request, Response};
@@ -759,8 +799,10 @@ impl TransferManager {
                 offset += bytes.len() as u64;
                 if last_emit.elapsed() > Duration::from_millis(100) {
                     self.update(id, |t| t.transferred = offset).await;
-                    if let Some(t) = self.get(id).await {
-                        let _ = app.emit("transfer://progress", &t);
+                    if let Some(app) = app {
+                        if let Some(t) = self.get(id).await {
+                            let _ = app.emit("transfer://progress", &t);
+                        }
                     }
                     last_emit = Instant::now();
                 }
@@ -857,6 +899,7 @@ impl TransferManager {
             },
             error: None,
             retry_attempt: None,
+            delta: None,
             started_at: now_ts(),
         };
         self.insert(transfer.clone()).await;
@@ -895,13 +938,15 @@ impl TransferManager {
 
     /// Stream an upload to a Faro Agent daemon by ranged `WriteChunk`s. The first
     /// chunk truncates/creates the file; subsequent chunks append at the offset.
-    async fn run_agent_upload(
+    /// `app: None` (tests) skips the progress events — see
+    /// [`Self::agent_download_core`].
+    async fn agent_upload_core(
         &self,
         id: &str,
-        session: Arc<crate::session::AgentSession>,
+        session: &Arc<crate::session::AgentSession>,
         local_path: &Path,
         remote_path: &str,
-        app: &AppHandle,
+        app: Option<&AppHandle>,
     ) -> Result<()> {
         use base64::Engine as _;
         use faro_agent_proto::msg::{Request, Response};
@@ -943,13 +988,456 @@ impl TransferManager {
             first = false;
             if last_emit.elapsed() > Duration::from_millis(100) {
                 self.update(id, |t| t.transferred = offset).await;
-                if let Some(t) = self.get(id).await {
-                    let _ = app.emit("transfer://progress", &t);
+                if let Some(app) = app {
+                    if let Some(t) = self.get(id).await {
+                        let _ = app.emit("transfer://progress", &t);
+                    }
                 }
                 last_emit = Instant::now();
             }
         }
         self.update(id, |t| t.transferred = offset).await;
+        Ok(())
+    }
+
+    /// Agent upload entry point (delta-sync Phase 2): attempt a block-level
+    /// delta when the switch is on, a remote basis exists, and the file is big
+    /// enough — ANY delta error logs and falls back to the whole-file upload.
+    async fn run_agent_upload_with_delta(
+        &self,
+        id: &str,
+        session: Arc<crate::session::AgentSession>,
+        local_path: &Path,
+        remote_path: &str,
+        app: &AppHandle,
+    ) -> Result<()> {
+        self.agent_upload_with_delta_core(id, &session, local_path, remote_path, Some(app))
+            .await
+    }
+
+    /// Gate + fallback logic behind [`Self::run_agent_upload_with_delta`];
+    /// `app: None` (tests) skips progress events.
+    async fn agent_upload_with_delta_core(
+        &self,
+        id: &str,
+        session: &Arc<crate::session::AgentSession>,
+        local_path: &Path,
+        remote_path: &str,
+        app: Option<&AppHandle>,
+    ) -> Result<()> {
+        let size = tokio::fs::metadata(local_path).await.map(|m| m.len()).unwrap_or(0);
+        let (_basis_size, basis_exists) = agent_stat(session, remote_path).await;
+        if self.delta_enabled() && faro_agent_proto::delta::should_attempt_delta(size, basis_exists, true)
+        {
+            match self
+                .agent_delta_upload_core(id, session, local_path, remote_path, app)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    tracing::warn!("delta upload fell back to whole-file copy: {e:#}");
+                    self.update(id, |t| t.transferred = 0).await;
+                }
+            }
+        }
+        self.agent_upload_core(id, session, local_path, remote_path, app)
+            .await
+    }
+
+    /// Upload to a Faro Agent daemon as a block-level delta: fetch the remote
+    /// (old) file's chunk signature, plan locally, upload only the unmatched
+    /// bytes as a patch temp via ordinary `WriteChunk`s, then ask the daemon to
+    /// reassemble + hash-verify + atomically rename over the destination. Any
+    /// error leaves the destination untouched; the caller falls back to a
+    /// whole-file upload.
+    async fn agent_delta_upload_core(
+        &self,
+        id: &str,
+        session: &Arc<crate::session::AgentSession>,
+        local_path: &Path,
+        remote_path: &str,
+        app: Option<&AppHandle>,
+    ) -> Result<()> {
+        use base64::Engine as _;
+        use faro_agent_proto::delta;
+        use faro_agent_proto::msg::{Request, Response};
+        let started = Instant::now();
+
+        // 1. The remote (old) file's chunk signature. A pre-delta daemon fails
+        // this request, which sends the caller down the whole-file path.
+        let remote_sig = match session
+            .request(Request::Signature { path: remote_path.to_string() })
+            .await?
+        {
+            Response::Signature { size, min, avg, max, chunks, whole_hash } => {
+                delta::FileSignature { size, min, avg, max, chunks, whole_hash }
+            }
+            Response::Error { message, .. } => {
+                anyhow::bail!("signature {remote_path}: {message}")
+            }
+            other => anyhow::bail!("signature {remote_path}: unexpected {other:?}"),
+        };
+        anyhow::ensure!(
+            delta::params_match(&remote_sig),
+            "daemon chunk params differ from ours — no delta"
+        );
+
+        // 2. Plan the delta locally (CPU-bound → blocking thread); the patch of
+        // literal bytes lands in a temp next to the source file.
+        let local_dir = local_path.parent().unwrap_or(Path::new("."));
+        let local_patch = local_dir.join(format!(".faro-patch-{}", Uuid::new_v4()));
+        let (local_owned, patch_owned) = (local_path.to_path_buf(), local_patch.clone());
+        let plan = match tokio::task::spawn_blocking(move || {
+            let patch = std::fs::File::create(&patch_owned)
+                .with_context(|| format!("create {}", patch_owned.display()))?;
+            delta::plan_delta(&remote_sig, &local_owned, patch)
+        })
+        .await
+        {
+            Ok(Ok(plan)) => plan,
+            Ok(Err(e)) => {
+                let _ = tokio::fs::remove_file(&local_patch).await;
+                return Err(e.context("plan delta"));
+            }
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&local_patch).await;
+                return Err(anyhow::anyhow!("plan delta task: {e}"));
+            }
+        };
+        let size = plan.literal_bytes + plan.reused_bytes;
+        if !delta::delta_worthwhile(&plan, size) {
+            let _ = tokio::fs::remove_file(&local_patch).await;
+            anyhow::bail!(
+                "delta barely saves anything ({} of {size} bytes would still cross the wire)",
+                plan.literal_bytes
+            );
+        }
+
+        // 3.+4. Upload the patch (same WriteChunk style as a whole-file upload),
+        // then ask the daemon to assemble. Any failure → best-effort remote
+        // delete of the patch, local temp cleanup, and the caller falls back.
+        let remote_patch = format!("{remote_path}.faro-patch-{}", Uuid::new_v4());
+        let result: Result<()> = async {
+            let mut patch_file = tokio::fs::File::open(&local_patch)
+                .await
+                .with_context(|| format!("open {}", local_patch.display()))?;
+            let mut buf = vec![0u8; 128 * 1024];
+            let mut offset: u64 = 0;
+            let mut first = true;
+            let mut last_emit = Instant::now();
+            loop {
+                let n = patch_file.read(&mut buf).await?;
+                if n == 0 {
+                    break;
+                }
+                self.checkpoint(id, n as u64).await?;
+                let data = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
+                let resp = session
+                    .request(Request::WriteChunk {
+                        path: remote_patch.clone(),
+                        offset,
+                        data,
+                        truncate: first,
+                        done: false,
+                    })
+                    .await?;
+                match resp {
+                    Response::Written { .. } => {}
+                    Response::Error { message, .. } => {
+                        anyhow::bail!("upload patch {remote_patch}: {message}")
+                    }
+                    other => anyhow::bail!("upload patch {remote_patch}: unexpected {other:?}"),
+                }
+                offset += n as u64;
+                first = false;
+                if last_emit.elapsed() > Duration::from_millis(100) {
+                    self.update(id, |t| t.transferred = offset).await;
+                    if let Some(app) = app {
+                        if let Some(t) = self.get(id).await {
+                            let _ = app.emit("transfer://progress", &t);
+                        }
+                    }
+                    last_emit = Instant::now();
+                }
+            }
+            // Charge the reused bytes too so pause gates and the throttle
+            // bucket see the same totals a whole-file copy would.
+            self.checkpoint(id, plan.reused_bytes).await?;
+
+            let resp = session
+                .request(Request::DeltaAssemble {
+                    basis: Some(remote_path.to_string()),
+                    patch: remote_patch.clone(),
+                    recipe: plan.recipe.clone(),
+                    dest: remote_path.to_string(),
+                    expected_hash: plan.whole_hash.clone(),
+                })
+                .await?;
+            match resp {
+                Response::DeltaDone { .. } => Ok(()),
+                Response::Error { message, .. } => {
+                    anyhow::bail!("delta assemble {remote_path}: {message}")
+                }
+                other => anyhow::bail!("delta assemble {remote_path}: unexpected {other:?}"),
+            }
+        }
+        .await;
+        if result.is_err() {
+            let _ = session
+                .request(Request::Delete { path: remote_patch.clone(), recursive: false })
+                .await;
+        }
+        let _ = tokio::fs::remove_file(&local_patch).await;
+        result?;
+
+        tracing::info!(
+            "delta upload {remote_path}: {} bytes, sent {} literal, reused {} in {:?}",
+            size,
+            plan.literal_bytes,
+            plan.reused_bytes,
+            started.elapsed()
+        );
+        self.update(id, |t| {
+            t.transferred = t.size;
+            t.delta = Some(DeltaStats { sent: plan.literal_bytes, reused: plan.reused_bytes });
+        })
+        .await;
+        if let Some(app) = app {
+            if let Some(t) = self.get(id).await {
+                let _ = app.emit("transfer://progress", &t);
+            }
+        }
+        Ok(())
+    }
+
+    /// Agent download entry point (delta-sync Phase 2): mirror of
+    /// [`Self::run_agent_upload_with_delta`].
+    async fn run_agent_download_with_delta(
+        &self,
+        id: &str,
+        session: Arc<crate::session::AgentSession>,
+        remote_path: &str,
+        local_path: &Path,
+        app: &AppHandle,
+    ) -> Result<()> {
+        self.agent_download_with_delta_core(id, &session, remote_path, local_path, Some(app))
+            .await
+    }
+
+    /// Gate + fallback logic behind [`Self::run_agent_download_with_delta`];
+    /// `app: None` (tests) skips progress events.
+    async fn agent_download_with_delta_core(
+        &self,
+        id: &str,
+        session: &Arc<crate::session::AgentSession>,
+        remote_path: &str,
+        local_path: &Path,
+        app: Option<&AppHandle>,
+    ) -> Result<()> {
+        let (size, remote_exists) = agent_stat(session, remote_path).await;
+        let basis_exists = tokio::fs::metadata(local_path).await.is_ok();
+        if remote_exists
+            && self.delta_enabled()
+            && faro_agent_proto::delta::should_attempt_delta(size, basis_exists, true)
+        {
+            match self
+                .agent_delta_download_core(id, session, remote_path, local_path, app)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    tracing::warn!("delta download fell back to whole-file copy: {e:#}");
+                    self.update(id, |t| t.transferred = 0).await;
+                }
+            }
+        }
+        self.agent_download_core(id, session, remote_path, local_path, app)
+            .await
+    }
+
+    /// Download from a Faro Agent daemon as a block-level delta: fetch the
+    /// remote (new) file's signature, chunk the local basis locally, download
+    /// only the unmatched ranges via ordinary `ReadChunk`s, reassemble into a
+    /// same-directory temp, hash-verify, and rename over the destination. Any
+    /// error leaves the old local file untouched; the caller falls back to a
+    /// whole-file download.
+    async fn agent_delta_download_core(
+        &self,
+        id: &str,
+        session: &Arc<crate::session::AgentSession>,
+        remote_path: &str,
+        local_path: &Path,
+        app: Option<&AppHandle>,
+    ) -> Result<()> {
+        use base64::Engine as _;
+        use faro_agent_proto::delta;
+        use faro_agent_proto::msg::{Request, Response};
+        let started = Instant::now();
+
+        // 1. The remote (new) file's chunk signature.
+        let target_sig = match session
+            .request(Request::Signature { path: remote_path.to_string() })
+            .await?
+        {
+            Response::Signature { size, min, avg, max, chunks, whole_hash } => {
+                delta::FileSignature { size, min, avg, max, chunks, whole_hash }
+            }
+            Response::Error { message, .. } => {
+                anyhow::bail!("signature {remote_path}: {message}")
+            }
+            other => anyhow::bail!("signature {remote_path}: unexpected {other:?}"),
+        };
+        anyhow::ensure!(
+            delta::params_match(&target_sig),
+            "daemon chunk params differ from ours — no delta"
+        );
+
+        // 2. Chunk the local basis (the old file). A missing basis is fine —
+        // an empty signature makes every remote chunk a literal.
+        let mut has_basis = false;
+        let basis_sig = match tokio::fs::metadata(local_path).await {
+            Ok(_) => {
+                let basis_owned = local_path.to_path_buf();
+                match tokio::task::spawn_blocking(move || {
+                    delta::signature_of_file(&basis_owned)
+                })
+                .await
+                {
+                    Ok(Ok(sig)) => {
+                        has_basis = true;
+                        sig
+                    }
+                    Ok(Err(e)) => return Err(e.context("signature of local basis")),
+                    Err(e) => return Err(anyhow::anyhow!("basis signature task: {e}")),
+                }
+            }
+            Err(_) => delta::FileSignature {
+                size: 0,
+                min: delta::CHUNK_MIN,
+                avg: delta::CHUNK_AVG,
+                max: delta::CHUNK_MAX,
+                chunks: Vec::new(),
+                whole_hash: String::new(),
+            },
+        };
+
+        // 3. Match the remote chunks against the local basis.
+        let (plan, needed) = delta::plan_download(&basis_sig, &target_sig)?;
+        let size = target_sig.size;
+        if !delta::delta_worthwhile(&plan, size) {
+            anyhow::bail!(
+                "delta barely saves anything ({} of {size} bytes would still cross the wire)",
+                plan.literal_bytes
+            );
+        }
+
+        // 4. Fetch only the missing ranges into a local patch temp, then 5.
+        // reassemble locally and rename over the destination. Any failure →
+        // delete both temps; the old local file is untouched.
+        let local_dir = local_path.parent().unwrap_or(Path::new("."));
+        let patch_path = local_dir.join(format!(".faro-patch-{}", Uuid::new_v4()));
+        let out_path = local_dir.join(format!(".faro-delta-{}.tmp", Uuid::new_v4()));
+        let result: Result<()> = async {
+            let mut patch_file = tokio::fs::File::create(&patch_path)
+                .await
+                .with_context(|| format!("create {}", patch_path.display()))?;
+            let mut fetched: u64 = 0;
+            let mut last_emit = Instant::now();
+            for &(range_off, range_len) in &needed {
+                let mut got: u64 = 0;
+                while got < range_len {
+                    let resp = session
+                        .request(Request::ReadChunk {
+                            path: remote_path.to_string(),
+                            offset: range_off + got,
+                            len: range_len - got,
+                        })
+                        .await?;
+                    let data_b64 = match resp {
+                        Response::Chunk { data, .. } => data,
+                        Response::Error { message, .. } => {
+                            anyhow::bail!("download {remote_path}: {message}")
+                        }
+                        other => {
+                            anyhow::bail!("download {remote_path}: unexpected {other:?}")
+                        }
+                    };
+                    let bytes = base64::engine::general_purpose::STANDARD
+                        .decode(&data_b64)
+                        .context("decode chunk")?;
+                    if bytes.is_empty() {
+                        anyhow::bail!("download {remote_path}: short read (file changed?)");
+                    }
+                    self.checkpoint(id, bytes.len() as u64).await?;
+                    patch_file.write_all(&bytes).await?;
+                    got += bytes.len() as u64;
+                    fetched += bytes.len() as u64;
+                    if last_emit.elapsed() > Duration::from_millis(100) {
+                        self.update(id, |t| t.transferred = fetched).await;
+                        if let Some(app) = app {
+                            if let Some(t) = self.get(id).await {
+                                let _ = app.emit("transfer://progress", &t);
+                            }
+                        }
+                        last_emit = Instant::now();
+                    }
+                }
+            }
+            patch_file.flush().await?;
+            drop(patch_file);
+            // Charge the reused bytes too (same accounting as a full copy).
+            self.checkpoint(id, plan.reused_bytes).await?;
+
+            // 5. Reassemble + hash-verify into the temp, then atomically
+            // rename over the destination.
+            let (basis_owned, patch_owned, out_owned, expected) = (
+                has_basis.then(|| local_path.to_path_buf()),
+                patch_path.clone(),
+                out_path.clone(),
+                plan.whole_hash.clone(),
+            );
+            let recipe = plan.recipe.clone();
+            tokio::task::spawn_blocking(move || {
+                delta::apply_delta(
+                    basis_owned.as_deref(),
+                    &patch_owned,
+                    &recipe,
+                    &out_owned,
+                    &expected,
+                )
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("apply delta task: {e}"))?
+            .context("apply delta")?;
+            tokio::fs::rename(&out_path, local_path)
+                .await
+                .with_context(|| format!("rename delta result over {}", local_path.display()))?;
+            Ok(())
+        }
+        .await;
+        let _ = tokio::fs::remove_file(&patch_path).await;
+        if result.is_err() {
+            let _ = tokio::fs::remove_file(&out_path).await;
+        }
+        result?;
+
+        tracing::info!(
+            "delta download {remote_path}: {} bytes, fetched {} literal, reused {} in {:?}",
+            size,
+            plan.literal_bytes,
+            plan.reused_bytes,
+            started.elapsed()
+        );
+        self.update(id, |t| {
+            t.transferred = t.size;
+            t.delta = Some(DeltaStats { sent: plan.literal_bytes, reused: plan.reused_bytes });
+        })
+        .await;
+        if let Some(app) = app {
+            if let Some(t) = self.get(id).await {
+                let _ = app.emit("transfer://progress", &t);
+            }
+        }
         Ok(())
     }
 
@@ -2249,6 +2737,16 @@ async fn http_size(session: &Arc<HttpSession>, path: &str) -> u64 {
     }
 }
 
+/// Delta sync exists only for the Faro Agent backend (Plan 23): it's the one
+/// remote where we run code, so a chunk signature + server-side reassemble is
+/// possible. Every other backend arm dispatches to a plain whole-file copy.
+/// The dispatch matches below already route only `Session::Agent` to the
+/// `*_with_delta` entry points — this helper pins that contract (and the test
+/// at the bottom of the file exercises it).
+fn supports_delta(session: &Session) -> bool {
+    matches!(session, Session::Agent(_))
+}
+
 /// Stat a path on a Faro Agent daemon, returning its size and whether it exists.
 async fn agent_stat(
     session: &Arc<crate::session::AgentSession>,
@@ -2723,7 +3221,8 @@ async fn dispatch_download(
                 .await
         }
         Session::Agent(agent) => {
-            mgr.run_agent_download(id, agent.clone(), remote_path, final_path, app)
+            debug_assert!(supports_delta(session));
+            mgr.run_agent_download_with_delta(id, agent.clone(), remote_path, final_path, app)
                 .await
         }
     }
@@ -2787,7 +3286,8 @@ async fn dispatch_upload(
                 .await
         }
         Session::Agent(agent) => {
-            mgr.run_agent_upload(id, agent.clone(), local, final_remote, app)
+            debug_assert!(supports_delta(session));
+            mgr.run_agent_upload_with_delta(id, agent.clone(), local, final_remote, app)
                 .await
         }
     }
@@ -2953,5 +3453,400 @@ mod tests {
             "Permission denied (os error 13)"
         )));
         assert!(!is_transient(&anyhow::anyhow!("No such file or directory")));
+    }
+
+    // ---------- Delta sync (Phase 2) ----------
+
+    /// Deterministic pseudo-random bytes (xorshift64*), so tests need no
+    /// fixtures or extra dev-deps.
+    fn det_bytes(seed: u64, n: usize) -> Vec<u8> {
+        let mut x = seed;
+        let mut out = Vec::with_capacity(n);
+        while out.len() < n {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            out.extend_from_slice(&x.wrapping_mul(0x2545_F491_4F6C_DD1D).to_le_bytes());
+        }
+        out.truncate(n);
+        out
+    }
+
+    fn test_dirs(tag: &str) -> PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "faro-transfer-delta-{tag}-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        std::fs::create_dir_all(dir.join("local")).unwrap();
+        std::fs::create_dir_all(dir.join("remote")).unwrap();
+        dir
+    }
+
+    /// An AgentSession wired over localhost TCP to an in-process daemon
+    /// request loop (`faro_agentd::ops::handle`, writes allowed). With
+    /// `reject_signature`, `Signature` requests error out — simulating a
+    /// pre-delta-sync daemon for the fallback tests.
+    async fn delta_test_session(reject_signature: bool) -> Arc<crate::session::AgentSession> {
+        use faro_agent_proto::identity::Identity;
+        use faro_agent_proto::msg::{Hello, Request, Response, PROTOCOL_VERSION};
+        use faro_agent_proto::{Auth, Role, SecureChannel};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let daemon_id = Identity::generate().unwrap();
+        let daemon_pub = daemon_id.public_bytes().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else { break };
+                let sk = match daemon_id.private_bytes() {
+                    Ok(sk) => sk,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let jobs = faro_agentd::jobs::JobStore::new();
+                    let policy =
+                        faro_agentd::Policy { allow_exec: false, allow_write: true };
+                    let mut ch = SecureChannel::establish(
+                        stream,
+                        Role::Responder,
+                        &sk,
+                        Auth::Paired { expect_remote: None },
+                    )
+                    .await?;
+                    let _hello: Hello = ch.recv().await?;
+                    loop {
+                        let req: Request = match ch.recv().await {
+                            Ok(r) => r,
+                            Err(_) => break,
+                        };
+                        let resp = if reject_signature
+                            && matches!(req, Request::Signature { .. })
+                        {
+                            Response::error("unknown op")
+                        } else {
+                            faro_agentd::ops::handle(req, policy, &jobs).await
+                        };
+                        if ch.send(&resp).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok::<(), anyhow::Error>(())
+                });
+            }
+        });
+
+        let ctrl_id = Identity::generate().unwrap();
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut ch = SecureChannel::establish(
+            stream,
+            Role::Initiator,
+            &ctrl_id.private_bytes().unwrap(),
+            Auth::Paired { expect_remote: Some(daemon_pub) },
+        )
+        .await
+        .unwrap();
+        ch.send(&Hello {
+            protocol_version: PROTOCOL_VERSION,
+            client_name: "transfer-test".into(),
+        })
+        .await
+        .unwrap();
+        Arc::new(crate::session::AgentSession::for_test(ch))
+    }
+
+    /// A manager with one transfer row registered, so the delta arms' update /
+    /// checkpoint / emit calls have a row to work on.
+    async fn delta_test_manager(
+        id: &str,
+        kind: TransferKind,
+        source: &str,
+        destination: &str,
+        size: u64,
+    ) -> TransferManager {
+        let mgr = TransferManager::new();
+        mgr.insert(Transfer {
+            id: id.to_string(),
+            kind,
+            source: source.to_string(),
+            destination: destination.to_string(),
+            size,
+            transferred: 0,
+            status: TransferStatus::Queued,
+            error: None,
+            retry_attempt: None,
+            delta: None,
+            started_at: 0,
+        })
+        .await;
+        mgr
+    }
+
+    // ---------- Delta sync (Phase 3): setting switch + cross-backend gate ----------
+
+    /// The `deltaSync` setting drives the switch; `FARO_DELTA=0` force-off
+    /// wins over it either way.
+    #[test]
+    fn delta_switch_follows_the_setting() {
+        let mgr = TransferManager::new();
+        assert!(mgr.delta_enabled(), "default on");
+        mgr.set_delta_enabled(false);
+        assert!(!mgr.delta_enabled());
+        mgr.set_delta_enabled(true);
+        let env_off = std::env::var("FARO_DELTA").ok().as_deref() == Some("0");
+        assert_eq!(mgr.delta_enabled(), !env_off);
+    }
+
+    fn delta_gate_profile(protocol: &str) -> crate::profiles::ConnectionProfile {
+        crate::profiles::ConnectionProfile {
+            id: "t".into(),
+            name: "t".into(),
+            protocol: protocol.into(),
+            host: "127.0.0.1".into(),
+            port: 22,
+            username: "u".into(),
+            auth: crate::profiles::AuthMethod::Agent,
+            default_remote_path: None,
+            color: None,
+            auto_connect: None,
+            bucket: None,
+            region: None,
+            endpoint: None,
+            account: None,
+            agent_key: None,
+            group: None,
+            sort_order: None,
+            icon: None,
+            jump_host: None,
+            jump_port: None,
+            jump_username: None,
+        }
+    }
+
+    /// Cross-backend contract: `supports_delta` is true ONLY for
+    /// `Session::Agent` — every other backend must take the whole-file path.
+    /// One table row per variant constructible without a live connection;
+    /// Ssh/Ftp (live sockets) and the OAuth/API-token cloud sessions (private
+    /// connect-time state) can't be built in a unit test — for those the
+    /// exhaustive `matches!` in `supports_delta` is the compile-time
+    /// guarantee, and dispatch routes them to plain `run_*` arms.
+    #[tokio::test]
+    async fn supports_delta_only_for_agent_sessions() {
+        use crate::session::http::{HttpAuth, HttpMode};
+        use crate::session::webdav::WebdavAuth;
+        use crate::session::{HttpSession, ObjectSession, WebdavSession};
+
+        let client = reqwest::Client::new();
+        let base = url::Url::parse("https://example.com/dav/").unwrap();
+        let table: Vec<(&str, Session, bool)> = vec![
+            (
+                "webdav",
+                Session::Webdav(Arc::new(WebdavSession {
+                    id: "t".into(),
+                    profile: delta_gate_profile("webdav"),
+                    client: client.clone(),
+                    base: base.clone(),
+                    auth: WebdavAuth::None,
+                })),
+                false,
+            ),
+            (
+                "http",
+                Session::Http(Arc::new(HttpSession {
+                    id: "t".into(),
+                    profile: delta_gate_profile("http"),
+                    client,
+                    base,
+                    auth: HttpAuth::None,
+                    mode: HttpMode::Listing,
+                })),
+                false,
+            ),
+            (
+                "object",
+                Session::Object(Arc::new(ObjectSession {
+                    id: "t".into(),
+                    profile: delta_gate_profile("s3"),
+                    container: "b".into(),
+                    store: Arc::new(object_store::memory::InMemory::new()),
+                })),
+                false,
+            ),
+            (
+                "agent",
+                Session::Agent(delta_test_session(false).await),
+                true,
+            ),
+        ];
+        for (name, session, expected) in &table {
+            assert_eq!(supports_delta(session), *expected, "{name} backend");
+        }
+    }
+
+    /// Delta upload: 20 MiB up whole-file, mutate 1 KiB, up again — the second
+    /// run must reassemble a byte-equal remote file with < 10% of the bytes
+    /// crossing the wire (the patch is the ONLY WriteChunk traffic).
+    #[tokio::test]
+    async fn delta_upload_reuses_unchanged_blocks() {
+        let dir = test_dirs("up");
+        let local = dir.join("local/file.bin");
+        let remote = dir.join("remote/file.bin");
+        let remote_s = remote.to_string_lossy().into_owned();
+        let size = 20 * 1024 * 1024;
+        std::fs::write(&local, det_bytes(0xAAAA, size)).unwrap();
+
+        let session = delta_test_session(false).await;
+        // First upload: no remote basis → whole-file.
+        let mgr = delta_test_manager("t", TransferKind::Upload, &local.to_string_lossy(), &remote_s, size as u64).await;
+        mgr.agent_upload_with_delta_core("t", &session, &local, &remote_s, None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&remote).unwrap(), std::fs::read(&local).unwrap());
+        assert!(mgr.get("t").await.unwrap().delta.is_none(), "no basis → whole-file");
+
+        // Mutate 1 KiB in the middle and upload again → delta.
+        let mut content = std::fs::read(&local).unwrap();
+        content[10 * 1024 * 1024..10 * 1024 * 1024 + 1024]
+            .copy_from_slice(&det_bytes(0xBBBB, 1024));
+        std::fs::write(&local, &content).unwrap();
+        mgr.update("t", |t| t.transferred = 0).await;
+        mgr.agent_upload_with_delta_core("t", &session, &local, &remote_s, None)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&remote).unwrap(), content);
+        let t = mgr.get("t").await.unwrap();
+        let stats = t.delta.expect("second upload must run as a delta");
+        assert!(
+            stats.sent * 10 < size as u64,
+            "1 KiB edit sent {} bytes (>= 10% of {size})",
+            stats.sent
+        );
+        assert_eq!(stats.sent + stats.reused, size as u64);
+        // No temp litter on either side.
+        for side in ["local", "remote"] {
+            let litter: Vec<_> = std::fs::read_dir(dir.join(side))
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let n = e.file_name().to_string_lossy().into_owned();
+                    n.contains(".faro-patch-") || n.contains(".faro-new-") || n.contains(".faro-delta-")
+                })
+                .collect();
+            assert!(litter.is_empty(), "{side} litter: {litter:?}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Delta download: same shape as the upload test, other direction.
+    #[tokio::test]
+    async fn delta_download_reuses_unchanged_blocks() {
+        let dir = test_dirs("down");
+        let local = dir.join("local/file.bin");
+        let remote = dir.join("remote/file.bin");
+        let remote_s = remote.to_string_lossy().into_owned();
+        let size = 20 * 1024 * 1024;
+        std::fs::write(&remote, det_bytes(0xCCCC, size)).unwrap();
+
+        let session = delta_test_session(false).await;
+        // First download: no local basis → whole-file.
+        let mgr = delta_test_manager("t", TransferKind::Download, &remote_s, &local.to_string_lossy(), size as u64).await;
+        mgr.agent_download_with_delta_core("t", &session, &remote_s, &local, None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&local).unwrap(), std::fs::read(&remote).unwrap());
+        assert!(mgr.get("t").await.unwrap().delta.is_none());
+
+        // Mutate 1 KiB remotely and download again → delta.
+        let mut content = std::fs::read(&remote).unwrap();
+        content[5 * 1024 * 1024..5 * 1024 * 1024 + 1024]
+            .copy_from_slice(&det_bytes(0xDDDD, 1024));
+        std::fs::write(&remote, &content).unwrap();
+        mgr.update("t", |t| t.transferred = 0).await;
+        mgr.agent_download_with_delta_core("t", &session, &remote_s, &local, None)
+            .await
+            .unwrap();
+
+        assert_eq!(std::fs::read(&local).unwrap(), content);
+        let t = mgr.get("t").await.unwrap();
+        let stats = t.delta.expect("second download must run as a delta");
+        assert!(
+            stats.sent * 10 < size as u64,
+            "1 KiB edit fetched {} bytes (>= 10% of {size})",
+            stats.sent
+        );
+        assert_eq!(stats.sent + stats.reused, size as u64);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Old daemon (Signature unsupported) ⇒ the delta attempt fails and the
+    /// wrapper silently completes a correct whole-file copy, both directions.
+    #[tokio::test]
+    async fn delta_falls_back_when_daemon_lacks_signature() {
+        let dir = test_dirs("old");
+        let local = dir.join("local/file.bin");
+        let remote = dir.join("remote/file.bin");
+        let remote_s = remote.to_string_lossy().into_owned();
+        let size = 20 * 1024 * 1024;
+        std::fs::write(&remote, det_bytes(0xEEEE, size)).unwrap();
+        std::fs::write(&local, std::fs::read(&remote).unwrap()).unwrap();
+
+        let session = delta_test_session(true).await; // Signature → error
+        // Upload direction: remote basis exists and file is big enough, so the
+        // delta is attempted, fails at Signature, and falls back.
+        let mut content = std::fs::read(&local).unwrap();
+        content[1024..2048].copy_from_slice(&det_bytes(0xFFFF, 1024));
+        std::fs::write(&local, &content).unwrap();
+        let mgr = delta_test_manager("u", TransferKind::Upload, &local.to_string_lossy(), &remote_s, size as u64).await;
+        mgr.agent_upload_with_delta_core("u", &session, &local, &remote_s, None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&remote).unwrap(), content);
+        assert!(mgr.get("u").await.unwrap().delta.is_none(), "fallback → no delta stats");
+
+        // Download direction.
+        content[4096..5120].copy_from_slice(&det_bytes(0x1234, 1024));
+        std::fs::write(&remote, &content).unwrap();
+        let mgr = delta_test_manager("d", TransferKind::Download, &remote_s, &local.to_string_lossy(), size as u64).await;
+        mgr.agent_download_with_delta_core("d", &session, &remote_s, &local, None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&local).unwrap(), content);
+        assert!(mgr.get("d").await.unwrap().delta.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ≥ 60% literal ⇒ the worthwhile heuristic aborts the delta before any
+    /// patch byte is sent and the wrapper falls back to a correct whole-file
+    /// copy.
+    #[tokio::test]
+    async fn delta_falls_back_when_mostly_changed() {
+        let dir = test_dirs("churn");
+        let local = dir.join("local/file.bin");
+        let remote = dir.join("remote/file.bin");
+        let remote_s = remote.to_string_lossy().into_owned();
+        let size = 20 * 1024 * 1024;
+        std::fs::write(&remote, det_bytes(0x7777, size)).unwrap();
+        // Same size, ~completely different content ⇒ ~100% literal.
+        std::fs::write(&local, det_bytes(0x8888, size)).unwrap();
+
+        let session = delta_test_session(false).await;
+        let mgr = delta_test_manager("u", TransferKind::Upload, &local.to_string_lossy(), &remote_s, size as u64).await;
+        mgr.agent_upload_with_delta_core("u", &session, &local, &remote_s, None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&remote).unwrap(), std::fs::read(&local).unwrap());
+        assert!(mgr.get("u").await.unwrap().delta.is_none(), "≥60% literal → whole-file");
+
+        // Download direction, same setup reversed.
+        std::fs::write(&remote, det_bytes(0x9999, size)).unwrap();
+        let mgr = delta_test_manager("d", TransferKind::Download, &remote_s, &local.to_string_lossy(), size as u64).await;
+        mgr.agent_download_with_delta_core("d", &session, &remote_s, &local, None)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&local).unwrap(), std::fs::read(&remote).unwrap());
+        assert!(mgr.get("d").await.unwrap().delta.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

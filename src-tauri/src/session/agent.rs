@@ -198,8 +198,52 @@ impl AgentSession {
         *self.channel.lock().await = None;
     }
 
-    // ---- typed helpers used by AgentFs / transfer / bridge ----
+    /// Test-only session wrapping an already-established channel (the transfer
+    /// tests dial an in-process daemon themselves). The profile is a
+    /// placeholder — nothing listens on it, so a dead channel fails instead of
+    /// re-dialing, which is what tests want.
+    #[cfg(test)]
+    pub(crate) fn for_test(channel: SecureChannel<TcpStream>) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            profile: ConnectionProfile {
+                id: "test".into(),
+                name: "test".into(),
+                protocol: "faro-agent".into(),
+                host: "127.0.0.1".into(),
+                port: 1,
+                username: String::new(),
+                auth: crate::profiles::AuthMethod::Agent,
+                default_remote_path: None,
+                color: None,
+                auto_connect: None,
+                bucket: None,
+                region: None,
+                endpoint: None,
+                account: None,
+                agent_key: None,
+                group: None,
+                sort_order: None,
+                icon: None,
+                jump_host: None,
+                jump_port: None,
+                jump_username: None,
+            },
+            server_key: String::new(),
+            channel: Mutex::new(Some(channel)),
+            system_info: SystemInfo {
+                os: "test".into(),
+                hostname: "test".into(),
+                arch: "test".into(),
+                shell: "sh".into(),
+                username: "test".into(),
+                home_dir: String::new(),
+                agentd_version: "test".into(),
+            },
+        }
+    }
 
+    // ---- typed helpers used by AgentFs / transfer / bridge ----
     pub async fn exec(
         &self,
         command: &str,
