@@ -210,7 +210,10 @@ const DEFAULTS: Persisted = {
   deltaSync: true,
   defaultDownloadFolder: "",
   defaultEditor: "",
-  showHiddenFiles: false,
+  // On by default: Faro's work is server admin, where the interesting files are
+  // dotfiles (.htaccess, .env, .ssh/, .git/). Hiding them by default made them
+  // look absent rather than filtered.
+  showHiddenFiles: true,
   sortField: "name",
   sortDirection: "asc",
   paneViewMode: "grid",
