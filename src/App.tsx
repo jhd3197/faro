@@ -40,7 +40,7 @@ import { useBridge } from "./stores/bridgeStore";
 import { useSync } from "./stores/syncStore";
 import { useSettings } from "./stores/settingsStore";
 import { onDeepLink } from "./lib/ipc";
-import { runSettingsMigration } from "./lib/secretMigration";
+import { runDefaultBumps, runSettingsMigration } from "./lib/secretMigration";
 import { initNotifications } from "./lib/notifications";
 import { openTerminalWindow } from "./lib/popout";
 import { toast } from "./stores/toastStore";
@@ -106,9 +106,11 @@ export default function App() {
     };
   }, []);
 
-  // One-time migration of app settings from localStorage into faro.db (Plan 12).
+  // One-time migration of app settings from localStorage into faro.db (Plan 12),
+  // then any defaults that changed since this install first wrote its rows —
+  // in that order, so the bumps apply on top of the imported values.
   useEffect(() => {
-    void runSettingsMigration();
+    void runSettingsMigration().then(runDefaultBumps);
   }, []);
 
   // Desktop notifications (Plan 16 Phase 3): OS toasts for the curated events
