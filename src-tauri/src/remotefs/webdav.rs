@@ -520,6 +520,7 @@ mod tests {
         let pass = std::env::var("FARO_WEBDAV_PASS").unwrap_or_default();
 
         let profile = ConnectionProfile {
+            icon: None,
             id: "test".into(),
             name: "webdav-test".into(),
             protocol: "webdav".into(),

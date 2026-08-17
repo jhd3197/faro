@@ -16,6 +16,7 @@ import {
   TerminalSquare,
   PieChart,
   GitCompareArrows,
+  CopyX,
   Info,
   Search,
   X,
@@ -699,6 +700,19 @@ export function FilePane({
               .catch((e) => setError(errorText(e))),
         });
       }
+      // Find duplicate files in this folder (the `name_1.ext` copies a
+      // rename-on-conflict upload leaves behind, or content-hash duplicates).
+      if (single.kind === "directory" && fs.findDuplicates) {
+        items.push({
+          label: "Find duplicates",
+          icon: <CopyX size={12} />,
+          onClick: () =>
+            sessionId &&
+            fs
+              .findDuplicates!(sessionId, single.path)
+              .catch((e) => setError(errorText(e))),
+        });
+      }
       // Search this folder by name or content (Spotlight/grep over the backend).
       // Works on every backend; content grep uses a server-side fast path on SSH.
       if (single.kind === "directory" && fs.searchDirectory) {
@@ -986,6 +1000,21 @@ export function FilePane({
             title="Search this folder by name or content"
           >
             <Search size={13} />
+          </button>
+        )}
+        {fs.findDuplicates && (
+          <button
+            onClick={() =>
+              sessionId &&
+              fs
+                .findDuplicates!(sessionId, path)
+                .catch((e) => setError(errorText(e)))
+            }
+            disabled={!sessionId}
+            className="rounded p-1 text-text-muted hover:bg-bg-hover hover:text-text disabled:opacity-40"
+            title="Find duplicate files in this folder"
+          >
+            <CopyX size={13} />
           </button>
         )}
         {caps?.hasDirectories !== false && (

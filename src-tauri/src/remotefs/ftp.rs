@@ -59,6 +59,29 @@ fn entry_from_listing(parent: &str, line: &str) -> Option<DirEntry> {
     })
 }
 
+/// Issue a directory listing that includes dotfiles.
+///
+/// Plain `LIST` runs the server's `ls` without `-a`, so `.htaccess`, `.env` and
+/// every other dotfile are simply absent from the listing — the file is there
+/// and downloadable by name, but nothing that walks a directory can see it. That
+/// silence is worse than an error: a tree walk (recursive delete, sync, search)
+/// quietly skips them.
+///
+/// So ask for `LIST -a` and fall back to a bare `LIST` when the server rejects
+/// the flag (IIS and a few others take the argument as a literal path). Servers
+/// that already include dotfiles are unaffected — `-a` is a no-op there.
+fn list_lines(
+    stream: &mut crate::session::ftp::FtpStreamKind,
+    target: &str,
+) -> Result<Vec<String>> {
+    match stream.list(Some(&format!("-a {target}"))) {
+        Ok(lines) => Ok(lines),
+        Err(_) => stream
+            .list(Some(target))
+            .with_context(|| format!("FTP LIST {target}")),
+    }
+}
+
 #[async_trait]
 impl RemoteFs for FtpFs {
     async fn list_dir(&self, path: &str) -> Result<Vec<DirEntry>> {
@@ -67,9 +90,7 @@ impl RemoteFs for FtpFs {
         self.session
             .with_stream(move |stream| {
                 let target = if path_owned.is_empty() { "." } else { &path_owned };
-                let listing = stream
-                    .list(Some(target))
-                    .with_context(|| format!("FTP LIST {target}"))?;
+                let listing = list_lines(stream, target)?;
                 let mut out = Vec::with_capacity(listing.len());
                 for line in listing {
                     if let Some(entry) = entry_from_listing(&parent_for_entries, &line) {
@@ -169,7 +190,9 @@ async fn delete_recursive(session: Arc<FtpSession>, root: String) -> Result<()> 
                 let mut stack = vec![root.clone()];
                 let mut out = Vec::new();
                 while let Some(d) = stack.pop() {
-                    let listing = stream.list(Some(&d)).unwrap_or_default();
+                    // `-a`, so a directory holding only dotfiles isn't reported
+                    // as empty and left behind by the RMD pass below.
+                    let listing = list_lines(stream, &d).unwrap_or_default();
                     for line in listing {
                         let Some(entry) = entry_from_listing(&d, &line) else {
                             continue;

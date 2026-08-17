@@ -431,6 +431,7 @@ mod tests {
         std::env::set_var("FARO_SHOPIFY_TOKEN_URL", format!("{mock}/admin/oauth/access_token"));
 
         let mk_profile = |pid: &str| ConnectionProfile {
+            icon: None,
             id: pid.into(),
             name: "shop".into(),
             protocol: "shopify".into(),

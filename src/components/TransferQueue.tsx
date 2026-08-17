@@ -209,6 +209,7 @@ function Row({
         <div className="truncate text-[11px] text-text-dim">
           → {t.destination}
         </div>
+        {t.delta && <DeltaBadge delta={t.delta} />}
         {t.status === "transferring" && (
           <div className="mt-1 h-1 w-full overflow-hidden rounded bg-bg-subtle">
             <div
@@ -290,6 +291,24 @@ function Row({
           <X size={12} />
         </button>
       )}
+    </div>
+  );
+}
+
+/** Compact delta-sync indicator (Plan 23 Phase 4): how much actually crossed
+ *  the wire vs. how much was reused from the basis. Shown for in-flight and
+ *  done transfers alike (the stats are set before finalize). */
+function DeltaBadge({ delta }: { delta: { sent: number; reused: number } }) {
+  const total = delta.sent + delta.reused;
+  const savedPct = total > 0 ? (delta.reused / total) * 100 : 0;
+  return (
+    <div className="mt-0.5">
+      <span
+        className="rounded bg-success/15 px-1.5 py-0.5 text-[10px] font-medium text-success"
+        title={`Delta sync: ${fmtSize(delta.reused)} reused from the previous version`}
+      >
+        Δ {fmtSize(delta.sent)} of {fmtSize(total)} sent · {savedPct.toFixed(1)}% saved
+      </span>
     </div>
   );
 }

@@ -41,7 +41,7 @@ thematic detail.
 | 3 | `3_scan-index-foundation` | ✅ built (runtime test on a live backend left) | Shared scan engine + `faro.db`. Substrate for 4/6/7 and the sync state index. |
 | 4 | `4_disk-usage-explorer` | ✅ built (GUI click-through on a live backend left) | First *visible*, read-only consumer of #3 — proves the foundation at low risk. |
 | 5 | `5_additional-backends` | 🔄 Phases 0–2, 4, 5 shipped (S3/GCS/WebDAV/HTTP + all 4 OAuth clouds) | Only SMB (Phase 3) remains — blocked on MSVC/libsmbclient. |
-| 6 | `6_directory-diff` | ⬜ | Reuses #3's scan engine (two trees) + `change_signal`/`etag`. |
+| 6 | `6_directory-diff` | ✅ built (CLI runtime-verified local↔local incl. `--hash`/`--json`; live-backend + GUI click-through left) | Reuses #3's scan engine (two trees) + `change_signal`/`etag`. |
 | 7 | `7_fleet-search` | ✅ built (live-backend GUI click-through left) | Reuses #3's scan engine; later a `faro.db` filename index. |
 | 8 | `8_fleet-skills` | ✅ built (live multi-server fan-out run left) | AI-authored fleet automations over the bridge. Independent. |
 | 9 | `9_on-demand-virtual-folders` | 🔄 Windows provider built (feature-flagged); Explorer verify left | OneDrive-style placeholders (Plan 2 Phase 3). Large, per-OS, Windows-first. |
@@ -56,6 +56,8 @@ thematic detail.
 | 18 | `18_jump-hosts-proxyjump` | ⬜ | Jump hosts (ProxyJump) through the single `ssh_connect` choke point + optional cloudflared integration. Unlocks locked-down (IP-allowlisted / tunnel-fronted) servers. Consumes Plan 13's bastion E2E fixture. |
 | 20 | `20_hubspot-backend` | ✅ shipped (Phases 1–3, mock-verified; HubDB write-back future) | HubSpot portal as a connection, one private-app token over three surfaces: Design Manager as a real remote filesystem (Source Code API v3, draft/published roots), File Manager (Files API v3), HubDB tables as virtual CSV files (read-only). The Shopify recipe (`18_shopify-backend.md`, shipped), an even better fit. |
 | 21 | `21_dynamics-365-backend` | 🔄 Phase 1 shipped + mock-verified (client-credentials only; delegated OAuth + Phases 2–3 planned) | Dynamics 365/Dataverse environment as a connection: web resources are literally files in a table (`webresourceset` OData — path-like names, base64 content, publish-to-deploy). Client-credentials or delegated Entra auth (reuses `oauth.rs`). Phase 2: tables as virtual CSV + `faro-cli dynamics query` (the wp-cli-style db helper). The XrmToolBox gap-filler. |
+| 22 | `22_find-duplicates-dedupe` | ✅ built (unit-tested + CLI runtime-verified locally; live-backend + GUI click-through left) | Find & clean duplicate files — the `name_1.ext` copies rename-on-conflict leaves behind (name mode) or exact content duplicates (hash mode). GUI panel + `faro-cli dedupe` + `faro_dedupe` MCP tool. |
+| 23 | `23_delta-sync` | ✅ Phases 1–3 built + unit-tested (Phase 4 panel indicator open) | Block-level differential transfer on the Faro Agent backend (FastCDC + BLAKE3): re-transferring a changed file ≥ 8 MiB sends only the changed blocks, both directions, with silent whole-file fallback on any error or older daemon. `deltaSync` setting + reconcile-time temp sweep. |
 | 99 | `99_scoped-connection-sharing` | 🚫 out of scope | Pulled from the numbered order; slated for removal. Design notes kept on file only. |
 
 Cross-project **Track D** (ServerKit ↔ Faro) has no plan file — it's a
@@ -224,7 +226,15 @@ prove the walk / exec / object-flat strategies on real backends.
 Meld/Beyond Compare for any two backends (incl. remote↔remote), surfaced in the
 **GUI, `faro-cli`, and as an MCP `faro_diff` tool**. Reuses `sync.rs`'s diff +
 the **Track A2** scan engine (walks two trees) and its `change_signal`/`etag`
-for `--hash` mode. ⬜
+for `--hash` mode. ✅ **All four phases built** — `diff.rs` engine (symmetric
+classify + opt-in content-hash pass: server-side `sha256sum` over SSH, streamed
+for local/object/FTP), `faro-cli diff <a> <b> [--hash] [--json]` (local↔remote
+and remote↔remote), the `faro_diff` bridge/MCP tool, and the GUI two-tree view
+(colour-coded rows, class filters, cancellable walks, per-row reveal/copy-path +
+copy A→B/B→A via the transfer engine — copy-across needs one local side, as the
+transfer engine is local↔remote only). ✅ Runtime-verified: `faro-cli diff`
+local↔local with/without `--hash` and `--json` (2026-08-09). ⬜ Remaining:
+live-backend run (SSH/S3/agent) + GUI click-through.
 
 ## Track H — Fleet Search (Plan 7)
 Name + content search across any connection; exec `rg`/`grep`/`find` fast path
@@ -439,6 +449,17 @@ later phase spawns `cloudflared access tcp` for Cloudflare-fronted hosts
 terminal, `faro-cli`, and the Agent Bridge all inherit it through the single
 connect choke point; `faro-agentd` (non-SSH transport) is out of scope.
 Verified against Plan 13 Phase 5's bastion Docker fixture. ⬜
+
+## Track S — Find Duplicates & cleanup (Plan 22)
+Faro's rename-on-conflict policy leaves `name_1.ext` copies scattered through
+real trees; this surfaces them. `dedupe.rs` groups a walked tree two ways —
+same-dir normalized-name + equal size (cheap default), or content hash
+anywhere in the tree (opt-in, reuses Plan 6's `hash_path`) — and suggests a
+keeper per group; deletion is always explicit and per-surface. Surfaced as a
+GUI "Find duplicates" panel (review + confirm-then-delete), `faro-cli dedupe`
+(`--hash`/`--json`/`--delete --yes`), and the read-only `faro_dedupe` MCP tool.
+✅ Built; unit-tested + CLI runtime-verified locally (2026-08-09). ⬜
+Remaining: live-backend run + GUI click-through.
 
 ## Near-term quick wins (small, high-value)
 - **Editable permissions dialog** — today Properties *shows* mode read-only; add

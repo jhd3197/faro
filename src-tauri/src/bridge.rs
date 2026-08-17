@@ -1054,6 +1054,9 @@ async fn route(app: &AppHandle, state: &Arc<BridgeState>, req: &Request) -> (u16
         ("POST", "/list") => handle_list(app, state, &req.body).await,
         ("POST", "/read") => handle_read(app, state, &req.body).await,
         ("POST", "/download") => handle_download(app, state, &req.body).await,
+        ("POST", "/delete") => handle_delete(app, state, &req.body).await,
+        ("POST", "/rename") => handle_rename(app, state, &req.body).await,
+        ("POST", "/mkdir") => handle_mkdir(app, state, &req.body).await,
         ("POST", "/upload") => handle_upload(app, state, &req.body).await,
         ("POST", "/upload_dir") => handle_upload_dir(app, state, &req.body).await,
         ("POST", "/sync") => handle_sync(app, state, &req.body).await,
@@ -1198,6 +1201,47 @@ async fn handle_write(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) ->
     op_write(app, state, &session_id, &path, &bytes, overwrite).await
 }
 
+async fn handle_delete(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    let path = body_str(&parsed, "path");
+    if session_id.is_empty() || path.is_empty() {
+        return (400, json!({"error": "sessionId and path are required"}));
+    }
+    let recursive = parsed.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
+    op_delete(app, state, &session_id, &path, recursive).await
+}
+
+async fn handle_rename(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    let from = body_str(&parsed, "from");
+    let to = body_str(&parsed, "to");
+    if session_id.is_empty() || from.is_empty() || to.is_empty() {
+        return (400, json!({"error": "sessionId, from and to are required"}));
+    }
+    op_rename(app, state, &session_id, &from, &to).await
+}
+
+async fn handle_mkdir(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
+    let parsed = match parse_body(body) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let session_id = body_str(&parsed, "sessionId");
+    let path = body_str(&parsed, "path");
+    if session_id.is_empty() || path.is_empty() {
+        return (400, json!({"error": "sessionId and path are required"}));
+    }
+    op_mkdir(app, state, &session_id, &path).await
+}
+
 async fn handle_run(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
     let parsed = match parse_body(body) {
         Ok(v) => v,
@@ -1320,7 +1364,8 @@ async fn handle_upload(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -
             json!({"error": "sessionId, localPath and remoteDir are required"}),
         );
     }
-    op_upload(app, state, &session_id, &local_path, &remote_dir).await
+    let overwrite = parsed.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
+    op_upload(app, state, &session_id, &local_path, &remote_dir, overwrite).await
 }
 
 async fn handle_upload_dir(app: &AppHandle, state: &Arc<BridgeState>, body: &[u8]) -> (u16, Value) {
@@ -2341,6 +2386,157 @@ pub(crate) async fn op_list_dir(
     }
 }
 
+/// Delete a remote file or directory. Every backend implements `RemoteFs`, so
+/// this works on all of them — including FTP, where the alternative was asking
+/// the user to open a file manager and do it by hand.
+///
+/// Destructive and irreversible: gated as a Write, and the approval summary
+/// names the exact path (and says "and everything inside it" for a recursive
+/// delete) so the user is agreeing to something specific.
+pub(crate) async fn op_delete(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    path: &str,
+    recursive: bool,
+) -> (u16, Value) {
+    let manager = app.state::<AppState>().sessions.clone();
+    let Some(sess) = manager.get(session_id).await else {
+        return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
+    };
+    let name = sess.profile().name.clone();
+    if let Err(resp) = gate(
+        app,
+        state,
+        session_id,
+        &name,
+        OpClass::Write,
+        "delete",
+        &format!(
+            "DELETE {name}:{path}{}",
+            if recursive { " and everything inside it" } else { "" }
+        ),
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+    let fs = crate::commands::fs_for_session(&sess);
+    match fs.delete(path, recursive).await {
+        Ok(()) => {
+            state
+                .log(app, activity("delete", session_id, format!("delete {path}"), true))
+                .await;
+            (200, json!({ "path": path, "status": "deleted" }))
+        }
+        Err(e) => {
+            state
+                .log(app, activity("error", session_id, format!("delete {path} — {e}"), false))
+                .await;
+            (500, json!({"error": e.to_string()}))
+        }
+    }
+}
+
+/// Rename or move a remote path. Also the way to quarantine something without
+/// destroying it — `mv shell.php shell.php.quarantine` beats a delete when the
+/// user may still want to look at the file.
+pub(crate) async fn op_rename(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    from: &str,
+    to: &str,
+) -> (u16, Value) {
+    let manager = app.state::<AppState>().sessions.clone();
+    let Some(sess) = manager.get(session_id).await else {
+        return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
+    };
+    let name = sess.profile().name.clone();
+    if !crate::commands::fs_for_session(&sess).capabilities().can_rename {
+        return (
+            400,
+            json!({"error": format!("{name} ({}) has no rename operation", sess.profile().protocol)}),
+        );
+    }
+    if let Err(resp) = gate(
+        app,
+        state,
+        session_id,
+        &name,
+        OpClass::Write,
+        "rename",
+        &format!("rename {name}:{from} → {to}"),
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+    let fs = crate::commands::fs_for_session(&sess);
+    match fs.rename(from, to).await {
+        Ok(()) => {
+            state
+                .log(app, activity("rename", session_id, format!("rename {from} → {to}"), true))
+                .await;
+            (200, json!({ "from": from, "to": to, "status": "renamed" }))
+        }
+        Err(e) => {
+            state
+                .log(
+                    app,
+                    activity("error", session_id, format!("rename {from} → {to} — {e}"), false),
+                )
+                .await;
+            (500, json!({"error": e.to_string()}))
+        }
+    }
+}
+
+/// Create a remote directory (one level — the parent must exist).
+pub(crate) async fn op_mkdir(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_id: &str,
+    path: &str,
+) -> (u16, Value) {
+    let manager = app.state::<AppState>().sessions.clone();
+    let Some(sess) = manager.get(session_id).await else {
+        return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
+    };
+    let name = sess.profile().name.clone();
+    if let Err(resp) = gate(
+        app,
+        state,
+        session_id,
+        &name,
+        OpClass::Write,
+        "mkdir",
+        &format!("create directory {name}:{path}"),
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+    let fs = crate::commands::fs_for_session(&sess);
+    match fs.create_dir(path).await {
+        Ok(()) => {
+            state
+                .log(app, activity("mkdir", session_id, format!("mkdir {path}"), true))
+                .await;
+            (200, json!({ "path": path, "status": "created" }))
+        }
+        Err(e) => {
+            state
+                .log(app, activity("error", session_id, format!("mkdir {path} — {e}"), false))
+                .await;
+            (500, json!({"error": e.to_string()}))
+        }
+    }
+}
+
 /// Read a (text) file from a Faro Agent machine via the daemon, capped like the
 /// SFTP path. The gate has already run in `op_read_file`.
 async fn op_read_file_agent(
@@ -2385,6 +2581,93 @@ async fn op_read_file_agent(
     }
 }
 
+/// Ceiling on a fetched read over FTP/FTPS. Every other backend either reads a
+/// range or drops the rest of the stream once it has enough, but FTP can't abort
+/// a `RETR` mid-flight without desyncing the control connection — so the head of
+/// a file costs the whole file. Past this we'd be pulling gigabytes to print
+/// 256 KiB, which is what `download` is for.
+const MAX_FTP_READ_FETCH: u64 = 16 * 1024 * 1024; // 16 MiB
+
+/// Refuse a fetched read that would drag the whole file across a connection that
+/// can't stop early (see [`MAX_FTP_READ_FETCH`]). A size lookup that fails —
+/// some FTP servers refuse `SIZE` outside binary mode — is not fatal: an unknown
+/// size reads as before.
+async fn guard_fetch_size(sess: &Arc<Session>, path: &str) -> Result<()> {
+    if !matches!(&**sess, Session::Ftp(_)) {
+        return Ok(());
+    }
+    if let Ok(size) = crate::transfer::remote_size(sess, path).await {
+        if size > MAX_FTP_READ_FETCH {
+            anyhow::bail!(
+                "{path} is {size} bytes — FTP can't read just the head of a file, so reading it \
+                 would transfer the whole thing for at most {MAX_READ_FILE} bytes of output. \
+                 Download it instead."
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Read a text file from a backend with no in-place read op — FTP/FTPS, S3/Azure,
+/// WebDAV, HTTP, Dropbox, OneDrive, Drive, Box, Shopify, HubSpot, Dynamics — by
+/// pulling the first `MAX_READ_FILE` bytes over the wire (`preview::read_head`,
+/// the same bounded-read the thumbnailer uses: it Ranges where the protocol
+/// supports it and stops draining the stream once it has enough).
+///
+/// This used to be a flat 400 telling the agent to `download` instead. That was
+/// busywork: the agent would start a transfer into the user's Downloads folder,
+/// poll it, read the file off disk, and leave the copy behind — the same bytes
+/// over the same connection, plus litter. Reading is a read, so it's gated as
+/// one (nothing is written locally) and `read_file` now works on every protocol.
+async fn op_read_file_fetch(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    sess: &Arc<Session>,
+    session_id: &str,
+    path: &str,
+) -> (u16, Value) {
+    let name = sess.profile().name.clone();
+    if let Err(resp) = gate(
+        app, state, session_id, &name, OpClass::Read, "read", &format!("read {path}"), None,
+    )
+    .await
+    {
+        return resp;
+    }
+    if let Err(e) = guard_fetch_size(sess, path).await {
+        return (400, json!({"error": e.to_string()}));
+    }
+    // One byte past the cap, so a file that exactly fills it isn't mislabelled
+    // as truncated.
+    match crate::preview::read_head(Some(sess), path, MAX_READ_FILE as u64 + 1).await {
+        Ok(mut buf) => {
+            let truncated = buf.len() > MAX_READ_FILE;
+            buf.truncate(MAX_READ_FILE);
+            let bytes = buf.len();
+            state
+                .log(
+                    app,
+                    activity("read", session_id, format!("read {path} ({bytes} bytes)"), true),
+                )
+                .await;
+            (
+                200,
+                json!({
+                    "content": String::from_utf8_lossy(&buf).to_string(),
+                    "bytes": bytes,
+                    "truncated": truncated,
+                }),
+            )
+        }
+        Err(e) => {
+            state
+                .log(app, activity("error", session_id, format!("read {path} — {e}"), false))
+                .await;
+            (500, json!({"error": e.to_string()}))
+        }
+    }
+}
+
 pub(crate) async fn op_read_file(
     app: &AppHandle,
     state: &Arc<BridgeState>,
@@ -2408,10 +2691,11 @@ pub(crate) async fn op_read_file(
     }
 
     let Some(ssh) = manager.get_ssh(session_id).await else {
-        return (
-            400,
-            json!({"error": "read_file supports SSH/SFTP and Faro Agent sessions — use download for other protocols"}),
-        );
+        // Every other protocol fetches the head of the file instead (below).
+        let Some(sess) = manager.get(session_id).await else {
+            return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
+        };
+        return op_read_file_fetch(app, state, &sess, session_id, path).await;
     };
     let name = ssh.profile.name.clone();
     if let Err(resp) = gate(
@@ -2519,6 +2803,22 @@ async fn read_one_file(ssh: &Arc<crate::session::SshSession>, path: &str) -> Res
     .await
 }
 
+/// Read one file for the batch on a non-SSH session, shaped like
+/// [`read_one_file`]. SSH keeps its own path because `with_sftp` replays the
+/// read through a reconnect; everything else goes through the bounded head-read.
+async fn read_one_file_any(sess: &Arc<Session>, path: &str) -> Result<Value> {
+    guard_fetch_size(sess, path).await?;
+    let mut buf = crate::preview::read_head(Some(sess), path, MAX_READ_FILE as u64 + 1).await?;
+    let truncated = buf.len() > MAX_READ_FILE;
+    buf.truncate(MAX_READ_FILE);
+    Ok(json!({
+        "path": path,
+        "content": String::from_utf8_lossy(&buf).to_string(),
+        "bytes": buf.len(),
+        "truncated": truncated,
+    }))
+}
+
 /// Read multiple text files in one call. Total output is capped to avoid
 /// ballooning the response. Each file result includes its own truncated flag.
 pub(crate) async fn op_read_file_batch(
@@ -2528,13 +2828,10 @@ pub(crate) async fn op_read_file_batch(
     paths: Vec<String>,
 ) -> (u16, Value) {
     let manager = app.state::<AppState>().sessions.clone();
-    let Some(ssh) = manager.get_ssh(session_id).await else {
-        return (
-            400,
-            json!({"error": "read_files_batch is SSH-only — on a Faro Agent machine read files one at a time with read_file; use download for other protocols"}),
-        );
+    let Some(sess) = manager.get(session_id).await else {
+        return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
     };
-    let name = ssh.profile.name.clone();
+    let name = sess.profile().name.clone();
     if paths.is_empty() {
         return (400, json!({"error": "paths array is required"}));
     }
@@ -2559,7 +2856,11 @@ pub(crate) async fn op_read_file_batch(
     let mut files = Vec::new();
     let mut total_bytes: usize = 0;
     for path in paths {
-        match read_one_file(&ssh, &path).await {
+        let read = match &*sess {
+            Session::Ssh(ssh) => read_one_file(ssh, &path).await,
+            _ => read_one_file_any(&sess, &path).await,
+        };
+        match read {
             Ok(mut v) => {
                 let bytes = v.get("bytes").and_then(|b| b.as_u64()).unwrap_or(0) as usize;
                 total_bytes += bytes;
@@ -2859,8 +3160,64 @@ async fn op_download(
     }
 }
 
-/// Write `bytes` to `remote_path` on an SSH server (SFTP create) or a paired
-/// agent (`WriteChunk`). Gated as a Write — never auto-approved except by
+/// Split a remote path into (parent directory, file name). A bare name lives in
+/// the session's working directory, which every backend spells `.`.
+fn split_parent(path: &str) -> (String, String) {
+    match path.trim_end_matches('/').rfind('/') {
+        Some(0) => ("/".to_string(), path[1..].to_string()),
+        Some(i) => (path[..i].to_string(), path[i + 1..].to_string()),
+        None => (".".to_string(), path.to_string()),
+    }
+}
+
+/// Refuse to write over something that's already there. Backends differ wildly
+/// in how (and whether) they stat a single path, but every one of them lists a
+/// directory — so ask the parent. A listing that fails is reported as such
+/// rather than assumed empty: "I couldn't check" must not read as "it's free".
+async fn ensure_absent(sess: &Arc<Session>, path: &str) -> Result<()> {
+    let (dir, name) = split_parent(path);
+    let fs = crate::commands::fs_for_session(sess);
+    let entries = fs.list_dir(&dir).await.with_context(|| {
+        format!("checking whether {path} already exists; pass overwrite to write without checking")
+    })?;
+    if entries.iter().any(|e| e.name == name) {
+        anyhow::bail!("{path} already exists; pass overwrite to replace it");
+    }
+    Ok(())
+}
+
+/// `write` for backends with no direct write primitive: stage the bytes locally,
+/// then upload them onto `remote_path` in place and clean the scratch file up.
+async fn write_via_upload(
+    sess: &Arc<Session>,
+    remote_path: &str,
+    bytes: &[u8],
+    overwrite: bool,
+) -> Result<()> {
+    if !overwrite {
+        ensure_absent(sess, remote_path).await?;
+    }
+    let (_, name) = split_parent(remote_path);
+    let dir = std::env::temp_dir()
+        .join("faro-agent-writes")
+        .join(Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&dir).context("create scratch dir for write")?;
+    let local = dir.join(if name.is_empty() { "file".into() } else { name });
+    let staged = std::fs::write(&local, bytes)
+        .with_context(|| format!("stage {} bytes for write", bytes.len()));
+    let result = match staged {
+        Ok(()) => crate::editor::upload_from(sess, &local.to_string_lossy(), remote_path)
+            .await
+            .map(|_| ()),
+        Err(e) => Err(e),
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+/// Write `bytes` to `remote_path` on an SSH server (SFTP create), a paired
+/// agent (`WriteChunk`), or any other backend (staged in-place upload).
+/// Gated as a Write — never auto-approved except by
 /// allow-all. Refuses to clobber an existing file unless `overwrite`. This is the
 /// engine behind `/write`, `faro_write` and `faro-cli agent write` (Plan 10
 /// Phase 2). Content is bounded by the bridge's 1 MiB request-body cap — for
@@ -2878,16 +3235,12 @@ async fn op_write(
     use tokio::io::AsyncWriteExt;
 
     let manager = app.state::<AppState>().sessions.clone();
-    let (session_name, is_agent) = if let Some(ssh) = manager.get_ssh(session_id).await {
-        (ssh.profile.name.clone(), false)
-    } else if let Some(agent) = manager.get_agent(session_id).await {
-        (agent.profile.name.clone(), true)
-    } else {
-        return (
-            400,
-            json!({"error": "writing text works on SSH/SFTP and Faro Agent connections only; use upload for other protocols."}),
-        );
+    let Some(sess) = manager.get(session_id).await else {
+        return (400, json!({"error": "no enabled connection matches that id or name. Call faro_context or faro_list_sessions to see what's available, and make sure the connection has granted agent access."}));
     };
+    let session_name = sess.profile().name.clone();
+    let is_agent = matches!(&*sess, Session::Agent(_));
+    let is_ssh = matches!(&*sess, Session::Ssh(_));
 
     if let Err(resp) = gate(
         app,
@@ -2940,7 +3293,7 @@ async fn op_write(
             }
         }
         .await
-    } else {
+    } else if is_ssh {
         let Some(ssh) = manager.get_ssh(session_id).await else {
             return (400, json!({"error": "session went away"}));
         };
@@ -2960,6 +3313,12 @@ async fn op_write(
             Ok(())
         }
         .await
+    } else {
+        // Every other backend: stage the bytes in a scratch file and push them
+        // through the same in-place upload that edit-in-place saves use, so a
+        // write lands ON the target path — no `_1` twin, which is what made
+        // "replace this file" impossible over FTP without the desktop UI.
+        write_via_upload(&sess, remote_path, bytes, overwrite).await
     };
 
     match result {
@@ -2989,12 +3348,18 @@ async fn op_write(
     }
 }
 
+/// Upload one local file into a remote directory. `overwrite` picks the policy:
+/// off (the default) renames around an existing file — `shell.php` lands as
+/// `shell_1.php` — which is the safe choice for "put this file there" but the
+/// wrong one for "replace that file", where the rename silently leaves the
+/// original in place. Say `overwrite` and the existing file is replaced.
 async fn op_upload(
     app: &AppHandle,
     state: &Arc<BridgeState>,
     session_id: &str,
     local_path: &str,
     remote_dir: &str,
+    overwrite: bool,
 ) -> (u16, Value) {
     let manager = app.state::<AppState>().sessions.clone();
     let Some(sess) = manager.get(session_id).await else {
@@ -3008,7 +3373,10 @@ async fn op_upload(
         &name,
         OpClass::Write,
         "upload",
-        &format!("upload {local_path} → {remote_dir}"),
+        &format!(
+            "upload {local_path} → {remote_dir}{}",
+            if overwrite { " (replacing any file of the same name)" } else { "" }
+        ),
         None,
     )
     .await
@@ -3021,7 +3389,7 @@ async fn op_upload(
             sess.clone(),
             local_path.to_string(),
             remote_dir.to_string(),
-            OverwritePolicy::Rename,
+            if overwrite { OverwritePolicy::Overwrite } else { OverwritePolicy::Rename },
             app.clone(),
         )
         .await
@@ -3748,6 +4116,104 @@ async fn op_diff(
             },
             "entries": entries,
             "listTruncated": list_truncated,
+        }),
+    )
+}
+
+const DEDUPE_MAX_GROUPS: usize = 200;
+
+/// Find duplicate files in one tree on a connected server — the `name_1.ext`
+/// copies Faro's rename-on-conflict policy creates, or (with `hash`) exact
+/// content duplicates anywhere in the tree. Read-only: gated ONCE as a READ —
+/// it walks (and, with `hash`, reads) but never mutates. Returns the groups
+/// with a suggested `keep` index each; deleting the rest is the caller's
+/// explicit follow-up (e.g. `faro_exec` `rm`, or the GUI's dedupe panel).
+async fn op_dedupe(
+    app: &AppHandle,
+    state: &Arc<BridgeState>,
+    session_arg: Option<&str>,
+    path: &str,
+    hash: bool,
+) -> (u16, Value) {
+    if path.is_empty() {
+        return (400, json!({"error": "path is required"}));
+    }
+    let side = match resolve_diff_side(app, state, session_arg).await {
+        Ok(v) => v,
+        Err(msg) => return (400, json!({ "error": msg })),
+    };
+    let Some((gate_id, gate_name, sess)) = side else {
+        return (400, json!({"error": "faro_dedupe needs a connected server (a local-only scan has no session to authorize); use the `faro-cli dedupe` command for local folders."}));
+    };
+    let summary_text = format!(
+        "Dedupe scan of {gate_name}:{path}{}",
+        if hash { " (hashing content)" } else { "" }
+    );
+    if let Err(resp) = gate(
+        app,
+        state,
+        &gate_id,
+        &gate_name,
+        OpClass::Read,
+        "dedupe",
+        &summary_text,
+        None,
+    )
+    .await
+    {
+        return resp;
+    }
+
+    let fs = crate::commands::fs_for_session(&sess);
+    let mode = if hash {
+        crate::dedupe::DedupeMode::Hash
+    } else {
+        crate::dedupe::DedupeMode::Name
+    };
+    let result =
+        match crate::dedupe::find_duplicates(fs.as_ref(), path, Some(sess.as_ref()), mode).await {
+            Ok(r) => r,
+            Err(e) => {
+                state
+                    .log(app, activity("error", &gate_id, format!("{summary_text} — {e}"), false))
+                    .await;
+                return (500, json!({"error": format!("{e:#}")}));
+            }
+        };
+
+    let s = &result.summary;
+    state
+        .log(
+            app,
+            activity(
+                "dedupe",
+                &gate_id,
+                format!(
+                    "{summary_text} — {} groups, {} duplicates, {} B reclaimable",
+                    s.groups, s.duplicate_files, s.wasted_bytes
+                ),
+                true,
+            ),
+        )
+        .await;
+
+    let groups_truncated = result.groups.len() > DEDUPE_MAX_GROUPS;
+    let groups: Vec<Value> = result
+        .groups
+        .iter()
+        .take(DEDUPE_MAX_GROUPS)
+        .filter_map(|g| serde_json::to_value(g).ok())
+        .collect();
+
+    (
+        200,
+        json!({
+            "root": result.root,
+            "mode": result.mode,
+            "summary": result.summary,
+            "groups": groups,
+            "groupsTruncated": groups_truncated,
+            "note": "Read-only — nothing was deleted. To clean up, review each group and delete every file except the `keep` index (a suggestion: the unsuffixed name, else the oldest copy).",
         }),
     )
 }
@@ -4645,7 +5111,7 @@ async fn mcp_tools_list(state: &Arc<BridgeState>) -> Value {
             },
             {
                 "name": "faro_read_file",
-                "description": "Read a text file on the user's connected server (SSH/SFTP or a paired Faro Agent machine). Output is capped at 256 KiB; check the `truncated` flag.",
+                "description": "Read a text file on the user's connected server. Works on ANY protocol — SSH/SFTP and paired Faro Agent machines read it in place; FTP/FTPS, S3/Azure, WebDAV, Dropbox/OneDrive/Drive/Box and the SaaS backends fetch the head of the file over the wire, so there is no need to download first. Output is capped at 256 KiB; check the `truncated` flag.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -4678,7 +5144,7 @@ async fn mcp_tools_list(state: &Arc<BridgeState>) -> Value {
             },
             {
                 "name": "faro_read_files_batch",
-                "description": "Read several text files from a connected SSH/SFTP server in one call. SSH-only — on a Faro Agent machine read files one at a time with faro_read_file. Each file is capped at 256 KiB and the total response is capped at 1 MiB. Returns an array of file objects; entries that fail to read include an `error` field instead of `content`.",
+                "description": "Read several text files from a connected server in one call. Works on ANY protocol. Each file is capped at 256 KiB and the total response is capped at 1 MiB. Returns an array of file objects; entries that fail to read include an `error` field instead of `content`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -4733,12 +5199,13 @@ async fn mcp_tools_list(state: &Arc<BridgeState>) -> Value {
             },
             {
                 "name": "faro_upload",
-                "description": "Upload a local file to a directory on the user's connected server via Faro's transfer engine. Returns a transferId.",
+                "description": "Upload a local file to a directory on the user's connected server via Faro's transfer engine. Returns a transferId. By default a name collision is RENAMED (uploading shell.php next to an existing shell.php lands as shell_1.php, leaving the original untouched) — when the point is to REPLACE the remote file, set overwrite=true.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "localPath": { "type": "string", "description": "Path to the local file to upload." },
                         "remoteDir": { "type": "string", "description": "Remote destination directory." },
+                        "overwrite": { "type": "boolean", "description": "Replace an existing remote file of the same name. Default false (renames to name_1)." },
                         "session": session_prop
                     },
                     "required": ["localPath", "remoteDir"],
@@ -4746,8 +5213,49 @@ async fn mcp_tools_list(state: &Arc<BridgeState>) -> Value {
                 }
             },
             {
+                "name": "faro_delete",
+                "description": "Delete a file or directory on the user's connected server. Works on ANY protocol (SSH/SFTP, FTP, S3/Azure, WebDAV, cloud drives, Faro Agent) — you do NOT need a shell, and you should never ask the user to delete a file by hand in a file manager. Directories need recursive=true. Destructive and irreversible: the user approves it in Faro (never auto-approved except by allow-all) and the prompt shows the exact path. When the file might still be wanted (suspected malware, a config you're replacing), prefer faro_rename to move it aside instead.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Remote path to delete." },
+                        "recursive": { "type": "boolean", "description": "Required to delete a directory: removes everything inside it. Default false." },
+                        "session": session_prop
+                    },
+                    "required": ["path"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "faro_rename",
+                "description": "Rename or move a file/directory on the user's connected server (same connection, server-side — no download/upload round trip). Works on any protocol that supports rename. Use it to move a suspicious file out of the web root, to stage a replacement, or to keep a backup before overwriting. Approved as a write in Faro.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "from": { "type": "string", "description": "Existing remote path." },
+                        "to": { "type": "string", "description": "New remote path (including the new name)." },
+                        "session": session_prop
+                    },
+                    "required": ["from", "to"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "faro_mkdir",
+                "description": "Create a directory on the user's connected server. One level only — the parent must already exist. Works on any protocol with directories. Approved as a write in Faro.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Remote directory path to create." },
+                        "session": session_prop
+                    },
+                    "required": ["path"],
+                    "additionalProperties": false
+                }
+            },
+            {
                 "name": "faro_write",
-                "description": "Write text straight into a file on the user's connected SSH server or paired Faro Agent machine — no local staging file, no upload. Use this to drop a small debug script, a config snippet, or a one-file patch directly on the server (SSH streams it via SFTP; a Faro Agent via a ranged write). By default it will NOT overwrite an existing file — set overwrite=true to replace. Approved as a write in Faro (never auto-approved except by allow-all). Content is bounded by a ~1 MiB request cap; for larger files use faro_upload. Returns the path and bytes written.",
+                "description": "Write text straight into a file on the user's connected server — ANY protocol, no local staging file, no upload step. Use this to drop a small debug script, a config snippet, or a one-file patch directly on the server, and to REPLACE a file's contents in place (SSH streams it via SFTP, a Faro Agent via a ranged write, FTP/S3/WebDAV/cloud via an in-place upload). By default it will NOT overwrite an existing file — set overwrite=true to replace. Prefer this over faro_upload when replacing an existing remote file: upload renames around a collision, write replaces. Approved as a write in Faro (never auto-approved except by allow-all). Content is bounded by a ~1 MiB request cap; for larger files use faro_upload. Returns the path and bytes written.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -4805,6 +5313,20 @@ async fn mcp_tools_list(state: &Arc<BridgeState>) -> Value {
                         "hash": { "type": "boolean", "description": "Confirm same-size files by content hash (sha256). Default false (size only)." }
                     },
                     "required": ["pathA", "pathB"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "faro_dedupe",
+                "description": "Find duplicate files in one directory tree on a connected server — including the `name_1.ext` copies Faro's rename-on-conflict policy creates when uploading/downloading over existing files. Two modes: by default it groups files in the same folder whose names collapse to the same stem once copy suffixes (`_1`, ` (1)`, ` - copy`) are stripped AND whose sizes match (cheap, metadata only — no download); with hash=true it instead content-hashes every same-size file in the tree (sha256, server-side over SSH where possible) and groups by digest — slower, but catches exact duplicates with unrelated names anywhere in the tree. Read-only and gated as a read: it never deletes anything. Returns a summary (groups, duplicateFiles, wastedBytes) and the groups; each group lists its files plus a suggested `keep` index (the unsuffixed name, else the oldest copy). To clean up, review the groups and delete the non-keeper files yourself — the user approves deletions separately, so always show them what you plan to remove first.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session": { "type": "string", "description": "The connection (name or id) to scan." },
+                        "path": { "type": "string", "description": "Directory path to scan for duplicates." },
+                        "hash": { "type": "boolean", "description": "Group by content hash (sha256) instead of name+size. Default false." }
+                    },
+                    "required": ["session", "path"],
                     "additionalProperties": false
                 }
             },
@@ -5224,8 +5746,39 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
             else {
                 return tool_error("`localPath` and `remoteDir` are required");
             };
+            let overwrite = args.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
             match resolve_session(app, state, session_arg, SessionNeed::Any).await {
-                Ok(id) => mcp_wrap(op_upload(app, state, &id, &local_path, &remote_dir).await),
+                Ok(id) => {
+                    mcp_wrap(op_upload(app, state, &id, &local_path, &remote_dir, overwrite).await)
+                }
+                Err(msg) => tool_error(&msg),
+            }
+        }
+        "faro_delete" => {
+            let Some(path) = arg_str(&args, "path") else {
+                return tool_error("`path` is required");
+            };
+            let recursive = args.get("recursive").and_then(|v| v.as_bool()).unwrap_or(false);
+            match resolve_session(app, state, session_arg, SessionNeed::Any).await {
+                Ok(id) => mcp_wrap(op_delete(app, state, &id, &path, recursive).await),
+                Err(msg) => tool_error(&msg),
+            }
+        }
+        "faro_rename" => {
+            let (Some(from), Some(to)) = (arg_str(&args, "from"), arg_str(&args, "to")) else {
+                return tool_error("`from` and `to` are required");
+            };
+            match resolve_session(app, state, session_arg, SessionNeed::Any).await {
+                Ok(id) => mcp_wrap(op_rename(app, state, &id, &from, &to).await),
+                Err(msg) => tool_error(&msg),
+            }
+        }
+        "faro_mkdir" => {
+            let Some(path) = arg_str(&args, "path") else {
+                return tool_error("`path` is required");
+            };
+            match resolve_session(app, state, session_arg, SessionNeed::Any).await {
+                Ok(id) => mcp_wrap(op_mkdir(app, state, &id, &path).await),
                 Err(msg) => tool_error(&msg),
             }
         }
@@ -5235,8 +5788,9 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 return tool_error("`path` and `content` are required");
             };
             let overwrite = args.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false);
-            // Write targets SSH + Faro Agent (SFTP create / WriteChunk).
-            match resolve_session(app, state, session_arg, SessionNeed::Exec).await {
+            // SSH writes via SFTP, a Faro Agent via WriteChunk, everything else
+            // through a staged in-place upload — so any protocol qualifies.
+            match resolve_session(app, state, session_arg, SessionNeed::Any).await {
                 Ok(id) => mcp_wrap(op_write(app, state, &id, &path, content.as_bytes(), overwrite).await),
                 Err(msg) => tool_error(&msg),
             }
@@ -5301,6 +5855,13 @@ async fn mcp_tools_call(app: &AppHandle, state: &Arc<BridgeState>, params: &Valu
                 )
                 .await,
             )
+        }
+        "faro_dedupe" => {
+            let Some(path) = arg_str(&args, "path") else {
+                return tool_error("`path` is required");
+            };
+            let hash = args.get("hash").and_then(|v| v.as_bool()).unwrap_or(false);
+            mcp_wrap(op_dedupe(app, state, session_arg, &path, hash).await)
         }
         "faro_transfer_status" => {
             let Some(transfer_id) = arg_str(&args, "transferId") else {

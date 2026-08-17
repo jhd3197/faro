@@ -123,6 +123,30 @@ enum Cmd {
         all: bool,
     },
 
+    /// Find duplicate files in one tree — the `name_1.ext` copies Faro's
+    /// rename-on-conflict creates, or (with --hash) exact content duplicates.
+    ///
+    /// The target is `profile:/path`, `local:/path`, or a plain local path.
+    /// Read-only unless --delete is passed (keeps the unsuffixed/oldest file
+    /// per group, deletes the rest — requires --yes).
+    Dedupe {
+        /// Target: `profile:/path`, `local:/path`, or a local path.
+        target: String,
+        /// Group by content hash (sha256) instead of name — catches duplicates
+        /// with unrelated names, anywhere in the tree. Slower: reads files.
+        #[arg(long)]
+        hash: bool,
+        /// Emit the raw JSON result.
+        #[arg(long)]
+        json: bool,
+        /// Delete the duplicates (every non-keeper in each group).
+        #[arg(long)]
+        delete: bool,
+        /// Confirm the deletion (required together with --delete).
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Search a directory tree by file name or by content (grep).
     ///
     /// The target is `profile:/path` (a saved profile) or a local path. Name
@@ -364,9 +388,9 @@ enum AgentCmd {
         /// Remote directory (default: ".").
         path: Option<String>,
     },
-    /// Read a remote text file (SSH/SFTP, capped at 256 KiB).
+    /// Read a remote text file (any protocol, capped at 256 KiB).
     Read { server: String, path: String },
-    /// Read several remote text files at once (SSH/SFTP, total capped at 1 MiB).
+    /// Read several remote text files at once (any protocol, total capped at 1 MiB).
     ReadBatch {
         server: String,
         /// Remote file paths. Pass multiple times or space-separated.
@@ -442,11 +466,35 @@ enum AgentCmd {
         local_dir: Option<String>,
     },
     /// Upload a local file into a remote directory.
+    ///
+    /// A name collision is RENAMED by default (uploading `x.php` next to an
+    /// existing `x.php` lands as `x_1.php`, leaving the original in place). To
+    /// REPLACE the remote file, pass `--overwrite` — or use `agent write` for
+    /// text you can pass inline.
     Upload {
         server: String,
         local_path: String,
         remote_dir: String,
+        /// Replace an existing remote file of the same name (default: rename).
+        #[arg(long)]
+        overwrite: bool,
     },
+    /// Delete a remote file or directory (any protocol).
+    Rm {
+        server: String,
+        path: String,
+        /// Required to delete a directory: removes everything inside it.
+        #[arg(long, short)]
+        recursive: bool,
+    },
+    /// Rename or move a remote path, server-side (any protocol that supports it).
+    Mv {
+        server: String,
+        from: String,
+        to: String,
+    },
+    /// Create a remote directory (one level; the parent must exist).
+    Mkdir { server: String, path: String },
     /// Upload a whole local directory tree into a remote directory. One
     /// approval covers the tree; the prompt shows file/byte counts.
     UploadDir {
@@ -541,8 +589,22 @@ enum Dir {
     Pull,
 }
 
+// clap's derive builds the whole subcommand graph (every `Cmd`/`AgentCmd`
+// variant) via nested generic calls; in debug builds that recursion now
+// overflows the Windows main thread's default 1 MiB stack, so run on a thread
+// with headroom.
+fn main() {
+    std::thread::Builder::new()
+        .name("faro-cli-main".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(async_main)
+        .expect("spawn faro-cli main thread")
+        .join()
+        .expect("join faro-cli main thread");
+}
+
 #[tokio::main]
-async fn main() {
+async fn async_main() {
     let cli = Cli::parse();
     if let Err(e) = run(cli).await {
         eprintln!("\x1b[31merror:\x1b[0m {e:#}");
@@ -568,6 +630,9 @@ async fn run(cli: Cli) -> Result<()> {
             dry_run,
         } => cmd_sync(&store, &local, &remote, direction, mirror, dry_run).await,
         Cmd::Diff { a, b, hash, json, all } => cmd_diff(&store, &a, &b, hash, json, all).await,
+        Cmd::Dedupe { target, hash, json, delete, yes } => {
+            cmd_dedupe(&store, &target, hash, json, delete, yes).await
+        }
         Cmd::Search {
             target,
             pattern,
@@ -1234,6 +1299,130 @@ fn print_diff_human(result: &faro_lib::diff::DiffResult, all: bool) {
     );
 }
 
+// ---- Duplicate finder --------------------------------------------------
+
+async fn cmd_dedupe(
+    store: &ProfileStore,
+    target: &str,
+    hash: bool,
+    json: bool,
+    delete: bool,
+    yes: bool,
+) -> Result<()> {
+    use faro_lib::dedupe::{self, DedupeMode};
+
+    if delete && !yes {
+        anyhow::bail!("--delete permanently removes files; pass --yes to confirm");
+    }
+
+    // Resolve the target to a RemoteFs + optional live session (local = None).
+    // parse_diff_target also honors the explicit `local:` prefix.
+    let (fs, session, root): (Box<dyn RemoteFs>, Option<Session>, String) = match parse_diff_target(target) {
+        Target::Local(p) => (Box::new(faro_lib::remotefs::local::LocalFs), None, p),
+        Target::Remote { profile_name, path } => {
+            let profile = find_profile(store, &profile_name).await?;
+            let session = open_session(&profile).await?;
+            let root = path.clone();
+            (fs_for(&session), Some(session), root)
+        }
+    };
+
+    let mode = if hash { DedupeMode::Hash } else { DedupeMode::Name };
+    if !json {
+        eprintln!(
+            "{}",
+            dim(&format!(
+                "Scanning {} for duplicates{}…",
+                root,
+                if hash { " (hashing content)" } else { "" }
+            ))
+        );
+    }
+
+    let result = dedupe::find_duplicates(fs.as_ref(), &root, session.as_ref(), mode).await?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        print_dedupe_human(&result);
+    }
+
+    if delete {
+        let paths = dedupe::duplicate_paths(&result);
+        if paths.is_empty() {
+            eprintln!("Nothing to delete.");
+            return Ok(());
+        }
+        let mut failed = 0usize;
+        for p in &paths {
+            match fs.delete(p, false).await {
+                Ok(()) => {
+                    if !json {
+                        println!("{}", dim(&format!("deleted  {p}")));
+                    }
+                }
+                Err(e) => {
+                    failed += 1;
+                    eprintln!("failed   {p}: {e}");
+                }
+            }
+        }
+        eprintln!(
+            "{}",
+            dim(&format!(
+                "Deleted {} of {} duplicates{}.",
+                paths.len() - failed,
+                paths.len(),
+                if failed > 0 { format!(" ({failed} failed)") } else { String::new() }
+            ))
+        );
+        if failed > 0 {
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+fn print_dedupe_human(result: &faro_lib::dedupe::DedupeResult) {
+    if result.groups.is_empty() {
+        eprintln!("No duplicates found.");
+    }
+    for g in &result.groups {
+        let wasted = g.size * (g.files.len() - 1) as u64;
+        println!(
+            "\x1b[33mgroup\x1b[0m  {}  {}",
+            g.key,
+            dim(&format!(
+                "({} files · {} each · {} wasted)",
+                g.files.len(),
+                fmt_bytes(g.size),
+                fmt_bytes(wasted)
+            ))
+        );
+        for (i, f) in g.files.iter().enumerate() {
+            if i == g.keep {
+                println!("\x1b[32m  keep\x1b[0m  {}", f.path);
+            } else {
+                println!("  \x1b[31mdup\x1b[0m   {}", f.path);
+            }
+        }
+    }
+    let s = &result.summary;
+    eprintln!(
+        "\n{}",
+        dim(&format!(
+            "{} groups · {} duplicates · {} wasted · {} files scanned{}{}",
+            s.groups,
+            s.duplicate_files,
+            fmt_bytes(s.wasted_bytes),
+            s.files_scanned,
+            if result.mode == faro_lib::dedupe::DedupeMode::Hash { " · hashed" } else { "" },
+            if s.hash_errors > 0 { format!(" · {} hash errors", s.hash_errors) } else { String::new() }
+        ))
+    );
+}
+
 // ---- Fleet search ------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
@@ -1840,9 +2029,27 @@ fn guard_mangled_remote_path(ep: &Endpoint, session_id: &str, remote_path: &str)
     check_mangled_remote_path(remote_path, is_windows_target)
 }
 
+/// True when `p` is a drive letter whose separator went missing — `C:UsersJuan`.
+/// That is what an unquoted `C:\Users\Juan` becomes in bash/zsh, where each
+/// backslash escapes the character after it. Windows reads the result as a
+/// *drive-relative* path, so it resolves against the daemon's working directory
+/// instead of failing — the upload lands somewhere real but wrong, silently.
+fn is_collapsed_windows_path(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] != b'/' && b[2] != b'\\'
+}
+
 /// Pure decision behind [`guard_mangled_remote_path`], split out so the
 /// reject/allow rule and its message are unit-testable without a live bridge.
 fn check_mangled_remote_path(remote_path: &str, is_windows_target: bool) -> Result<()> {
+    if is_collapsed_windows_path(remote_path) {
+        bail!(
+            "`{remote_path}` is missing its path separators — your shell ate the backslashes \
+             (in bash, `C:\\Users\\Juan` collapses to `C:UsersJuan`). Windows would resolve that \
+             against the server's current directory and put the file somewhere you didn't mean. \
+             Use forward slashes (`C:/Users/Juan`) or single-quote the path ('C:\\Users\\Juan')."
+        );
+    }
     if !is_windows_drive_path(remote_path) || is_windows_target {
         return Ok(());
     }
@@ -2182,15 +2389,50 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             println!("wrote {} to {p}", fmt_bytes(n));
             Ok(())
         }
-        AgentCmd::Upload { server, local_path, remote_dir } => {
+        AgentCmd::Upload { server, local_path, remote_dir, overwrite } => {
             let id = resolve_server(&ep, &server)?;
             guard_mangled_remote_path(&ep, &id, &remote_dir)?;
             let body = http_post(
                 &ep,
                 "/upload",
-                serde_json::json!({ "sessionId": id, "localPath": local_path, "remoteDir": remote_dir }),
+                serde_json::json!({
+                    "sessionId": id,
+                    "localPath": local_path,
+                    "remoteDir": remote_dir,
+                    "overwrite": overwrite,
+                }),
             )?;
             print_transfer_started(&body);
+            Ok(())
+        }
+        AgentCmd::Rm { server, path, recursive } => {
+            let id = resolve_server(&ep, &server)?;
+            guard_mangled_remote_path(&ep, &id, &path)?;
+            http_post(
+                &ep,
+                "/delete",
+                serde_json::json!({ "sessionId": id, "path": &path, "recursive": recursive }),
+            )?;
+            println!("deleted {path}");
+            Ok(())
+        }
+        AgentCmd::Mv { server, from, to } => {
+            let id = resolve_server(&ep, &server)?;
+            guard_mangled_remote_path(&ep, &id, &from)?;
+            guard_mangled_remote_path(&ep, &id, &to)?;
+            http_post(
+                &ep,
+                "/rename",
+                serde_json::json!({ "sessionId": id, "from": &from, "to": &to }),
+            )?;
+            println!("renamed {from} → {to}");
+            Ok(())
+        }
+        AgentCmd::Mkdir { server, path } => {
+            let id = resolve_server(&ep, &server)?;
+            guard_mangled_remote_path(&ep, &id, &path)?;
+            http_post(&ep, "/mkdir", serde_json::json!({ "sessionId": id, "path": &path }))?;
+            println!("created {path}");
             Ok(())
         }
         AgentCmd::UploadDir { server, local_dir, remote_dir, overwrite } => {
@@ -3046,6 +3288,22 @@ mod tests {
         // A normal POSIX remote path is always fine, target OS regardless.
         assert!(check_mangled_remote_path("/var/www/html", false).is_ok());
         assert!(check_mangled_remote_path("//var/www", false).is_ok());
+    }
+
+    #[test]
+    fn collapsed_windows_path_is_rejected_on_any_target() {
+        // `C:\Users\Juan` unquoted in bash arrives like this; Windows would
+        // resolve it drive-relative and drop the file in the wrong directory.
+        for target_is_windows in [true, false] {
+            let err = check_mangled_remote_path("C:UsersJuan", target_is_windows)
+                .expect_err("collapsed drive path should be rejected");
+            assert!(format!("{err}").contains("missing its path separators"));
+        }
+        // Properly separated drive paths are still fine on a Windows target.
+        assert!(check_mangled_remote_path(r"C:\Users\Juan", true).is_ok());
+        assert!(check_mangled_remote_path("C:/Users/Juan", true).is_ok());
+        // A bare relative path has no drive letter to collapse.
+        assert!(check_mangled_remote_path("public_html/wp-content", false).is_ok());
     }
 
     #[test]

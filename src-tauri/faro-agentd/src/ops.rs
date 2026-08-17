@@ -33,9 +33,11 @@ pub async fn handle(req: Request, policy: Policy, jobs: &JobStore) -> Response {
         Request::Stat { path } => stat(&path).await,
         Request::ReadFile { path, max_bytes } => read_file(&path, max_bytes).await,
         Request::ReadChunk { path, offset, len } => read_chunk(&path, offset, len).await,
+        Request::Signature { path } => signature(&path).await,
 
         // --- writes (gated) ---
         Request::WriteChunk { .. }
+        | Request::DeltaAssemble { .. }
         | Request::Delete { .. }
         | Request::CreateDir { .. }
         | Request::Rename { .. }
@@ -46,6 +48,9 @@ pub async fn handle(req: Request, policy: Policy, jobs: &JobStore) -> Response {
         }
         Request::WriteChunk { path, offset, data, truncate, done } => {
             write_chunk(&path, offset, &data, truncate, done).await
+        }
+        Request::DeltaAssemble { basis, patch, recipe, dest, expected_hash } => {
+            delta_assemble(basis, patch, recipe, dest, expected_hash).await
         }
         Request::Delete { path, recursive } => delete(&path, recursive).await,
         Request::CreateDir { path } => create_dir(&path).await,
@@ -325,6 +330,110 @@ async fn write_chunk(path: &str, offset: u64, data_b64: &str, truncate: bool, _d
     Response::Written { bytes: data.len() as u64 }
 }
 
+/// Upper bound on a [`Request::DeltaAssemble`] recipe — far above any honest
+/// plan (~one op per 256 KiB chunk, so 4M ops ≈ 1 TiB of output), this only
+/// exists to stop a hostile controller from making the daemon chew on an
+/// unbounded recipe.
+const MAX_RECIPE_OPS: usize = 4_000_000;
+
+/// Compute a file's chunk signature for delta sync. Read-only; a missing or
+/// oversized file is an ordinary error (the controller then does a whole-file
+/// copy). Chunking + hashing is CPU-bound, so it runs off the async runtime.
+async fn signature(path: &str) -> Response {
+    let path = path.to_string();
+    match tokio::task::spawn_blocking(move || {
+        faro_agent_proto::delta::signature_of_file(Path::new(&path))
+    })
+    .await
+    {
+        Ok(Ok(sig)) => Response::Signature {
+            size: sig.size,
+            min: sig.min,
+            avg: sig.avg,
+            max: sig.max,
+            chunks: sig.chunks,
+            whole_hash: sig.whole_hash,
+        },
+        Ok(Err(e)) => Response::error(format!("signature: {e:#}")),
+        Err(e) => Response::error(format!("signature task: {e}")),
+    }
+}
+
+/// Reassemble `dest` from `basis` + `patch` per `recipe` (delta sync, upload
+/// direction). The new content is written to a same-directory temp, fsynced
+/// and BLAKE3-verified by `apply_delta`, then atomically renamed over `dest` —
+/// `dest` is never partially modified. The patch temp is deleted best-effort
+/// on success; the controller deletes it on failure.
+async fn delta_assemble(
+    basis: Option<String>,
+    patch: String,
+    recipe: Vec<faro_agent_proto::delta::RecipeOp>,
+    dest: String,
+    expected_hash: String,
+) -> Response {
+    if recipe.len() > MAX_RECIPE_OPS {
+        return Response::error(format!(
+            "delta recipe too large: {} ops > {MAX_RECIPE_OPS}",
+            recipe.len()
+        ));
+    }
+    let bytes_reused: u64 = recipe
+        .iter()
+        .map(|op| match *op {
+            faro_agent_proto::delta::RecipeOp::Copy { len, .. } => len,
+            faro_agent_proto::delta::RecipeOp::Literal { .. } => 0,
+        })
+        .sum();
+    // Same-directory temp so the final rename is atomic. agentd has no uuid
+    // dep; pid + counter is unique enough per process.
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temp = format!(
+        "{dest}.faro-new-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    );
+
+    let applied = {
+        let basis = basis.clone();
+        let patch = patch.clone();
+        let temp = temp.clone();
+        tokio::task::spawn_blocking(move || {
+            faro_agent_proto::delta::apply_delta(
+                basis.as_deref().map(Path::new),
+                Path::new(&patch),
+                &recipe,
+                Path::new(&temp),
+                &expected_hash,
+            )
+        })
+        .await
+    };
+    match applied {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            let _ = tokio::fs::remove_file(&temp).await;
+            return Response::error(format!("delta assemble {dest}: {e:#}"));
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&temp).await;
+            return Response::error(format!("delta assemble task: {e}"));
+        }
+    }
+    let bytes_written = match tokio::fs::metadata(&temp).await {
+        Ok(md) => md.len(),
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&temp).await;
+            return Response::error(format!("stat assembled {dest}: {e}"));
+        }
+    };
+    if let Err(e) = tokio::fs::rename(&temp, &dest).await {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Response::error(format!("rename delta result over {dest}: {e}"));
+    }
+    let _ = tokio::fs::remove_file(&patch).await;
+    Response::DeltaDone { bytes_reused, bytes_written }
+}
+
 async fn delete(path: &str, recursive: bool) -> Response {
     let meta = match tokio::fs::symlink_metadata(path).await {
         Ok(m) => m,
@@ -449,6 +558,217 @@ pub(crate) fn build_command(command: &str) -> tokio::process::Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use faro_agent_proto::delta::{self, FileSignature};
+
+    fn write_all_policy() -> Policy {
+        Policy { allow_exec: true, allow_write: true }
+    }
+
+    /// Drive `Request::Signature` and rebuild the engine-side signature struct.
+    async fn request_signature(path: &Path) -> FileSignature {
+        let resp = handle(
+            Request::Signature { path: path.to_string_lossy().into_owned() },
+            write_all_policy(),
+            &JobStore::new(),
+        )
+        .await;
+        match resp {
+            Response::Signature { size, min, avg, max, chunks, whole_hash } => {
+                FileSignature { size, min, avg, max, chunks, whole_hash }
+            }
+            other => panic!("expected Signature response, got {other:?}"),
+        }
+    }
+
+    fn deterministic_bytes(seed: u64, n: usize) -> Vec<u8> {
+        let mut x = seed;
+        let mut out = Vec::with_capacity(n);
+        while out.len() < n {
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            out.extend_from_slice(&x.wrapping_mul(0x2545_F491_4F6C_DD1D).to_le_bytes());
+        }
+        out.truncate(n);
+        out
+    }
+
+    // Signature → (locally planned) patch+recipe → DeltaAssemble reassembles
+    // the new content over the old file and deletes the patch temp.
+    #[tokio::test]
+    async fn delta_round_trip_through_handlers() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("file.bin");
+        let old = deterministic_bytes(0x1111, 2 * 1024 * 1024);
+        std::fs::write(&dest, &old).unwrap();
+
+        let sig = request_signature(&dest).await;
+        assert_eq!(sig.size, old.len() as u64);
+        assert!(delta::params_match(&sig));
+
+        // Mutate: overwrite 4 KiB in the middle.
+        let mut new = old.clone();
+        new[1024 * 1024..1024 * 1024 + 4096]
+            .copy_from_slice(&deterministic_bytes(0x2222, 4096));
+
+        let new_file = dir.path().join("new.bin");
+        std::fs::write(&new_file, &new).unwrap();
+        let patch = dir.path().join("file.bin.faro-patch-test");
+        let plan = delta::plan_delta(&sig, &new_file, std::fs::File::create(&patch).unwrap())
+            .unwrap();
+        assert!(plan.literal_bytes * 10 < new.len() as u64, "small edit should be mostly reuse");
+
+        let resp = handle(
+            Request::DeltaAssemble {
+                basis: Some(dest.to_string_lossy().into_owned()),
+                patch: patch.to_string_lossy().into_owned(),
+                recipe: plan.recipe,
+                dest: dest.to_string_lossy().into_owned(),
+                expected_hash: plan.whole_hash,
+            },
+            write_all_policy(),
+            &JobStore::new(),
+        )
+        .await;
+
+        match resp {
+            Response::DeltaDone { bytes_reused, bytes_written } => {
+                assert_eq!(bytes_written, new.len() as u64);
+                assert!(bytes_reused > 0);
+            }
+            other => panic!("expected DeltaDone, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&dest).unwrap(), new);
+        assert!(!patch.exists(), "patch temp must be deleted on success");
+        // No assembly temp left behind either.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".faro-new-"))
+            .collect();
+        assert!(leftovers.is_empty(), "leftover temps: {leftovers:?}");
+    }
+
+    // A wrong expected_hash must leave the old content byte-identical and the
+    // temp deleted — the whole point of the assemble-then-verify design.
+    #[tokio::test]
+    async fn delta_assemble_hash_mismatch_keeps_old_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("file.bin");
+        let old = b"the original content stays put";
+        std::fs::write(&dest, old).unwrap();
+        let patch = dir.path().join("patch.bin");
+        std::fs::write(&patch, b"replacement bytes!").unwrap();
+
+        // Well-formed (base64 of 32 bytes) but not the hash of the recipe's
+        // output — apply_delta must refuse and leave dest alone.
+        let wrong_hash =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [7u8; 32]);
+        let resp = handle(
+            Request::DeltaAssemble {
+                basis: None,
+                patch: patch.to_string_lossy().into_owned(),
+                recipe: vec![faro_agent_proto::delta::RecipeOp::Literal { patch_offset: 0, len: 18 }],
+                dest: dest.to_string_lossy().into_owned(),
+                expected_hash: wrong_hash,
+            },
+            write_all_policy(),
+            &JobStore::new(),
+        )
+        .await;
+
+        match resp {
+            Response::Error { .. } => {}
+            other => panic!("expected Error, got {other:?}"),
+        }
+        assert_eq!(std::fs::read(&dest).unwrap(), old, "dest must be untouched");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".faro-new-"))
+            .collect();
+        assert!(leftovers.is_empty(), "partial temp must be deleted: {leftovers:?}");
+    }
+
+    // Write-gating: DeltaAssemble is refused under a read-only policy (like
+    // WriteChunk), while Signature — a read — is still served.
+    #[tokio::test]
+    async fn delta_assemble_write_gated_signature_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("file.bin");
+        std::fs::write(&dest, b"some bytes").unwrap();
+        let read_only = Policy { allow_exec: false, allow_write: false };
+
+        let resp = handle(
+            Request::DeltaAssemble {
+                basis: None,
+                patch: "p".into(),
+                recipe: vec![],
+                dest: dest.to_string_lossy().into_owned(),
+                expected_hash: "h".into(),
+            },
+            read_only,
+            &JobStore::new(),
+        )
+        .await;
+        match resp {
+            Response::Error { denied, .. } => assert!(denied, "must be a policy denial"),
+            other => panic!("expected denied Error, got {other:?}"),
+        }
+
+        match handle(
+            Request::Signature { path: dest.to_string_lossy().into_owned() },
+            read_only,
+            &JobStore::new(),
+        )
+        .await
+        {
+            Response::Signature { .. } => {}
+            other => panic!("expected Signature response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn signature_missing_file_errors() {
+        let resp = handle(
+            Request::Signature { path: "/no/such/file-anywhere.bin".into() },
+            write_all_policy(),
+            &JobStore::new(),
+        )
+        .await;
+        match resp {
+            Response::Error { denied, .. } => assert!(!denied, "operational error, not a denial"),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delta_assemble_rejects_hostile_recipe_size() {
+        // We can't allocate 4M ops cheaply in a test; instead assert the guard
+        // triggers by temporarily using a recipe built from many zero-len ops
+        // only if cheap — the guard is a simple length check, so exercise it
+        // via a direct call with a crafted oversize vector of cheap ops.
+        let recipe = vec![
+            faro_agent_proto::delta::RecipeOp::Literal { patch_offset: 0, len: 0 };
+            MAX_RECIPE_OPS + 1
+        ];
+        let resp = handle(
+            Request::DeltaAssemble {
+                basis: None,
+                patch: "p".into(),
+                recipe,
+                dest: "d".into(),
+                expected_hash: "h".into(),
+            },
+            write_all_policy(),
+            &JobStore::new(),
+        )
+        .await;
+        match resp {
+            Response::Error { message, .. } => assert!(message.contains("recipe too large")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
 
     // Plan 10 Phase 0e: the daemon must clamp to the SAME 15-min ceiling the
     // Agent Bridge accepts, so a `--timeout-ms 900000` isn't silently shortened.

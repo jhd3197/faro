@@ -516,8 +516,10 @@ async fn download_to(
     Ok(())
 }
 
-/// Upload a local file back to `remote_path`, returning the byte count.
-async fn upload_from(
+/// Upload a local file back to `remote_path`, returning the byte count. Writes
+/// in place (replacing whatever is at `remote_path`) on every backend — also the
+/// engine behind the Agent Bridge's `write` on protocols with no direct write op.
+pub(crate) async fn upload_from(
     session: &Session,
     local_path: &str,
     remote_path: &str,

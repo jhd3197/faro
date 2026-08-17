@@ -9,7 +9,11 @@
 //!   * [`secure`] — a Noise handshake ([`SecureChannel`]) with pairing + pinning.
 //!   * [`identity`] — persistent static keypairs + fingerprints.
 //!   * [`msg`] — the [`Request`]/[`Response`] operation set.
+//!
+//! Plus [`delta`] — the FastCDC/BLAKE3 block-level delta-sync engine shared by
+//! the app and the daemon so both run the identical chunking algorithm.
 
+pub mod delta;
 pub mod frame;
 pub mod identity;
 pub mod msg;

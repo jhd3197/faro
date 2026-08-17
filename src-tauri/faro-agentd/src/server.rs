@@ -295,6 +295,10 @@ fn describe(req: &Request) -> String {
         Request::ReadFile { path, .. } => format!("read {path}"),
         Request::ReadChunk { path, offset, .. } => format!("read-chunk {path}@{offset}"),
         Request::WriteChunk { path, offset, .. } => format!("write-chunk {path}@{offset}"),
+        Request::Signature { path } => format!("signature {path}"),
+        Request::DeltaAssemble { dest, recipe, .. } => {
+            format!("delta-assemble {dest} ({} ops)", recipe.len())
+        }
         Request::Delete { path, .. } => format!("delete {path}"),
         Request::CreateDir { path } => format!("mkdir {path}"),
         Request::Rename { from, to } => format!("rename {from} -> {to}"),

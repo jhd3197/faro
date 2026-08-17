@@ -299,11 +299,12 @@ must be on your PATH; if it isn't, the user can give you its full path.)
 
 ${savedBlock}## Browse / read / search
 
-Use these for everyday file and diagnostics work:
+Use these for everyday file and diagnostics work. They work on **every protocol**
+— SFTP, FTP/FTPS, S3, WebDAV, cloud drives, Faro Agent — not just SSH:
 
 \`\`\`bash
 faro-cli agent ls     ${S} /var/log
-faro-cli agent read   ${S} /etc/hostname       # SSH/SFTP, capped at 256 KiB
+faro-cli agent read   ${S} /etc/hostname       # any protocol, capped at 256 KiB
 faro-cli agent search ${S} ".log" /var/log     # search <server> <query> [path]
 faro-cli agent info   ${S}                      # protocol, host, port, …
 \`\`\`
@@ -312,9 +313,19 @@ faro-cli agent info   ${S}                      # protocol, host, port, …
 
 \`\`\`bash
 faro-cli agent download ${S} /etc/hosts         # → the user's Downloads folder
-faro-cli agent upload   ${S} ./a.txt /home/user # local file → remote dir
+faro-cli agent upload   ${S} ./a.txt /home/user # local file → remote dir (renames on collision)
+faro-cli agent upload   ${S} ./a.txt /home/user --overwrite   # replace a file of the same name
 faro-cli agent transfer <transferId>            # poll until done/error
 \`\`\`
+
+To *inspect* a remote file you don't need \`download\` — \`read\` fetches the text on
+any protocol and prints it. Reserve \`download\` for binaries, for files over
+256 KiB, and for when the user actually wants a local copy.
+
+**Windows targets:** pass remote paths with forward slashes (\`C:/Users/Juan/app\`)
+or in single quotes. Unquoted \`C:\\Users\\Juan\` loses its backslashes in bash and
+becomes \`C:UsersJuan\`, which Windows resolves against the server's working
+directory — the transfer succeeds, into the wrong folder.
 
 ## Upload or sync a directory
 
@@ -386,14 +397,36 @@ must be on your PATH; if it isn't, the user can give you its full path.)
 
 ${savedBlock}## Browse / read / search
 
-Use these for everyday file and diagnostics work:
+Use these for everyday file and diagnostics work. They work on **every protocol**
+— SFTP, FTP/FTPS, S3, WebDAV, cloud drives, Faro Agent — not just SSH:
 
 \`\`\`bash
 faro-cli agent ls     ${S} /var/log
-faro-cli agent read   ${S} /etc/hostname       # SSH/SFTP, capped at 256 KiB
+faro-cli agent read   ${S} /etc/hostname       # any protocol, capped at 256 KiB
 faro-cli agent search ${S} ".log" /var/log     # search <server> <query> [path]
 faro-cli agent info   ${S}                      # protocol, host, port, …
 \`\`\`
+
+## Change files on the server
+
+You can edit the remote filesystem directly — **never** tell the user to go do it
+by hand in Faro's file manager or their host's control panel:
+
+\`\`\`bash
+faro-cli agent write ${S} /var/www/.htaccess --content "…" --overwrite  # replace a file's contents
+faro-cli agent rm    ${S} /var/www/shell.php                            # delete a file
+faro-cli agent rm    ${S} /var/www/old-cache -r                         # delete a directory + contents
+faro-cli agent mv    ${S} /var/www/shell.php /var/www/shell.php.quarantine
+faro-cli agent mkdir ${S} /var/www/releases
+\`\`\`
+
+**\`write\` replaces; \`upload\` renames.** To change what's already at a path, use
+\`write --overwrite\` (or \`upload --overwrite\`). A plain \`upload\` deliberately
+side-steps a collision — \`shell.php\` lands as \`shell_1.php\` and the original is
+left exactly as it was, which is silently wrong when the intent was to replace it.
+
+Deletes are irreversible. When the file might still be wanted (suspected malware,
+a config you're replacing), \`mv\` it aside instead of deleting it.
 
 ## Run a status or diagnostic command (SSH or Faro Agent)
 
@@ -412,9 +445,19 @@ commands unless the user explicitly asks for them.
 
 \`\`\`bash
 faro-cli agent download ${S} /etc/hosts         # → the user's Downloads folder
-faro-cli agent upload   ${S} ./a.txt /home/user # local file → remote dir
+faro-cli agent upload   ${S} ./a.txt /home/user # local file → remote dir (renames on collision)
+faro-cli agent upload   ${S} ./a.txt /home/user --overwrite   # replace a file of the same name
 faro-cli agent transfer <transferId>            # poll until done/error
 \`\`\`
+
+To *inspect* a remote file you don't need \`download\` at all — \`read\` fetches the
+text on any protocol and prints it. Reserve \`download\` for binaries, for files
+over 256 KiB, and for when the user actually wants a local copy.
+
+**Windows targets:** pass remote paths with forward slashes (\`C:/Users/Juan/app\`)
+or in single quotes. Unquoted \`C:\\Users\\Juan\` loses its backslashes in bash and
+becomes \`C:UsersJuan\`, which Windows resolves against the server's working
+directory — the transfer succeeds, into the wrong folder.
 
 ## Upload or sync a directory
 
@@ -426,6 +469,11 @@ faro-cli agent sync ${S} ./dist /var/www/app --dry-run   # preview — nothing c
 faro-cli agent sync ${S} ./dist /var/www/app             # push new/changed files
 faro-cli agent upload-dir ${S} ./dist /var/www/releases  # upload the whole tree
 \`\`\`
+
+\`sync\` walks the whole remote tree before it does anything, so point it at a
+specific subdirectory rather than a docroot with a big \`uploads/\` under it — a
+huge tree can outrun the request. For a handful of files, \`write\`/\`upload\` per
+file is faster and more predictable.
 
 Staged deploy in one line:
 \`faro-cli agent upload-dir ${S} ./dist /var/www/releases && faro-cli agent exec ${S} "ln -sfn /var/www/releases/dist /var/www/current"\`

@@ -196,6 +196,7 @@ async function dispatch(cmd: string, a: Args): Promise<unknown> {
     case "transfer_resume_all":
     case "transfer_set_concurrency":
     case "transfer_set_throttle":
+    case "transfer_set_delta_sync":
       transfers.handle(cmd, a);
       return null;
     case "transfer_queue_state":

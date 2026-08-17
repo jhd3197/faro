@@ -94,6 +94,8 @@ Three new units, plus wiring into the existing app:
 | `Exec{command,timeoutMs,maxBytes}` | run a native shell command       |
 | `ExecStart{jobId,command,maxBytes}` | launch a detached background job |
 | `ExecPoll{jobId}` / `ExecKill{jobId}` | poll / kill a background job    |
+| `Signature{path}`   | CDC chunk signature of a file (delta sync)      |
+| `DeltaAssemble{basis,patch,recipe,dest,expectedHash}` | reassemble dest from basis + patch, hash-verify, atomic rename |
 
 The `ExecStart`/`ExecPoll`/`ExecKill` trio is **additive** (Plan 10 Phase 4) — a
 pre-Plan-10 daemon doesn't recognise it, so the controller degrades to a clear
@@ -103,6 +105,23 @@ unchanged, so every existing op keeps working against an older daemon.
 Every logical message is JSON, split into ≤64 KiB Noise segments (each with a
 continuation flag) so large directory listings and file chunks stream safely
 under Noise's per-message size limit.
+
+## Delta sync
+
+Transfers to and from a paired machine are **block-level differential**
+(Plan 23): re-transferring a changed file of 8 MB or more sends only the
+changed blocks instead of the whole file, in both directions. Both sides
+chunk content identically (FastCDC + BLAKE3), so the app diffs the remote
+file's chunk signature against the local copy, moves only the unmatched
+bytes, and the receiver reassembles + hash-verifies + atomically renames —
+the destination is never partially written.
+
+There is **nothing to configure** (an opt-out toggle lives in Settings →
+Transfers). The one requirement is that the app and the daemon come from the
+same release train: an older `faro-agentd` doesn't recognise the new ops, and
+the transfer **silently falls back to a whole-file copy** — no error, no data
+loss, just no savings. Every other backend (SFTP, S3, FTP, …) always uses
+whole-file copies.
 
 ## Agent Bridge ops on a paired machine
 

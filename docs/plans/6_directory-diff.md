@@ -1,5 +1,11 @@
 # Plan 6 — Directory Diff (GUI + CLI + MCP)
 
+> **Status: ✅ built (all 4 phases) — 2026-08-09.** Engine, `faro-cli diff`,
+> `faro_diff` bridge/MCP tool, and the GUI two-tree view are in. CLI
+> runtime-verified local↔local (with/without `--hash`, `--json`); live-backend
+> run + GUI click-through still open. GUI copy-across actions need one local
+> side (the transfer engine is local↔remote only).
+
 ## Context
 
 A Meld/Beyond Compare for directory trees, across **any** Faro backend —

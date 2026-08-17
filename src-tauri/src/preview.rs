@@ -214,13 +214,17 @@ fn downscale_png(bytes: &[u8], max_edge: u32) -> Result<Vec<u8>> {
 
 /// Read up to `max` bytes from the head of a file, using each backend's native
 /// API. This is the bounded-read primitive the whole plan hinges on — it mirrors
-/// `transfer::remote_size`'s per-`Session` dispatch. Backends without a clean
-/// bounded read here return an error the caller shows as "no preview".
+/// `transfer::remote_size`'s per-`Session` dispatch.
+///
+/// Also the engine behind the Agent Bridge's `read_file` on backends with no
+/// in-place read op (`bridge::op_read_file_fetch`), which is why the match is
+/// exhaustive over `Session`: a new backend must say how to read its bytes, not
+/// silently fall into a "not supported" arm.
 ///
 /// `session == None` is the local filesystem. Because the caller has already
 /// size-gated to `MAX_PREVIEW_FILE_BYTES`, a `max` of that value reads the whole
 /// (small enough) file — enough to decode — while still capping the transfer.
-async fn read_head(session: Option<&Session>, path: &str, max: u64) -> Result<Vec<u8>> {
+pub(crate) async fn read_head(session: Option<&Session>, path: &str, max: u64) -> Result<Vec<u8>> {
     match session {
         None => read_local(path, max).await,
         Some(Session::Ssh(ssh)) => {
@@ -294,7 +298,39 @@ async fn read_head(session: Option<&Session>, path: &str, max: u64) -> Result<Ve
             let data = crate::remotefs::dynamics::read_file(dynm, path).await?;
             Ok(data.into_iter().take(max as usize).collect())
         }
-        Some(other) => bail!("preview not supported for {} yet", other.protocol()),
+        // The consumer-cloud four stream the whole body (their download
+        // endpoints ignore Range), so `collect_capped` stops reading and drops
+        // the rest once it has `max` bytes.
+        Some(Session::Dropbox(dbx)) => {
+            let arg = serde_json::json!({
+                "path": crate::remotefs::dropbox::dropbox_api_path(path)
+            })
+            .to_string();
+            let resp = dbx.content_get("/2/files/download", &arg).await?;
+            collect_capped(resp.bytes_stream().map(|r| r.map_err(anyhow::Error::from)), max).await
+        }
+        Some(Session::OneDrive(od)) => {
+            let resp = od
+                .get_stream(&crate::remotefs::onedrive::content_ref(path))
+                .await?;
+            collect_capped(resp.bytes_stream().map(|r| r.map_err(anyhow::Error::from)), max).await
+        }
+        Some(Session::GDrive(gd)) => {
+            let (file_id, _) = gd
+                .resolve_item(path)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("{path}: not found"))?;
+            let resp = gd.get_stream(&format!("/files/{file_id}?alt=media")).await?;
+            collect_capped(resp.bytes_stream().map(|r| r.map_err(anyhow::Error::from)), max).await
+        }
+        Some(Session::Box(bx)) => {
+            let (file_id, _) = bx
+                .resolve_item(path)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("{path}: not found"))?;
+            let resp = bx.get_stream(&format!("/files/{file_id}/content")).await?;
+            collect_capped(resp.bytes_stream().map(|r| r.map_err(anyhow::Error::from)), max).await
+        }
     }
 }
 

@@ -220,6 +220,7 @@ mod tests {
         .expect("seed");
 
         let profile = ConnectionProfile {
+            icon: None,
             id: pid.into(),
             name: "bx".into(),
             protocol: "box".into(),

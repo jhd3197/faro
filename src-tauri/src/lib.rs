@@ -13,6 +13,7 @@ mod cli_updater;
 pub mod credentials;
 pub mod db;
 mod deeplink;
+pub mod dedupe;
 pub mod diff;
 pub mod error;
 mod diskscan;
@@ -56,6 +57,8 @@ pub struct AppState {
     pub diskscan: Arc<diskscan::ScanManager>,
     /// Running directory diffs (Plan 6). Ephemeral — not persisted.
     pub diff: Arc<diff::DiffManager>,
+    /// Running duplicate scans. Ephemeral — not persisted.
+    pub dedupe: Arc<dedupe::DedupeManager>,
     /// Running fleet searches (Plan 7). Ephemeral — not persisted.
     pub search: Arc<search::SearchManager>,
     /// Shared `faro.db` — the per-connection index (sync_state today; scan/search
@@ -244,15 +247,17 @@ pub fn run() {
                 ),
                 diskscan: Arc::new(diskscan::ScanManager::new()),
                 diff: Arc::new(diff::DiffManager::new()),
+                dedupe: Arc::new(dedupe::DedupeManager::new()),
                 search: Arc::new(search::SearchManager::new()),
                 db,
                 preview,
             };
             app.manage(state);
 
-            // Apply persisted transfer-queue settings (Plan 17). The frontend
-            // writes `transferConcurrency`/`transferThrottleKbps` via the
-            // settings table; the manager starts from those values.
+            // Apply persisted transfer-queue settings (Plan 17, Plan 23). The
+            // frontend writes `transferConcurrency`/`transferThrottleKbps`/
+            // `deltaSync` via the settings table; the manager starts from
+            // those values.
             {
                 let st = app.state::<AppState>();
                 if let Ok(Some(raw)) = st.db.settings_get("transferConcurrency") {
@@ -263,6 +268,13 @@ pub fn run() {
                 if let Ok(Some(raw)) = st.db.settings_get("transferThrottleKbps") {
                     if let Ok(kbps) = serde_json::from_str::<u64>(&raw) {
                         st.transfers.set_throttle_kbps(kbps);
+                    }
+                }
+                // Plan 23: the `deltaSync` toggle (default on). Absent row →
+                // the manager's own default already has it enabled.
+                if let Ok(Some(raw)) = st.db.settings_get("deltaSync") {
+                    if let Ok(on) = serde_json::from_str::<bool>(&raw) {
+                        st.transfers.set_delta_enabled(on);
                     }
                 }
             }
@@ -370,6 +382,12 @@ pub fn run() {
             diff::diff_result,
             diff::diff_cancel,
             diff::diff_forget,
+            dedupe::dedupe_start,
+            dedupe::dedupe_status,
+            dedupe::dedupe_result,
+            dedupe::dedupe_cancel,
+            dedupe::dedupe_forget,
+            dedupe::dedupe_delete,
             search::search_start,
             search::search_status,
             search::search_result,
@@ -414,6 +432,7 @@ pub fn run() {
             commands::transfer_resume_all,
             commands::transfer_set_concurrency,
             commands::transfer_set_throttle,
+            commands::transfer_set_delta_sync,
             commands::transfer_queue_state,
             commands::rename_path,
             commands::delete_path,

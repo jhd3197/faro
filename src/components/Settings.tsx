@@ -172,6 +172,12 @@ export function Settings({ onClose }: Props) {
                 suffix="KiB/s"
               />
             </Field>
+            <ToggleField
+              label="Delta sync (send only changed blocks)"
+              help="Re-transferring a changed file sends just the differing blocks instead of the whole file. Only for Faro Agent connections, files ≥ 8 MB."
+              checked={s.deltaSync}
+              onChange={s.setDeltaSync}
+            />
             <Field
               label="Download folder"
               help="Where downloads land. Leave blank to use your system Downloads folder."

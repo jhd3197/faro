@@ -44,6 +44,9 @@ const DEBOUNCE: Duration = Duration::from_millis(700);
 /// running in the TransferManager; we just stop blocking the pair's status on
 /// them so the next tick can proceed).
 const TRANSFER_WAIT_CAP: Duration = Duration::from_secs(30 * 60);
+/// Delta-sync temp files older than this are crash litter (Plan 23 Phase 3) —
+/// a live transfer's temps are minutes old at most.
+const DELTA_TEMP_MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -469,6 +472,15 @@ async fn reconcile_inner(
     pair: &SyncPair,
     session_id: &mut Option<String>,
 ) -> Result<Option<String>> {
+    // Delta-sync temp hygiene (Plan 23 Phase 3): a crash mid-delta can strand
+    // `.faro-patch-*` / `.faro-new-*` / `.faro-delta-*.tmp` files next to the
+    // synced files. Best-effort sweep of day-old ones, once per reconcile,
+    // LOCAL root only — remote-side temps are the daemon's own concern.
+    {
+        let root = pair.local_root.clone();
+        let _ = tokio::task::spawn_blocking(move || sweep_delta_temps(Path::new(&root))).await;
+    }
+
     // Ensure a live session for this pair's connection.
     let session = ensure_session(app, state, pair, session_id).await?;
 
@@ -557,6 +569,46 @@ fn snapshot_index(
     for rel in before.keys() {
         if !source_tree.files.contains_key(rel) {
             let _ = db.delete_sync_state(pair_id, rel);
+        }
+    }
+}
+
+/// Best-effort recursive sweep of delta-sync temp files (`*.faro-patch-*`,
+/// `*.faro-new-*`, `*.faro-delta-*.tmp`) older than [`DELTA_TEMP_MAX_AGE`]
+/// under the LOCAL sync root (Plan 23 Phase 3). The matcher is filename-only
+/// and the prefixes are delta-specific, so a normal user file can never
+/// match; every error is ignored — a locked or racing temp simply survives to
+/// the next reconcile.
+fn sweep_delta_temps(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_dir() {
+            sweep_delta_temps(&path);
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_delta_temp = name.contains(".faro-patch-")
+            || name.contains(".faro-new-")
+            || name.contains(".faro-delta-");
+        if !is_delta_temp {
+            continue;
+        }
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|m| m.elapsed().ok())
+            .map(|age| age > DELTA_TEMP_MAX_AGE)
+            .unwrap_or(false);
+        if stale {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::debug!("folder sync: delta temp sweep {}: {e:#}", path.display());
+            }
         }
     }
 }
@@ -756,7 +808,7 @@ fn glob_rec(p: &[u8], t: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_safety, is_excluded, SyncMode, SyncPair};
+    use super::{apply_safety, is_excluded, sweep_delta_temps, SyncMode, SyncPair};
     use crate::sync::{self, SyncDirection, SyncStrategy};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -806,6 +858,42 @@ mod tests {
         let p = root.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, body).unwrap();
+    }
+
+    /// Delta-temp sweep (Plan 23 Phase 3): stale `*.faro-patch-*` /
+    /// `*.faro-new-*` / `*.faro-delta-*.tmp` files are removed (even nested);
+    /// fresh temps and normal files are untouched.
+    #[test]
+    fn delta_temp_sweep_removes_only_stale_temps() {
+        use std::time::{Duration, SystemTime};
+
+        let root = scratch("sweep");
+        write(&root, "sub/.faro-patch-abc", "x");
+        write(&root, "file.bin.faro-new-123-4", "x");
+        write(&root, ".faro-delta-xyz.tmp", "x");
+        write(&root, "fresh.faro-patch-def", "x");
+        write(&root, "normal.txt", "x");
+
+        // Age the three stale temps past the 24 h cutoff.
+        let old = SystemTime::now() - Duration::from_secs(48 * 60 * 60);
+        for rel in ["sub/.faro-patch-abc", "file.bin.faro-new-123-4", ".faro-delta-xyz.tmp"] {
+            std::fs::File::options()
+                .write(true)
+                .open(root.join(rel))
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+
+        sweep_delta_temps(&root);
+
+        assert!(!root.join("sub/.faro-patch-abc").exists(), "stale nested patch swept");
+        assert!(!root.join("file.bin.faro-new-123-4").exists(), "stale assemble temp swept");
+        assert!(!root.join(".faro-delta-xyz.tmp").exists(), "stale download temp swept");
+        assert!(root.join("fresh.faro-patch-def").exists(), "fresh temp survives");
+        assert!(root.join("normal.txt").exists(), "normal file survives");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     fn pair(exclude: &[&str], cap: u32) -> SyncPair {

@@ -95,6 +95,9 @@ interface SettingsState {
   transferConcurrency: number;
   /** Global bandwidth cap in KiB/s (0 = unlimited). Live-applied. */
   transferThrottleKbps: number;
+  /** Delta sync: send only changed blocks on re-transfers (Faro Agent
+   *  connections, files ≥ 8 MB). Live-applied; `FARO_DELTA=0` overrides. */
+  deltaSync: boolean;
   /** Where downloads land. Blank = the OS Downloads folder. */
   defaultDownloadFolder: string;
   /** Command/path used to open files for edit-in-place. Blank = OS default app. */
@@ -141,6 +144,7 @@ interface SettingsState {
   setAutoOpenTransferPanel: (v: boolean) => void;
   setTransferConcurrency: (n: number) => void;
   setTransferThrottleKbps: (n: number) => void;
+  setDeltaSync: (v: boolean) => void;
   setDefaultDownloadFolder: (s: string) => void;
   setDefaultEditor: (s: string) => void;
   setShowHiddenFiles: (v: boolean) => void;
@@ -173,6 +177,7 @@ type Persisted = Omit<
   | "setAutoOpenTransferPanel"
   | "setTransferConcurrency"
   | "setTransferThrottleKbps"
+  | "setDeltaSync"
   | "setDefaultDownloadFolder"
   | "setDefaultEditor"
   | "setShowHiddenFiles"
@@ -202,9 +207,13 @@ const DEFAULTS: Persisted = {
   autoOpenTransferPanel: true,
   transferConcurrency: 3,
   transferThrottleKbps: 0,
+  deltaSync: true,
   defaultDownloadFolder: "",
   defaultEditor: "",
-  showHiddenFiles: false,
+  // On by default: Faro's work is server admin, where the interesting files are
+  // dotfiles (.htaccess, .env, .ssh/, .git/). Hiding them by default made them
+  // look absent rather than filtered.
+  showHiddenFiles: true,
   sortField: "name",
   sortDirection: "asc",
   paneViewMode: "grid",
@@ -297,6 +306,11 @@ export const useSettings = create<SettingsState>((set, get) => ({
   setTransferThrottleKbps: (n) => {
     mutate(set, get, "transferThrottleKbps", n);
     ipc.transferSetThrottle(n).catch(() => {});
+  },
+  setDeltaSync: (v) => {
+    mutate(set, get, "deltaSync", v);
+    // Live-apply to the transfer engine; the persisted value covers next launch.
+    ipc.transferSetDeltaSync(v).catch(() => {});
   },
   setDefaultDownloadFolder: (s) =>
     mutate(set, get, "defaultDownloadFolder", s),

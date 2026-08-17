@@ -496,6 +496,68 @@ export interface DiffProgress {
   filesB: number;
 }
 
+// ---- Duplicate finder (mirrors src-tauri/src/dedupe.rs) ----
+
+export type DedupeMode = "name" | "hash";
+export type DedupeRunState = "scanning" | "done" | "error" | "canceled";
+export type DedupePhase = "walking" | "hashing";
+
+/** One file inside a duplicate group. */
+export interface DedupeFile {
+  path: string;
+  size: number;
+  modified: number;
+}
+
+/** A set of files believed identical; `keep` is the suggested survivor index. */
+export interface DedupeGroup {
+  key: string;
+  size: number;
+  hash?: string;
+  files: DedupeFile[];
+  keep: number;
+}
+
+export interface DedupeSummary {
+  filesScanned: number;
+  groups: number;
+  /** Files that would be deleted keeping one per group. */
+  duplicateFiles: number;
+  /** Bytes reclaimed keeping one per group. */
+  wastedBytes: number;
+  hashErrors: number;
+}
+
+export interface DedupeResult {
+  root: string;
+  mode: DedupeMode;
+  summary: DedupeSummary;
+  groups: DedupeGroup[];
+}
+
+/** A dedupe snapshot: live counts while scanning, the `result` once done. */
+export interface DedupeSnapshot {
+  id: string;
+  sessionId: string;
+  path: string;
+  mode: DedupeMode;
+  state: DedupeRunState;
+  phase: DedupePhase;
+  filesFound: number;
+  hashed: number;
+  error?: string;
+  result?: DedupeResult;
+  startedAt: number;
+}
+
+/** The lightweight `dedupe://progress` event body. */
+export interface DedupeProgress {
+  id: string;
+  phase: DedupePhase;
+  filesFound: number;
+  hashed: number;
+}
+
 // ---- Fleet Search (mirrors src-tauri/src/search.rs) ----
 
 export type SearchKind = "name" | "content";
@@ -1039,6 +1101,12 @@ export interface Transfer {
   /** Set while the backend auto-retries a failed transfer (`error` reads
    *  "retrying in Ns (attempt N/3)"). */
   retryAttempt?: number;
+  /** Delta-sync stats (Plan 23), present only when the transfer ran over the
+   *  Faro Agent backend with delta enabled. `sent` = literal bytes that
+   *  crossed the wire; `reused` = bytes sourced from the basis instead.
+   *  `sent + reused` equals the total file size. Set before finalize, so it
+   *  persists on done transfers. */
+  delta?: { sent: number; reused: number };
   startedAt: number;
 }
 
