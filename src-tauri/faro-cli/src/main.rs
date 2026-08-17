@@ -388,9 +388,9 @@ enum AgentCmd {
         /// Remote directory (default: ".").
         path: Option<String>,
     },
-    /// Read a remote text file (SSH/SFTP, capped at 256 KiB).
+    /// Read a remote text file (any protocol, capped at 256 KiB).
     Read { server: String, path: String },
-    /// Read several remote text files at once (SSH/SFTP, total capped at 1 MiB).
+    /// Read several remote text files at once (any protocol, total capped at 1 MiB).
     ReadBatch {
         server: String,
         /// Remote file paths. Pass multiple times or space-separated.
@@ -466,11 +466,35 @@ enum AgentCmd {
         local_dir: Option<String>,
     },
     /// Upload a local file into a remote directory.
+    ///
+    /// A name collision is RENAMED by default (uploading `x.php` next to an
+    /// existing `x.php` lands as `x_1.php`, leaving the original in place). To
+    /// REPLACE the remote file, pass `--overwrite` — or use `agent write` for
+    /// text you can pass inline.
     Upload {
         server: String,
         local_path: String,
         remote_dir: String,
+        /// Replace an existing remote file of the same name (default: rename).
+        #[arg(long)]
+        overwrite: bool,
     },
+    /// Delete a remote file or directory (any protocol).
+    Rm {
+        server: String,
+        path: String,
+        /// Required to delete a directory: removes everything inside it.
+        #[arg(long, short)]
+        recursive: bool,
+    },
+    /// Rename or move a remote path, server-side (any protocol that supports it).
+    Mv {
+        server: String,
+        from: String,
+        to: String,
+    },
+    /// Create a remote directory (one level; the parent must exist).
+    Mkdir { server: String, path: String },
     /// Upload a whole local directory tree into a remote directory. One
     /// approval covers the tree; the prompt shows file/byte counts.
     UploadDir {
@@ -2005,9 +2029,27 @@ fn guard_mangled_remote_path(ep: &Endpoint, session_id: &str, remote_path: &str)
     check_mangled_remote_path(remote_path, is_windows_target)
 }
 
+/// True when `p` is a drive letter whose separator went missing — `C:UsersJuan`.
+/// That is what an unquoted `C:\Users\Juan` becomes in bash/zsh, where each
+/// backslash escapes the character after it. Windows reads the result as a
+/// *drive-relative* path, so it resolves against the daemon's working directory
+/// instead of failing — the upload lands somewhere real but wrong, silently.
+fn is_collapsed_windows_path(p: &str) -> bool {
+    let b = p.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] != b'/' && b[2] != b'\\'
+}
+
 /// Pure decision behind [`guard_mangled_remote_path`], split out so the
 /// reject/allow rule and its message are unit-testable without a live bridge.
 fn check_mangled_remote_path(remote_path: &str, is_windows_target: bool) -> Result<()> {
+    if is_collapsed_windows_path(remote_path) {
+        bail!(
+            "`{remote_path}` is missing its path separators — your shell ate the backslashes \
+             (in bash, `C:\\Users\\Juan` collapses to `C:UsersJuan`). Windows would resolve that \
+             against the server's current directory and put the file somewhere you didn't mean. \
+             Use forward slashes (`C:/Users/Juan`) or single-quote the path ('C:\\Users\\Juan')."
+        );
+    }
     if !is_windows_drive_path(remote_path) || is_windows_target {
         return Ok(());
     }
@@ -2347,15 +2389,50 @@ fn cmd_agent(action: AgentCmd) -> Result<()> {
             println!("wrote {} to {p}", fmt_bytes(n));
             Ok(())
         }
-        AgentCmd::Upload { server, local_path, remote_dir } => {
+        AgentCmd::Upload { server, local_path, remote_dir, overwrite } => {
             let id = resolve_server(&ep, &server)?;
             guard_mangled_remote_path(&ep, &id, &remote_dir)?;
             let body = http_post(
                 &ep,
                 "/upload",
-                serde_json::json!({ "sessionId": id, "localPath": local_path, "remoteDir": remote_dir }),
+                serde_json::json!({
+                    "sessionId": id,
+                    "localPath": local_path,
+                    "remoteDir": remote_dir,
+                    "overwrite": overwrite,
+                }),
             )?;
             print_transfer_started(&body);
+            Ok(())
+        }
+        AgentCmd::Rm { server, path, recursive } => {
+            let id = resolve_server(&ep, &server)?;
+            guard_mangled_remote_path(&ep, &id, &path)?;
+            http_post(
+                &ep,
+                "/delete",
+                serde_json::json!({ "sessionId": id, "path": &path, "recursive": recursive }),
+            )?;
+            println!("deleted {path}");
+            Ok(())
+        }
+        AgentCmd::Mv { server, from, to } => {
+            let id = resolve_server(&ep, &server)?;
+            guard_mangled_remote_path(&ep, &id, &from)?;
+            guard_mangled_remote_path(&ep, &id, &to)?;
+            http_post(
+                &ep,
+                "/rename",
+                serde_json::json!({ "sessionId": id, "from": &from, "to": &to }),
+            )?;
+            println!("renamed {from} → {to}");
+            Ok(())
+        }
+        AgentCmd::Mkdir { server, path } => {
+            let id = resolve_server(&ep, &server)?;
+            guard_mangled_remote_path(&ep, &id, &path)?;
+            http_post(&ep, "/mkdir", serde_json::json!({ "sessionId": id, "path": &path }))?;
+            println!("created {path}");
             Ok(())
         }
         AgentCmd::UploadDir { server, local_dir, remote_dir, overwrite } => {
@@ -3211,6 +3288,22 @@ mod tests {
         // A normal POSIX remote path is always fine, target OS regardless.
         assert!(check_mangled_remote_path("/var/www/html", false).is_ok());
         assert!(check_mangled_remote_path("//var/www", false).is_ok());
+    }
+
+    #[test]
+    fn collapsed_windows_path_is_rejected_on_any_target() {
+        // `C:\Users\Juan` unquoted in bash arrives like this; Windows would
+        // resolve it drive-relative and drop the file in the wrong directory.
+        for target_is_windows in [true, false] {
+            let err = check_mangled_remote_path("C:UsersJuan", target_is_windows)
+                .expect_err("collapsed drive path should be rejected");
+            assert!(format!("{err}").contains("missing its path separators"));
+        }
+        // Properly separated drive paths are still fine on a Windows target.
+        assert!(check_mangled_remote_path(r"C:\Users\Juan", true).is_ok());
+        assert!(check_mangled_remote_path("C:/Users/Juan", true).is_ok());
+        // A bare relative path has no drive letter to collapse.
+        assert!(check_mangled_remote_path("public_html/wp-content", false).is_ok());
     }
 
     #[test]

@@ -258,6 +258,21 @@ fn now_ts() -> i64 {
         .unwrap_or(0)
 }
 
+/// Join a remote directory and a file name using the separator the directory
+/// already speaks: backslash for a Windows-style path (`C:\srv`, `\\host\share`),
+/// forward slash everywhere else. An existing trailing separator is reused
+/// rather than doubled.
+fn join_remote(dir: &str, name: &str) -> String {
+    if dir.is_empty() {
+        return name.to_string();
+    }
+    if dir.ends_with('/') || dir.ends_with('\\') {
+        return format!("{dir}{name}");
+    }
+    let windows_style = dir.contains('\\') && !dir.contains('/');
+    format!("{dir}{}{name}", if windows_style { '\\' } else { '/' })
+}
+
 fn basename(path: &str) -> String {
     path.rsplit(|c| c == '/' || c == '\\')
         .next()
@@ -876,11 +891,11 @@ impl TransferManager {
             .with_context(|| format!("stat {}", local.display()))?
             .len();
 
-        let initial_remote = if remote_dir.ends_with('/') {
-            format!("{remote_dir}{}", basename(&local_path))
-        } else {
-            format!("{remote_dir}/{}", basename(&local_path))
-        };
+        // Join with the separator the destination already uses, and don't add a
+        // second one. A Windows agent target spelled `C:\srv\` used to produce
+        // `C:\srv\/file` — Win32 tolerates it, but it shows up in every error
+        // message and audit line, and the mixed form trips path comparisons.
+        let initial_remote = join_remote(&remote_dir, &basename(&local_path));
 
         let (final_remote, skip) = remote_resolve(&session, &initial_remote, policy).await?;
 
@@ -1565,11 +1580,7 @@ impl TransferManager {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "upload".into());
-        let remote_root = if remote_dir.ends_with('/') {
-            format!("{remote_dir}{root_name}")
-        } else {
-            format!("{remote_dir}/{root_name}")
-        };
+        let remote_root = join_remote(&remote_dir, &root_name);
 
         let fs = fs_for_session(&session);
 
@@ -2760,7 +2771,7 @@ async fn agent_stat(
 }
 
 /// Lookup the size of a remote file using each backend's native API.
-async fn remote_size(session: &Arc<Session>, path: &str) -> Result<u64> {
+pub(crate) async fn remote_size(session: &Arc<Session>, path: &str) -> Result<u64> {
     match &**session {
         Session::Ssh(ssh) => {
             let cell = ssh.ensure_sftp().await?;
@@ -3453,6 +3464,19 @@ mod tests {
             "Permission denied (os error 13)"
         )));
         assert!(!is_transient(&anyhow::anyhow!("No such file or directory")));
+    }
+
+    #[test]
+    fn remote_join_follows_the_destination_style() {
+        // POSIX destinations keep forward slashes, with or without a trailing one.
+        assert_eq!(join_remote("/var/www", "a.txt"), "/var/www/a.txt");
+        assert_eq!(join_remote("/var/www/", "a.txt"), "/var/www/a.txt");
+        // A Windows agent target keeps backslashes instead of going mixed.
+        assert_eq!(join_remote(r"C:\srv", "a.txt"), r"C:\srv\a.txt");
+        assert_eq!(join_remote(r"C:\srv\", "a.txt"), r"C:\srv\a.txt");
+        // Forward-slashed Windows paths are already unambiguous — leave them be.
+        assert_eq!(join_remote("C:/srv", "a.txt"), "C:/srv/a.txt");
+        assert_eq!(join_remote("", "a.txt"), "a.txt");
     }
 
     // ---------- Delta sync (Phase 2) ----------
