@@ -96,13 +96,28 @@ const ZH: Record<string, string> = {
   "Collapse rail": "收起侧栏",
   "Add your first server": "添加第一台服务器",
   "New connection": "新建连接",
+  "New Connection": "新建连接",
   "Import connections": "导入连接",
+  "Import connections…": "导入连接…",
   Connect: "连接",
   "Switch to": "切换到",
   "Connect & open shell": "连接并打开 Shell",
   "Open shell": "打开 Shell",
+  "Open Shell": "打开 Shell",
+  "Properties / Edit…": "属性 / 编辑…",
+  "New group…": "新建分组…",
+  "Rename group…": "重命名分组…",
+  "Move to ": "移动到 ",
   Disconnect: "断开连接",
   Delete: "删除",
+  "Disable auto-connect": "禁用启动时自动连接",
+  "Auto-connect on startup": "启动时自动连接",
+  "Enable Agent Bridge": "启用智能代理桥接",
+  "Disable Agent Bridge": "禁用智能代理桥接",
+  "Open bridge panel": "打开桥接面板",
+  "Start bridge": "启动桥接",
+  "Stop bridge": "停止桥接",
+  "Disable agent access": "禁用代理访问",
   "Search servers": "搜索服务器",
   "Search servers · /": "搜索服务器 · /",
   "Search servers  ·  /": "搜索服务器 · /",
@@ -203,6 +218,7 @@ const ZH: Record<string, string> = {
   "More info": "更多信息",
   "Pick a bubble icon": "选择图标",
   "Command palette": "命令面板",
+  "Command palette…": "命令面板…",
   "New Connection…": "新建连接…",
   "Import Connections…": "导入连接…",
   "Open Settings": "打开设置",
@@ -212,6 +228,17 @@ const ZH: Record<string, string> = {
   "Toggle Agent console (live)": "切换代理控制台（实时）",
   "About Faro": "关于 Faro",
   "Reload Window": "重新加载窗口",
+  "Reload window": "重新加载窗口",
+  "Preferences…": "偏好设置…",
+  Quit: "退出",
+  "Toggle terminal": "切换终端",
+  "Toggle transfer queue": "切换传输队列",
+  "Transfer queue": "传输队列",
+  "Switch to dark theme": "切换到深色主题",
+  "Switch to light theme": "切换到浅色主题",
+  "Keyboard shortcuts": "键盘快捷键",
+  "GitHub repository": "GitHub 仓库",
+  "Report an issue": "报告问题",
   Connection: "连接",
   Snippets: "代码片段",
   "Theme: ": "主题：",
@@ -305,6 +332,8 @@ const ZH: Record<string, string> = {
   "Upload a folder": "上传文件夹",
   "Upload files": "上传文件",
   "New folder": "新建文件夹",
+  "New folder…": "新建文件夹…",
+  "New folder...": "新建文件夹…",
   Back: "后退",
   Forward: "前进",
   Up: "上一级",
@@ -424,6 +453,40 @@ function translate(value: string): string {
   const normalized = trimmed.replace(/\s+/g, " ");
   const exact = ZH[trimmed] ?? ZH[normalized];
   if (exact) return value.replace(trimmed, exact);
+  const moveTo = normalized.match(/^Move to \"(.+)\"$/);
+  if (moveTo) return value.replace(trimmed, `移动到“${moveTo[1]}”`);
+  if (normalized === "Folder Sync — keep folders mirrored to your servers") {
+    return value.replace(trimmed, "文件夹同步 — 保持文件夹与服务器镜像同步");
+  }
+  const syncStatus = normalized.match(
+    /^Folder Sync — (\d+) running(?:, (\d+) syncing)? of (\d+)$/
+  );
+  if (syncStatus) {
+    const [, running, syncing, total] = syncStatus;
+    const status = syncing ? `，${syncing} 个同步中` : "";
+    return value.replace(
+      trimmed,
+      `文件夹同步 — ${running} 个运行中${status}，共 ${total} 个`
+    );
+  }
+  const bridgeStatus = normalized.match(
+    /^Agent Bridge( \(running\))? — let a local AI agent run commands on your servers$/
+  );
+  if (bridgeStatus) {
+    return value.replace(
+      trimmed,
+      `智能代理桥接${bridgeStatus[1] ? "（运行中）" : ""} — 让本地 AI 代理在服务器上运行命令`
+    );
+  }
+  if (normalized === "Agent console — live view of what the agent is doing over the bridge") {
+    return value.replace(trimmed, "代理控制台 — 实时查看代理通过桥接执行的操作");
+  }
+  if (normalized === "Split view — show local files next to the server") {
+    return value.replace(trimmed, "分栏视图 — 在服务器旁显示本地文件");
+  }
+  if (normalized === "Terminal is only available for SFTP sessions") {
+    return value.replace(trimmed, "终端仅适用于 SFTP 会话");
+  }
   return value
     .replace(/^Faro (.+) is available\.$/i, "Faro $1 可用。")
     .replace(/^Downloading update(.*)$/i, "正在下载更新$1")
