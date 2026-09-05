@@ -19,7 +19,6 @@ const ZH: Record<string, string> = {
   Terminal: "终端",
   Keyboard: "键盘",
   Connections: "连接",
-  "Remote control": "远程控制",
   "Folder Sync": "文件夹同步",
   "Agent Bridge": "智能代理桥接",
   Backup: "备份",
@@ -232,6 +231,71 @@ const ZH: Record<string, string> = {
   "Connect your AI agent": "连接你的 AI 代理",
   Recommended: "推荐",
   "MCP registered": "MCP 已注册",
+  "Couldn't register MCP": "MCP 注册失败",
+  "Couldn't start the scan": "无法开始扫描",
+  "Delete failed": "删除失败",
+  "Save failed": "保存失败",
+  "Couldn't open editor": "无法打开编辑器",
+  "Couldn't start disk usage scan": "无法开始磁盘占用扫描",
+  "Couldn't update saved password": "无法更新已保存的密码",
+  "Couldn't start Agent Bridge": "无法启动智能代理桥接",
+  "Couldn't stop Agent Bridge": "无法停止智能代理桥接",
+  "Couldn't update Agent Bridge": "无法更新智能代理桥接",
+  "Couldn't update agent access": "无法更新代理访问权限",
+  "Couldn't update auto-approve policy": "无法更新自动批准策略",
+  "Couldn't save command": "无法保存命令",
+  "Couldn't delete command": "无法删除命令",
+  "CLI check failed": "CLI 检查失败",
+  "faro-cli updated": "faro-cli 已更新",
+  "faro-cli update failed": "faro-cli 更新失败",
+  "Couldn't change setting": "无法更改设置",
+  "Couldn't start the diff": "无法开始比较",
+  "Couldn't export console": "无法导出控制台",
+  "Couldn't read PATH status": "无法读取 PATH 状态",
+  "Add to PATH failed": "加入 PATH 失败",
+  "Remove from PATH failed": "从 PATH 移除失败",
+  "Couldn't start the search": "无法开始搜索",
+  "Couldn't save edit": "无法保存编辑",
+  "Copy failed": "复制失败",
+  "Couldn't save skill": "无法保存技能",
+  "Couldn't delete skill": "无法删除技能",
+  "Couldn't approve skill": "无法批准技能",
+  "Dry-run failed": "试运行失败",
+  "Skill run failed": "技能运行失败",
+  "Couldn't open file": "无法打开文件",
+  "No targets picked": "未选择目标",
+  "Key generation failed": "密钥生成失败",
+  "Scan failed": "扫描失败",
+  "Pairing failed": "配对失败",
+  "Remote control unavailable": "远程控制不可用",
+  "Remote control": "远程控制",
+  "Pop out failed": "弹出窗口失败",
+  "Transfer failed": "传输失败",
+  "Update download failed": "更新下载失败",
+  "Couldn't restart": "无法重启",
+  "Couldn't save snippet": "无法保存代码片段",
+  "Couldn't delete snippet": "无法删除代码片段",
+  "Couldn't save sync pair": "无法保存同步对",
+  "Couldn't remove sync pair": "无法移除同步对",
+  "Couldn't update sync pair": "无法更新同步对",
+  "Couldn't start sync": "无法开始同步",
+  "Authentication failed": "认证失败",
+  "Reconnect or re-enter your credentials.": "重新连接或重新输入凭据。",
+  "Permission denied": "权限被拒绝",
+  "You don't have access to this path.": "你没有访问此路径的权限。",
+  "Not found": "未找到",
+  "It may have been moved or deleted.": "它可能已被移动或删除。",
+  "Connection problem": "连接问题",
+  "Check the connection and try again.": "检查连接后重试。",
+  "Timed out": "请求超时",
+  "The server took too long to respond.": "服务器响应时间过长。",
+  "Not supported": "不支持",
+  "This backend can't do that.": "此后端不支持该操作。",
+  "Already exists": "已存在",
+  "Choose a different name.": "请选择其他名称。",
+  "Something went wrong": "发生错误",
+  "No such file or directory": "文件或目录不存在",
+  "Connection refused": "连接被拒绝",
   "Register MCP": "注册 MCP",
   "Weak password": "密码强度不足",
   "Passwords don't match": "两次密码不一致",
@@ -520,6 +584,40 @@ function translate(value: string): string {
   }
   if (normalized === "Terminal is only available for SFTP sessions") {
     return value.replace(trimmed, "终端仅适用于 SFTP 会话");
+  }
+  const missingProgram = normalized.match(/^couldn't run ([^:]+): program not found$/i);
+  if (missingProgram) {
+    return value.replace(trimmed, `无法运行 ${missingProgram[1]}：找不到程序`);
+  }
+  if (/^program not found$/i.test(normalized)) {
+    return value.replace(trimmed, "找不到程序");
+  }
+  const connectTarget = normalized.match(/^Couldn't connect to (.+)$/i);
+  if (connectTarget) {
+    return value.replace(trimmed, `无法连接到 ${connectTarget[1]}`);
+  }
+  const authorization = normalized.match(/^(.+) authorization failed$/i);
+  if (authorization) {
+    return value.replace(trimmed, `${authorization[1]} 授权失败`);
+  }
+  const pathStatus = normalized.match(/^Couldn't read PATH status: (.+)$/i);
+  if (pathStatus) {
+    return value.replace(trimmed, `无法读取 PATH 状态：${pathStatus[1]}`);
+  }
+  const cliCheck = normalized.match(/^CLI check failed: (.+)$/i);
+  if (cliCheck) {
+    return value.replace(trimmed, `CLI 检查失败：${cliCheck[1]}`);
+  }
+  const cliUpdate = normalized.match(/^faro-cli update failed: (.+)$/i);
+  if (cliUpdate) {
+    return value.replace(trimmed, `faro-cli 更新失败：${cliUpdate[1]}`);
+  }
+  const pathFailure = normalized.match(/^(Add to PATH|Remove from PATH) failed: (.+)$/i);
+  if (pathFailure) {
+    const action = pathFailure[1].toLowerCase().startsWith("add")
+      ? "加入 PATH"
+      : "从 PATH 移除";
+    return value.replace(trimmed, `${action}失败：${pathFailure[2]}`);
   }
   return value
     .replace(/^Faro (.+) is available\.$/i, "Faro $1 可用。")
